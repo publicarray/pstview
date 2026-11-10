@@ -15,6 +15,8 @@ const exp = @import("export.zig");
 const win = @import("win.zig");
 const search = @import("search.zig");
 const headers = @import("headers.zig");
+const hreport = @import("headerreport.zig");
+const mime = @import("mime.zig");
 
 fn fmtLocal(buf: []u8, t: ?i64) []const u8 {
     const v = t orelse return "";
@@ -26,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    mime.charset_hook = &win.charsetToUtf8;
 
     var out_buf: [64 * 1024]u8 = undefined;
     var fw = Io.File.stdout().writer(io, &out_buf);
@@ -44,12 +47,14 @@ pub fn main(init: std.process.Init) !void {
             \\  pstx verify <pst|ost>      read every block, check checksums, list problems
             \\  pstx search <pst|ost> <folder|0xNID> "<query>"   e.g. "from:*@gmail.com subject:invoice"
             \\  pstx triage <pst|ost> <folder|0xNID>             header analysis, risky items first
-            \\  pstx headers <pst|ost> <message nid>             full header analysis of one message
+            \\  pstx headers <pst|ost> <message nid> [--html out.html]      full header analysis of one message
+            \\  pstx analyse <message.eml | headers.txt> [--html out.html]  analyse headers without a mailbox
             \\
         );
         return;
     }
     const cmd = args[1];
+    if (std.mem.eql(u8, cmd, "analyse") or std.mem.eql(u8, cmd, "analyze")) return analyseFileCmd(arena, io, out, args);
     const f = pst.Pst.open(gpa, io, args[2]) catch |e| {
         try out.print("cannot open {s}: {s}\n", .{ args[2], pst.Pst.openErrorText(e) });
         return;
@@ -124,11 +129,15 @@ pub fn main(init: std.process.Init) !void {
         }
         try out.print("-- {d} of {d} items\n", .{ order.items.len, msgs.len });
     } else if (std.mem.eql(u8, cmd, "headers")) {
-        if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex>\n");
+        if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex> [--html out.html]\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try pst.loadMessage(arena, f, nid);
-        const an = headers.analyse(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
-        try out.writeAll(headers.reportText(arena, an, fmtLocal));
+        const an = headers.analyseDetailed(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
+        try out.writeAll(try hreport.text(arena, an, fmtLocal));
+        if (htmlArg(args)) |path| {
+            try writeOut(io, path, try hreport.html(arena, an, args[2], fmtLocal));
+            try out.print("\nHTML report written to {s}\n", .{path});
+        }
     } else if (std.mem.eql(u8, cmd, "locate")) {
         if (args.len < 4) return out.writeAll("usage: pstx locate <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
@@ -350,4 +359,22 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
     try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.csv", .{dir}), try exp.reportCsv(a, rows.items, meta));
     try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.html", .{dir}), try exp.reportHtml(a, rows.items, meta));
     try out.print("-- exported {d} items to {s}\n", .{ rows.items.len, dir });
+}
+
+/// Value of a "--html <path>" option.
+fn htmlArg(args: []const [:0]const u8) ?[]const u8 {
+    for (args, 0..) |v, i| if (std.mem.eql(u8, v, "--html") and i + 1 < args.len) return args[i + 1];
+    return null;
+}
+
+/// `pstx analyse <file>`: header analysis of a saved message (.eml) or a text file of pasted headers.
+fn analyseFileCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, args: []const [:0]const u8) !void {
+    if (args.len < 3) return out.writeAll("usage: pstx analyse <message.eml | headers.txt> [--html out.html]\n");
+    const data = Io.Dir.cwd().readFileAlloc(io, args[2], a, .limited(256 * 1024 * 1024)) catch |e| return out.print("cannot read {s}: {s}\n", .{ args[2], @errorName(e) });
+    const an = headers.analyseDetailed(a, headers.inputFromHeaders(a, headers.headerBlock(data)), .{});
+    try out.writeAll(try hreport.text(a, an, fmtLocal));
+    if (htmlArg(args)) |path| {
+        try writeOut(io, path, try hreport.html(a, an, args[2], fmtLocal));
+        try out.print("\nHTML report written to {s}\n", .{path});
+    }
 }

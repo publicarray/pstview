@@ -9,6 +9,8 @@ const exp = @import("export.zig");
 const render = @import("render.zig");
 const search = @import("search.zig");
 const hdrs = @import("headers.zig");
+const hreport = @import("headerreport.zig");
+const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
 const L = w.L;
 
@@ -32,6 +34,9 @@ const CMD_VERIFY = 11;
 const CMD_OPEN_MSG = 12;
 const CMD_SAFE_HTML = 13;
 const CMD_ANALYSE = 14;
+const CMD_HDR_REPORT = 15;
+const CMD_HDR_CLIP = 16;
+const CMD_HDR_FILE = 17;
 
 // message-window commands
 const MW_HTML = 201;
@@ -40,6 +45,7 @@ const MW_EXPORT_EML = 203;
 const MW_SAVE_ATT = 204;
 const MW_SAVE_ALL = 205;
 const MW_CLOSE = 206;
+const MW_HDR = 207;
 const ID_MW_HEADER = 301;
 const ID_MW_ATTS = 302;
 const ID_MW_BODY = 303;
@@ -1004,10 +1010,14 @@ fn createChildren(hwnd: w.HWND) void {
     const edit = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_OPEN_MSG, L("&Open message\tEnter / double-click"));
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SAFE_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
+    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report (in browser)\tCtrl+I"));
     _ = w.AppendMenuW(edit, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SELECT_ALL, L("Select &all\tCtrl+A"));
     const tools = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_ANALYSE, L("&Analyse headers in this folder (risk, spoofing)\tCtrl+R"));
+    _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report for selected message\tCtrl+I"));
+    _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_CLIP, L("Analyse headers from &clipboard (paste)"));
+    _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_FILE, L("Analyse headers from .eml / .txt &file..."));
     _ = w.AppendMenuW(tools, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_INTEGRITY, L("&Integrity log"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_VERIFY, L("&Verify every block (checksums)..."));
@@ -1039,6 +1049,7 @@ fn listContextMenu() void {
     const cmd = popupAt(app.hwnd.?, &.{
         .{ .id = CMD_OPEN_MSG, .text = L("&Open message") },
         .{ .id = CMD_SAFE_HTML, .text = L("View &HTML (safe, in browser)") },
+        .{ .id = CMD_HDR_REPORT, .text = L("Header analysis &report") },
         .{ .id = 0, .text = L("") },
         .{ .id = CMD_EXPORT_MSG, .text = if (n_sel > 1) L("Export selected as .&msg...") else L("Export as .&msg...") },
         .{ .id = CMD_EXPORT_EML, .text = if (n_sel > 1) L("Export selected as .&eml...") else L("Export as .&eml...") },
@@ -1097,6 +1108,93 @@ fn viewSafeHtml(nid: u32) void {
     const fw = toWAlloc(a, full) catch return;
     _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
     setStatus("Safe HTML view opened (scripts and remote content blocked). Temp file is deleted when pstview closes.", .{});
+}
+
+// ================================================================ header analysis reports
+
+/// Write a header-analysis report to a temp file and open it in the browser.
+fn openHeaderReport(a: Allocator, an: hdrs.Analysis, source: []const u8, tag: []const u8) void {
+    const doc = hreport.html(a, an, source, fmtLocalLong) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot build header report", w.MB_ICONERROR);
+        return;
+    };
+    const dir = tempDir(a) catch return;
+    const name = exp.safeName(a, tag, if (an.subject.len > 0) an.subject else "headers", "html") catch return;
+    writeFile(a, dir, name, doc) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot write temp file", w.MB_ICONERROR);
+        return;
+    };
+    const full = std.fmt.allocPrint(app.gpa, "{s}\\{s}", .{ dir, name }) catch return;
+    app.temp_files.append(app.gpa, full) catch {};
+    const fw = toWAlloc(a, full) catch return;
+    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
+    setStatus("Header analysis: {s}. Report opened in the browser (made offline; temp file is deleted when pstview closes).", .{an.summary()});
+}
+
+fn headerReportForMessage(nid: u32) void {
+    if (app.file == null) return;
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    waitCursor(true);
+    defer waitCursor(false);
+    const m = pst.loadMessage(a, app.file.?, nid) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot read message", w.MB_ICONERROR);
+        return;
+    };
+    const ctx: hdrs.Context = app.mailbox_ctx orelse if (app.index) |ix| ix.ctx else .{};
+    const an = hdrs.analyseDetailed(a, hdrs.inputFromMessage(a, &m), ctx);
+    var pb: [24]u8 = undefined;
+    openHeaderReport(a, an, app.file_path, std.fmt.bufPrint(&pb, "hdr-{x:0>8}", .{nid}) catch "hdr");
+}
+
+/// Analyse pasted or loaded header text (a whole message is fine: only its header block is used).
+fn analyseHeaderText(a: Allocator, text: []const u8, source: []const u8) void {
+    const head = hdrs.headerBlock(text);
+    if (std.mem.indexOfScalar(u8, head, ':') == null) {
+        _ = msgBox("No e-mail headers found.\n\nCopy the complete internet headers (Outlook: File > Properties > Internet headers; Gmail: Show original) and try again.", "Analyse headers", w.MB_ICONINFORMATION);
+        return;
+    }
+    const ctx: hdrs.Context = app.mailbox_ctx orelse .{};
+    openHeaderReport(a, hdrs.analyseDetailed(a, hdrs.inputFromHeaders(a, head), ctx), source, "hdr-pasted");
+}
+
+fn clipboardText(a: Allocator) ?[]u8 {
+    if (w.OpenClipboard(app.hwnd) == 0) return null;
+    defer _ = w.CloseClipboard();
+    const h = w.GetClipboardData(w.CF_UNICODETEXT) orelse return null;
+    const p = w.GlobalLock(h) orelse return null;
+    defer _ = w.GlobalUnlock(h);
+    const wp: [*:0]const u16 = @ptrCast(@alignCast(p));
+    return std.unicode.wtf16LeToWtf8Alloc(a, std.mem.span(wp)) catch null;
+}
+
+fn analyseClipboard() void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = clipboardText(a) orelse {
+        _ = msgBox("The clipboard holds no text.\n\nCopy a message's internet headers first, then choose this command again.", "Analyse headers", w.MB_ICONINFORMATION);
+        return;
+    };
+    analyseHeaderText(a, text, "pasted from the clipboard");
+}
+
+fn analyseHeaderFile() void {
+    var file: [1024]u16 = [_]u16{0} ** 1024;
+    const filter = L("Messages and header text (*.eml;*.txt)\x00*.eml;*.txt\x00All files (*.*)\x00*.*\x00");
+    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Analyse headers from file (read-only)") };
+    if (w.GetOpenFileNameW(&ofn) == 0) return;
+    const len = std.mem.indexOfScalar(u16, &file, 0) orelse 0;
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = std.unicode.utf16LeToUtf8Alloc(a, file[0..len]) catch return;
+    const data = Io.Dir.cwd().readFileAlloc(app.io, path, a, .limited(256 * 1024 * 1024)) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot read file", w.MB_ICONERROR);
+        return;
+    };
+    analyseHeaderText(a, data, path);
 }
 
 fn cleanupTempFiles() void {
@@ -1228,6 +1326,7 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
     const menu = w.CreateMenu().?;
     const mm = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
+    _ = w.AppendMenuW(mm, w.MF_STRING, MW_HDR, L("Header analysis &report (in browser)\tCtrl+I"));
     _ = w.AppendMenuW(mm, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_EXPORT_MSG, L("Export as .&msg..."));
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_EXPORT_EML, L("Export as .&eml..."));
@@ -1331,6 +1430,7 @@ fn mwCommand(st: *MsgWin, id: u16) void {
     const a = st.arena.allocator();
     switch (id) {
         MW_HTML => viewSafeHtml(st.nid),
+        MW_HDR => headerReportForMessage(st.nid),
         MW_CLOSE => _ = w.DestroyWindow(st.hwnd.?),
         MW_EXPORT_MSG, MW_EXPORT_EML => {
             const is_msg = id == MW_EXPORT_MSG;
@@ -1521,6 +1621,11 @@ fn onCommand(id: u16, code: u16) void {
         CMD_OPEN_MSG => if (focusedRow()) |mi| openMessageWindow(app.msgs[mi].nid),
         CMD_SAFE_HTML => if (focusedRow()) |mi| viewSafeHtml(app.msgs[mi].nid),
         CMD_ANALYSE => analyseFolder(),
+        CMD_HDR_REPORT => if (focusedRow()) |mi| headerReportForMessage(app.msgs[mi].nid) else {
+            _ = msgBox("Select a message first.", "pstview", w.MB_ICONINFORMATION);
+        },
+        CMD_HDR_CLIP => analyseClipboard(),
+        CMD_HDR_FILE => analyseHeaderFile(),
         CMD_INTEGRITY => if (app.file != null) showIntegrityLog(null),
         CMD_VERIFY => if (app.file != null) {
             waitCursor(true);
@@ -1639,6 +1744,7 @@ pub fn main(init: std.process.Init) !void {
         .folder_arena = std.heap.ArenaAllocator.init(init.gpa),
         .preview_arena = std.heap.ArenaAllocator.init(init.gpa),
     };
+    mime.charset_hook = &w.charsetToUtf8; // decode any charset in headers via Windows code pages
     _ = w.CoInitializeEx(null, 0x2); // apartment-threaded, needed by the folder picker
     const icc: w.INITCOMMONCONTROLSEX = .{ .dwICC = w.ICC_LISTVIEW_CLASSES | w.ICC_TREEVIEW_CLASSES | w.ICC_BAR_CLASSES };
     _ = w.InitCommonControlsEx(&icc);
@@ -1699,11 +1805,11 @@ pub fn main(init: std.process.Init) !void {
                 analyseFolder();
                 continue;
             }
-            if (msg.wParam == 'H') {
+            if (msg.wParam == 'H' or msg.wParam == 'I') {
                 const root = if (msg.hwnd) |h| w.GetAncestor(h, w.GA_ROOT) else null;
                 if (root != null and root != app.hwnd) {
-                    _ = w.SendMessageW(root.?, w.WM_COMMAND, MW_HTML, 0);
-                } else onCommand(CMD_SAFE_HTML, 0);
+                    _ = w.SendMessageW(root.?, w.WM_COMMAND, if (msg.wParam == 'H') MW_HTML else MW_HDR, 0);
+                } else onCommand(if (msg.wParam == 'H') CMD_SAFE_HTML else CMD_HDR_REPORT, 0);
                 continue;
             }
         }

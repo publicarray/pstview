@@ -309,6 +309,7 @@ pub extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(WINAPI) ?HIN
 pub extern "kernel32" fn FileTimeToSystemTime(*const FILETIME, *SYSTEMTIME) callconv(WINAPI) BOOL;
 pub extern "kernel32" fn SystemTimeToFileTime(*const SYSTEMTIME, *FILETIME) callconv(WINAPI) BOOL;
 pub extern "kernel32" fn SystemTimeToTzSpecificLocalTime(?*const anyopaque, *const SYSTEMTIME, *SYSTEMTIME) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn MultiByteToWideChar(code_page: u32, flags: u32, src: [*]const u8, src_len: i32, dst: ?[*]u16, dst_len: i32) callconv(WINAPI) i32;
 
 // ---- painting, menus, window data
 pub const HDC = *opaque {};
@@ -332,6 +333,12 @@ pub const SW_HIDE: i32 = 0;
 pub extern "user32" fn TrackPopupMenu(HMENU, u32, i32, i32, i32, HWND, ?*const RECT) callconv(WINAPI) i32;
 pub extern "user32" fn DestroyMenu(HMENU) callconv(WINAPI) BOOL;
 pub extern "user32" fn GetCursorPos(*POINT) callconv(WINAPI) BOOL;
+pub const CF_UNICODETEXT: u32 = 13;
+pub extern "user32" fn OpenClipboard(?HWND) callconv(WINAPI) BOOL;
+pub extern "user32" fn CloseClipboard() callconv(WINAPI) BOOL;
+pub extern "user32" fn GetClipboardData(u32) callconv(WINAPI) ?*anyopaque;
+pub extern "kernel32" fn GlobalLock(*anyopaque) callconv(WINAPI) ?*anyopaque;
+pub extern "kernel32" fn GlobalUnlock(*anyopaque) callconv(WINAPI) BOOL;
 pub extern "user32" fn BeginPaint(HWND, *PAINTSTRUCT) callconv(WINAPI) ?HDC;
 pub extern "user32" fn EndPaint(HWND, *const PAINTSTRUCT) callconv(WINAPI) BOOL;
 pub extern "user32" fn InvalidateRect(?HWND, ?*const RECT, BOOL) callconv(WINAPI) BOOL;
@@ -410,4 +417,42 @@ pub fn localOffset(t: i64) i64 {
     if (SystemTimeToFileTime(&lt, &lft) == 0) return 0;
     const lv: u64 = (@as(u64, lft.hi) << 32) | lft.lo;
     return @divTrunc(@as(i64, @intCast(lv)) - @as(i64, @intCast(ft_val)), 10_000_000);
+}
+
+/// Windows code page for a MIME charset name (0 if unknown).
+pub fn codePageFor(charset: []const u8) u32 {
+    const eq = std.ascii.eqlIgnoreCase;
+    const map = [_]struct { []const u8, u32 }{
+        .{ "gb2312", 936 },         .{ "gbk", 936 },           .{ "x-gbk", 936 },         .{ "cp936", 936 },
+        .{ "gb18030", 54936 },      .{ "big5", 950 },          .{ "big5-hkscs", 950 },    .{ "shift_jis", 932 },
+        .{ "shift-jis", 932 },      .{ "sjis", 932 },          .{ "x-sjis", 932 },        .{ "cp932", 932 },
+        .{ "windows-31j", 932 },    .{ "euc-jp", 20932 },      .{ "iso-2022-jp", 50220 }, .{ "euc-kr", 51949 },
+        .{ "ks_c_5601-1987", 949 }, .{ "iso-2022-kr", 50225 }, .{ "koi8-r", 20866 },      .{ "koi8-u", 21866 },
+        .{ "utf-7", 65000 },        .{ "tis-620", 874 },       .{ "windows-874", 874 },   .{ "ibm866", 866 },
+        .{ "cp866", 866 },          .{ "macintosh", 10000 },   .{ "x-mac-roman", 10000 }, .{ "iso-8859-8-i", 28598 },
+        .{ "utf-16", 1200 },        .{ "utf-16le", 1200 },     .{ "utf-16be", 1201 },     .{ "us-ascii", 20127 },
+    };
+    for (map) |e| if (eq(charset, e[0])) return e[1];
+    // iso-8859-N, windows-NNNN, cpNNNN, ibmNNN
+    const prefixes = [_]struct { []const u8, u32 }{ .{ "iso-8859-", 28590 }, .{ "iso8859-", 28590 }, .{ "windows-", 0 }, .{ "cp", 0 }, .{ "ibm", 0 } };
+    for (prefixes) |p| {
+        if (charset.len > p[0].len and eq(charset[0..p[0].len], p[0])) {
+            const n = std.fmt.parseInt(u32, charset[p[0].len..], 10) catch return 0;
+            return p[1] + n;
+        }
+    }
+    return 0;
+}
+
+/// Convert text in a MIME charset to UTF-8 with the Windows code-page tables (null if unknown).
+/// Installed as `mime.charset_hook` by the front ends.
+pub fn charsetToUtf8(a: std.mem.Allocator, charset: []const u8, bytes: []const u8) ?[]u8 {
+    const cp = codePageFor(charset);
+    if (cp == 0 or bytes.len == 0 or bytes.len > std.math.maxInt(i32)) return null;
+    const n = MultiByteToWideChar(cp, 0, bytes.ptr, @intCast(bytes.len), null, 0);
+    if (n <= 0) return null;
+    const wbuf = a.alloc(u16, @intCast(n)) catch return null;
+    const got = MultiByteToWideChar(cp, 0, bytes.ptr, @intCast(bytes.len), wbuf.ptr, n);
+    if (got <= 0) return null;
+    return std.unicode.wtf16LeToWtf8Alloc(a, wbuf[0..@intCast(got)]) catch null;
 }

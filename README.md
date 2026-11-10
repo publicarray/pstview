@@ -8,8 +8,8 @@ Built for evidence work: the PST/OST is opened **read-only** and never written t
 
 | File | What it is |
 |---|---|
-| `pstview.exe` | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), export and reports. Drag a PST or OST onto the window or pass it on the command line. |
-| `pstx.exe` | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`. Takes a `.pst` or `.ost`. |
+| `pstview.exe` | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST or OST onto the window or pass it on the command line. |
+| `pstx.exe` | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `analyse`. Takes a `.pst` or `.ost` (`analyse` takes a `.eml` or a text file of headers). |
 
 ### pstx examples
 
@@ -22,9 +22,25 @@ pstx export  backup.pst 0x8462 C:\out msg --modified 2026-11-05
 pstx export  backup.pst "Sent Items" C:\out eml --match "contract"
 pstx hash    backup.pst
 pstx verify  "%LOCALAPPDATA%\Microsoft\Outlook\user@example.com.ost"   # close Outlook first
+pstx headers backup.pst 00200044 --html hdr.html  # full header analysis of one message
+pstx analyse suspicious.eml --html hdr.html       # headers of a saved message or pasted text, no mailbox needed
 ```
 
 `export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date.
+
+## Header analysis
+
+A message-header analyser in the spirit of Microsoft's Message Header Analyzer, MXToolbox and the Google Admin Toolbox, built in and **fully offline** (no DNS, reputation or geo-IP lookups; nothing leaves the machine). In the GUI: *Message > Header analysis report* (Ctrl+I) for the selected item, or *Tools > Analyse headers from clipboard / from .eml or .txt file* for headers copied from anywhere. The report opens as a self-contained HTML page and shows:
+
+* **Verdict and findings:** spoofing, impersonation of internal users, lookalike domains, Reply-To diversion, failed authentication, Microsoft 365 phishing/spam verdicts, delays and clock skew.
+* **Summary:** From, Sender, Reply-To, Return-Path, recipients, Date, Message-ID, mailer, total delivery time, earliest recorded origin IP.
+* **Authentication:** SPF, DKIM, DMARC and Microsoft compauth from the first arrival in the receiving organisation (gateways such as INKY or Mimecast re-inject mail, and later re-checks fail by design); SPF and DKIM **alignment** with the From domain and pstview's own DMARC evaluation; every `Authentication-Results`, `ARC-Authentication-Results` and `Received-SPF` entry; DKIM and ARC signatures (domain, selector, algorithm, signing time, signed headers, ARC chain).
+* **Delivery path:** every `Received` / `X-Received` hop with submitting and receiving host, reverse DNS/HELO, IP, protocol, TLS version and cipher, per-hop delay (with bars) and negative delays flagged as clock skew.
+* **Anti-spam and filtering:** `X-Forefront-Antispam-Report` and `X-Microsoft-Antispam` fields decoded (SFV, CAT, SCL, BCL, IPV, SFTY, PTR, HELO, DIR...), `X-MS-Exchange-Organization-*` / cross-tenant headers explained, SpamAssassin score and rules, and headers of other filters (Mimecast, Proofpoint, Barracuda, Cisco, Sophos, Trend Micro, INKY, Gmail).
+* **Indicators:** all IP addresses (public/private), hosts and domains, e-mail addresses and URLs found in the headers, with the header each came from, for your own block-list or reputation checks.
+* **All headers** in stored order.
+
+`Tools > Analyse headers in this folder` (Ctrl+R) runs the triage part over a whole folder and sorts by risk.
 
 ## Formats
 
@@ -49,6 +65,8 @@ zig build                # Debug build
 
 * `src/pst.zig`: PST/OST reader (NDB B-trees and blocks incl. the 4K OST variant, heap-on-node, property and table contexts, folders, messages, recipients, attachments).
 * `src/rtfcp.zig`: compressed RTF bodies: decompression, HTML de-encapsulation, RTF to text.
+* `src/headers.zig`, `src/headerreport.zig`: header analysis (triage and detailed) and its HTML / text reports.
+* `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
 * `src/cli.zig`: command line.

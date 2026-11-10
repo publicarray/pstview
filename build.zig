@@ -32,12 +32,15 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run pstx").dependOn(&run_cli.step);
 
     // Unit tests (portable modules)
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/rtfcp.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+    const test_step = b.step("test", "Run unit tests");
+    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig" }) |src| {
+        const tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(src),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
