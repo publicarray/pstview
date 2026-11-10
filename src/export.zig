@@ -612,6 +612,8 @@ pub const ReportRow = struct {
 pub const ReportMeta = struct {
     pst_path: []const u8,
     pst_size: u64,
+    /// Source file type and layout, e.g. "OST, Unicode 4K pages (Outlook 2013+), not encrypted".
+    format: []const u8 = "",
     sha256_hex: []const u8,
     generated_utc: i64,
     tz_label: []const u8,
@@ -666,9 +668,14 @@ pub fn reportHtml(a: Allocator, rows: []const ReportRow, meta: ReportMeta) ![]u8
     );
     try htmlEscape(a, &out, meta.title);
     try out.appendSlice(a, "</h1><table class=\"meta\">");
-    try out.appendSlice(a, "<tr><td>Source PST</td><td class=\"mono\">");
+    try out.appendSlice(a, "<tr><td>Source file</td><td class=\"mono\">");
     try htmlEscape(a, &out, meta.pst_path);
     try out.print(a, "</td></tr><tr><td>Size</td><td>{d} bytes</td></tr>", .{meta.pst_size});
+    if (meta.format.len > 0) {
+        try out.appendSlice(a, "<tr><td>Format</td><td>");
+        try htmlEscape(a, &out, meta.format);
+        try out.appendSlice(a, "</td></tr>");
+    }
     try out.print(a, "<tr><td>SHA-256</td><td class=\"mono\">{s}</td></tr>", .{meta.sha256_hex});
     try out.print(a, "<tr><td>Report generated (UTC)</td><td>{s}</td></tr>", .{pst.fmtTime(&b, meta.generated_utc, 0)});
     try out.print(a, "<tr><td>Times shown in</td><td>{s}</td></tr>", .{meta.tz_label});

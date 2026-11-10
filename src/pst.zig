@@ -1,4 +1,11 @@
-//! Read-only Outlook PST (Unicode, MS-PST) reader.
+//! Read-only Outlook PST / OST (Unicode, MS-PST) reader.
+//!
+//! Two on-disk variants are supported:
+//!   * wVer 23 - Unicode PST and Outlook 2003-2010 OST: 512-byte B-tree pages, blocks up to
+//!     8 KiB padded to 64 bytes with a 16-byte trailer.
+//!   * wVer 36 - Outlook 2013+ OST ("4K"): 4096-byte B-tree pages, blocks up to 64 KiB padded
+//!     to 512 bytes with a 24-byte trailer, block payloads optionally zlib-compressed.
+//!     Not covered by [MS-PST]; layout per libpff's PFF notes, checked against real OSTs.
 //!
 //! Layers (per [MS-PST]):
 //!   NDB  - header, node B-tree (NBT), block B-tree (BBT), data/sub-node blocks
@@ -10,6 +17,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const rtfcp = @import("rtfcp.zig");
 
 pub const Error = error{ NotPst, UnsupportedFormat, Corrupt, NotFound };
 
@@ -128,8 +136,73 @@ const crypt_permute_decode = [256]u8{
     0xd4, 0xe1, 0x11, 0xd0, 0x08, 0x8b, 0x2a, 0xf2, 0xed, 0x9a, 0x64, 0x3f, 0xc1, 0x6c, 0xf9, 0xec,
 };
 
-const page_size = 512;
-const max_block_data = 8192 - 16; // Unicode: block payload max (8 KiB minus BLOCKTRAILER)
+/// On-disk layout variant, chosen from the header's wVer.
+pub const Format = enum {
+    /// wVer 23: Unicode PST, Outlook 2003-2010 OST.
+    unicode,
+    /// wVer 36: Outlook 2013+ OST with 4 KiB pages and compressed blocks.
+    unicode_4k,
+
+    pub fn label(f: Format) []const u8 {
+        return switch (f) {
+            .unicode => "Unicode (512-byte pages)",
+            .unicode_4k => "Unicode 4K pages (Outlook 2013+)",
+        };
+    }
+
+    fn pageSize(f: Format) usize {
+        return switch (f) {
+            .unicode => 512,
+            .unicode_4k => 4096,
+        };
+    }
+    /// Bytes at the start of a B-tree page that hold entries.
+    fn pageEntriesLen(f: Format) usize {
+        return switch (f) {
+            .unicode => 488,
+            .unicode_4k => 4056,
+        };
+    }
+    /// Offset of the PAGETRAILER (ptype, ptypeRepeat, wSig, dwCRC, bid); the CRC covers the bytes before it.
+    fn pageTrailer(f: Format) usize {
+        return switch (f) {
+            .unicode => 496,
+            .unicode_4k => 4072,
+        };
+    }
+    /// BLOCKTRAILER size: cb(2) wSig(2) dwCRC(4) bid(8) [+ 4K: unknown(2) cbInflated(2) pad(4)].
+    fn blockTrailerLen(f: Format) usize {
+        return switch (f) {
+            .unicode => 16,
+            .unicode_4k => 24,
+        };
+    }
+    /// Blocks are stored padded to this many bytes, trailer included.
+    fn blockAlign(f: Format) usize {
+        return switch (f) {
+            .unicode => 64,
+            .unicode_4k => 512,
+        };
+    }
+};
+
+/// B-tree page metadata (from the bytes after the entries).
+const PageMeta = struct { c_ent: usize, cb_ent: usize, level: u8 };
+
+fn permuteDecode(buf: []u8) void {
+    for (buf) |*c| c.* = crypt_permute_decode[c.*];
+}
+
+/// Decompress a zlib stream that must expand to exactly `len` bytes (4K OST blocks).
+fn inflate(a: Allocator, src: []const u8, len: usize) ![]u8 {
+    const out = try a.alloc(u8, len);
+    var in: Io.Reader = .fixed(src);
+    var w: Io.Writer = .fixed(out);
+    var d: std.compress.flate.Decompress = .init(&in, .zlib, &.{});
+    const n = d.reader.streamRemaining(&w) catch return error.Corrupt;
+    if (n != len) return error.Corrupt;
+    return out;
+}
 
 /// PST checksum: CRC-32 (reflected 0xEDB88320 table) with initial value 0 and no final XOR ([MS-PST] 5.3).
 pub const PstCrc = std.hash.crc.Crc(u32, .{
@@ -154,6 +227,7 @@ pub const Issue = struct {
         block_bid_mismatch,
         block_missing,
         block_unreadable,
+        block_inflate_failed,
         node_unreadable,
         table_unreadable,
         rebuilt_from_index,
@@ -167,6 +241,7 @@ pub const Issue = struct {
                 .block_bid_mismatch => "data block trailer BID mismatch",
                 .block_missing => "data block referenced but not in block index",
                 .block_unreadable => "data block could not be read",
+                .block_inflate_failed => "compressed data block could not be decompressed",
                 .node_unreadable => "node could not be parsed",
                 .table_unreadable => "folder table unreadable",
                 .rebuilt_from_index => "folder contents rebuilt from node index (table was damaged)",
@@ -187,7 +262,8 @@ pub const NID_TYPE = struct {
 };
 
 pub const NbtEntry = struct { nid: u32, bid_data: u64, bid_sub: u64, nid_parent: u32 };
-pub const BbtEntry = struct { bid: u64, ib: u64, cb: u16 };
+/// `cb` is the stored size; `cb_inflated` differs from it only for compressed 4K-OST blocks.
+pub const BbtEntry = struct { bid: u64, ib: u64, cb: u16, cb_inflated: u16 };
 pub const SubEntry = struct { bid_data: u64, bid_sub: u64 };
 pub const SubMap = std.AutoHashMapUnmanaged(u32, SubEntry);
 
@@ -198,10 +274,13 @@ pub const Pst = struct {
     io: Io,
     file: Io.File,
     file_size: u64,
+    format: Format,
+    /// "SM" for a PST, "SO" for an OST (header dwMagicClient).
+    is_ost: bool,
     crypt: u8,
     nbt_ib: u64,
     bbt_ib: u64,
-    page_cache: std.AutoHashMapUnmanaged(u64, *[page_size]u8) = .empty,
+    page_cache: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
     /// Integrity problems found so far (tolerant mode logs and carries on).
     issues: std.ArrayList(Issue) = .empty,
     issue_keys: std.AutoHashMapUnmanaged(u128, void) = .empty,
@@ -217,7 +296,7 @@ pub const Pst = struct {
         self.issues.append(self.gpa, .{ .kind = kind, .id = id, .detail = detail }) catch {};
     }
 
-    /// Open a PST read-only. `path` may be absolute or relative to the cwd.
+    /// Open a PST or OST read-only. `path` may be absolute or relative to the cwd.
     pub fn open(gpa: Allocator, io: Io, path: []const u8) !*Pst {
         const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
         errdefer file.close(io);
@@ -227,8 +306,12 @@ pub const Pst = struct {
         if (n < hdr.len) return error.NotPst;
         if (!std.mem.eql(u8, hdr[0..4], "!BDN")) return error.NotPst;
         const wver = rd16(&hdr, 10);
-        // 14/15 = ANSI, 23 = Unicode (512-byte pages), 36 = Unicode 4K pages (OST)
-        if (wver != 23) return error.UnsupportedFormat;
+        // 14/15 = ANSI, 23 = Unicode (512-byte pages), 36 = Unicode 4K pages (Outlook 2013+ OST)
+        const format: Format = switch (wver) {
+            23 => .unicode,
+            36 => .unicode_4k,
+            else => return error.UnsupportedFormat,
+        };
         const crypt = hdr[513];
         if (crypt > 1) return error.UnsupportedFormat; // high (cyclic) encryption not yet supported
 
@@ -238,6 +321,8 @@ pub const Pst = struct {
             .io = io,
             .file = file,
             .file_size = try file.length(io),
+            .format = format,
+            .is_ost = std.mem.eql(u8, hdr[8..10], "SO"),
             .crypt = crypt,
             .nbt_ib = rd64(&hdr, 224),
             .bbt_ib = rd64(&hdr, 240),
@@ -245,9 +330,31 @@ pub const Pst = struct {
         return self;
     }
 
+    /// One-line description of the file type, e.g. "OST, Unicode 4K pages (Outlook 2013+), not encrypted".
+    pub fn describe(self: *const Pst, buf: []u8) []const u8 {
+        const enc = switch (self.crypt) {
+            0 => "not encrypted",
+            1 => "compressible encryption",
+            else => "high encryption",
+        };
+        return std.fmt.bufPrint(buf, "{s}, {s}, {s}", .{ if (self.is_ost) "OST" else "PST", self.format.label(), enc }) catch "";
+    }
+
+    /// Human-readable reason for an `open` failure.
+    pub fn openErrorText(e: anyerror) []const u8 {
+        return switch (e) {
+            error.NotPst => "Not an Outlook PST/OST file (no !BDN signature).",
+            error.UnsupportedFormat => "Unsupported Outlook data file: ANSI (Outlook 97-2002) files and \"high\" encryption are not supported yet.",
+            error.FileNotFound => "File not found.",
+            error.AccessDenied => "Access denied. If Outlook has the file open, close Outlook or work on a copy.",
+            error.FileBusy, error.SharingViolation => "The file is locked by another program (Outlook?). Close it or work on a copy.",
+            else => @errorName(e),
+        };
+    }
+
     pub fn close(self: *Pst) void {
         var it = self.page_cache.valueIterator();
-        while (it.next()) |p| self.gpa.destroy(p.*);
+        while (it.next()) |p| self.gpa.free(p.*);
         self.page_cache.deinit(self.gpa);
         self.issues.deinit(self.gpa);
         self.issue_keys.deinit(self.gpa);
@@ -262,23 +369,38 @@ pub const Pst = struct {
         if (n != buf.len) return error.Corrupt;
     }
 
-    fn page(self: *Pst, ib: u64) !*const [page_size]u8 {
+    /// One B-tree page (512 or 4096 bytes depending on the format), cached for the life of the Pst.
+    fn page(self: *Pst, ib: u64) ![]const u8 {
         if (self.page_cache.get(ib)) |p| return p;
-        const p = try self.gpa.create([page_size]u8);
-        errdefer self.gpa.destroy(p);
+        const p = try self.gpa.alloc(u8, self.format.pageSize());
+        errdefer self.gpa.free(p);
         try self.readAt(p, ib);
-        // PAGETRAILER: ptype(1) ptypeRepeat(1) wSig(2) dwCRC(4) bid(8) at offset 496
-        const ptype = p[496];
-        if ((ptype != 0x80 and ptype != 0x81) or p[497] != ptype) {
+        // PAGETRAILER: ptype(1) ptypeRepeat(1) wSig(2) dwCRC(4) bid(8)
+        const t = self.format.pageTrailer();
+        const ptype = p[t];
+        if ((ptype != 0x80 and ptype != 0x81) or p[t + 1] != ptype) {
             self.note(.page_bad_type, ib, ptype);
             return error.Corrupt;
         }
         if (self.verify) {
-            const crc = PstCrc.hash(p[0..496]);
-            if (crc != rd32(p, 500)) self.note(.page_crc_mismatch, ib, crc);
+            const crc = PstCrc.hash(p[0..t]);
+            if (crc != rd32(p, t + 4)) self.note(.page_crc_mismatch, ib, crc);
         }
         try self.page_cache.put(self.gpa, ib, p);
         return p;
+    }
+
+    /// Entry count, entry size and level of a B-tree page; error.Corrupt if they do not fit the page.
+    fn pageMeta(self: *Pst, p: []const u8) Error!PageMeta {
+        const e = self.format.pageEntriesLen();
+        const m: PageMeta = switch (self.format) {
+            // cEnt(1) cEntMax(1) cbEnt(1) cLevel(1)
+            .unicode => .{ .c_ent = p[e], .cb_ent = p[e + 2], .level = p[e + 3] },
+            // cEnt(2) cEntMax(2) cbEnt(1) cLevel(1)
+            .unicode_4k => .{ .c_ent = rd16(p, e), .cb_ent = p[e + 4], .level = p[e + 5] },
+        };
+        if (m.cb_ent < 8 or m.c_ent * m.cb_ent > e) return error.Corrupt;
+        return m;
     }
 
     /// Every node in the node B-tree (NBT), cached. Corrupt subtrees are skipped and logged.
@@ -294,18 +416,15 @@ pub const Pst = struct {
     fn walkNbt(self: *Pst, ib: u64, list: *std.ArrayList(NbtEntry), depth: u8) !void {
         if (depth > 32) return;
         const p = self.page(ib) catch return; // logged by page()
-        const c_ent: usize = p[488];
-        const cb_ent: usize = p[490];
-        const level = p[491];
-        if (cb_ent < 8 or c_ent * cb_ent > 488) {
+        const m = self.pageMeta(p) catch {
             self.note(.page_bad_type, ib, 0);
             return;
-        }
-        for (0..c_ent) |i| {
-            const o = i * cb_ent;
-            if (level > 0) {
+        };
+        for (0..m.c_ent) |i| {
+            const o = i * m.cb_ent;
+            if (m.level > 0) {
                 try self.walkNbt(rd64(p, o + 16), list, depth + 1);
-            } else if (cb_ent >= 28) {
+            } else if (m.cb_ent >= 28) {
                 try list.append(self.gpa, .{ .nid = @truncate(rd64(p, o)), .bid_data = rd64(p, o + 8), .bid_sub = rd64(p, o + 16), .nid_parent = rd32(p, o + 24) });
             }
         }
@@ -327,23 +446,20 @@ pub const Pst = struct {
         var depth: usize = 0;
         while (depth < 32) : (depth += 1) {
             const p = try self.page(ib);
-            const c_ent: usize = p[488];
-            const cb_ent: usize = p[490];
-            const level = p[491];
-            if (cb_ent < 8 or c_ent * cb_ent > 488) return error.Corrupt;
-            if (level > 0) {
+            const m = try self.pageMeta(p);
+            if (m.level > 0) {
                 var chosen: ?usize = null;
-                for (0..c_ent) |i| {
-                    const ek = rd64(p, i * cb_ent);
+                for (0..m.c_ent) |i| {
+                    const ek = rd64(p, i * m.cb_ent);
                     if (ek <= k) chosen = i else break;
                 }
                 const i = chosen orelse return null;
-                ib = rd64(p, i * cb_ent + 16);
+                ib = rd64(p, i * m.cb_ent + 16);
             } else {
-                for (0..c_ent) |i| {
-                    var ek = rd64(p, i * cb_ent);
+                for (0..m.c_ent) |i| {
+                    var ek = rd64(p, i * m.cb_ent);
                     if (is_bbt) ek &= ~@as(u64, 1);
-                    if (ek == k) return p[i * cb_ent ..][0..cb_ent];
+                    if (ek == k) return p[i * m.cb_ent ..][0..m.cb_ent];
                 }
                 return null;
             }
@@ -358,33 +474,49 @@ pub const Pst = struct {
 
     pub fn lookupBlock(self: *Pst, bid: u64) !?BbtEntry {
         const e = (try self.btreeFind(self.bbt_ib, bid, true)) orelse return null;
-        return .{ .bid = rd64(e, 0), .ib = rd64(e, 8), .cb = rd16(e, 16) };
+        // BBTENTRY: bref(bid, ib) cb(2) then cRef(2) for wVer 23, cbInflated(2) cRef(4) for 4K
+        const cb = rd16(e, 16);
+        const cb_inflated = if (self.format == .unicode_4k and e.len >= 20) rd16(e, 18) else cb;
+        return .{ .bid = rd64(e, 0), .ib = rd64(e, 8), .cb = cb, .cb_inflated = cb_inflated };
     }
 
-    /// Read one raw block (decrypted if it is an external/data block).
+    /// Read one block: decompressed if stored compressed (4K OST), decrypted if it is an external/data block.
     fn readBlock(self: *Pst, a: Allocator, bid: u64) ![]u8 {
         const e = (try self.lookupBlock(bid)) orelse {
             self.note(.block_missing, bid, 0);
             return error.NotFound;
         };
-        // Blocks are stored padded to 64 bytes with a 16-byte BLOCKTRAILER at the end:
-        // cb(2) wSig(2) dwCRC(4) bid(8). Read it to verify integrity.
-        const aligned: usize = (@as(usize, e.cb) + 16 + 63) & ~@as(usize, 63);
+        // Blocks are stored padded (64 or 512 bytes) with a BLOCKTRAILER at the end:
+        // cb(2) wSig(2) dwCRC(4) bid(8) [...]. Read it to verify integrity.
+        const tl = self.format.blockTrailerLen();
+        const al = self.format.blockAlign();
+        const aligned: usize = (@as(usize, e.cb) + tl + al - 1) & ~(al - 1);
         const full = try a.alloc(u8, aligned);
         self.readAt(full, e.ib) catch |err| {
             self.note(.block_unreadable, bid, e.ib);
             return err;
         };
-        const buf = full[0..e.cb];
+        var buf = full[0..e.cb];
         if (self.verify) {
-            const t = full[aligned - 16 ..];
+            const t = full[aligned - tl ..];
             if ((rd64(t, 8) & ~@as(u64, 1)) != (bid & ~@as(u64, 1))) self.note(.block_bid_mismatch, bid, e.ib);
             if (PstCrc.hash(buf) != rd32(t, 4)) self.note(.block_crc_mismatch, bid, e.ib);
         }
-        const internal = (bid & 2) != 0;
-        if (!internal and self.crypt == 1) {
-            for (buf) |*c| c.* = crypt_permute_decode[c.*];
-        }
+        const decrypt = (bid & 2) == 0 and self.crypt == 1;
+        if (e.cb_inflated != e.cb) {
+            // 4K OST: payload is a zlib stream. Undo encryption first if the stream header is not visible
+            // (the order is undocumented; every OST seen so far is unencrypted).
+            var decrypted = false;
+            if (decrypt and !(buf.len >= 2 and buf[0] == 0x78)) {
+                permuteDecode(buf);
+                decrypted = true;
+            }
+            buf = inflate(a, buf, e.cb_inflated) catch |err| {
+                self.note(.block_inflate_failed, bid, e.ib);
+                return err;
+            };
+            if (decrypt and !decrypted) permuteDecode(buf);
+        } else if (decrypt) permuteDecode(buf);
         return buf;
     }
 
@@ -491,20 +623,24 @@ pub const Heap = struct {
     blocks: [][]u8,
     client_sig: u8,
     user_root: u32,
+    format: Format,
 
-    pub fn init(blocks: [][]u8) !Heap {
+    pub fn init(blocks: [][]u8, format: Format) !Heap {
         if (blocks.len == 0) return error.Corrupt;
         const b0 = blocks[0];
         try need(b0, 0, 12);
         if (b0[2] != 0xEC) return error.Corrupt;
-        return .{ .blocks = blocks, .client_sig = b0[3], .user_root = rd32(b0, 4) };
+        return .{ .blocks = blocks, .client_sig = b0[3], .user_root = rd32(b0, 4), .format = format };
     }
 
     pub fn get(self: Heap, hid: u32) ![]const u8 {
         if (hid == 0) return &.{};
         if ((hid & 0x1F) != 0) return error.Corrupt;
-        const idx: usize = (hid >> 5) & 0x7FF;
-        const bi: usize = hid >> 16;
+        // HID: hidType(5) hidIndex(11) hidBlockIndex(16); 4K OSTs use hidIndex(14) hidBlockIndex(13)
+        const idx: usize, const bi: usize = switch (self.format) {
+            .unicode => .{ (hid >> 5) & 0x7FF, hid >> 16 },
+            .unicode_4k => .{ (hid >> 5) & 0x3FFF, hid >> 19 },
+        };
         if (bi >= self.blocks.len or idx == 0) return error.Corrupt;
         const b = self.blocks[bi];
         try need(b, 0, 2);
@@ -571,7 +707,7 @@ pub const PropContext = struct {
 
     pub fn load(a: Allocator, node: *Node) !PropContext {
         const blocks = try node.pst.readDataBlocks(a, node.bid_data);
-        const heap = try Heap.init(blocks);
+        const heap = try Heap.init(blocks, node.pst.format);
         if (heap.client_sig != 0xBC) return error.Corrupt;
         var ks: u8 = 0;
         var ds: u8 = 0;
@@ -629,7 +765,7 @@ pub const Table = struct {
 
     pub fn load(a: Allocator, node: *Node) !Table {
         const blocks = try node.pst.readDataBlocks(a, node.bid_data);
-        const heap = try Heap.init(blocks);
+        const heap = try Heap.init(blocks, node.pst.format);
         if (heap.client_sig != 0x7C) return error.Corrupt;
         const info = try heap.get(heap.user_root);
         try need(info, 0, 22);
@@ -837,8 +973,12 @@ pub fn subFolders(a: Allocator, pst: *Pst, folder_nid: u32) ![]u32 {
     return pst.nodesWithParent(a, folder_nid, NID_TYPE.normal_folder);
 }
 
-/// Message list of a folder from its contents table (fast; no per-message load).
+/// Message list of a folder from its contents table (fast; no per-message load for PSTs).
 /// If the contents table is damaged, items are rebuilt from the node index (tolerant mode).
+///
+/// OST contents tables are a local cache kept by Outlook and are not fully reliable: in real
+/// OSTs the sender-name cells point at unrelated heap items, and many rows (e.g. most Sent Items)
+/// lack columns altogether. For OSTs the sender always comes from the message itself.
 pub fn folderMessages(a: Allocator, pst: *Pst, folder_nid: u32) ![]MessageSummary {
     const tnid = (folder_nid & ~@as(u32, 0x1F)) | nid_type_contents_table;
     var n = pst.node(tnid) catch |e| switch (e) {
@@ -848,8 +988,11 @@ pub fn folderMessages(a: Allocator, pst: *Pst, folder_nid: u32) ![]MessageSummar
     const t = Table.load(a, &n) catch return rebuildFolderMessages(a, pst, folder_nid, tnid);
     const out = try a.alloc(MessageSummary, t.rows.len);
     for (out, 0..) |*m, r| {
-        var from = t.string(a, r, Tag.sent_repr_name);
-        if (from.len == 0) from = t.string(a, r, Tag.sender_name);
+        var from: []const u8 = "";
+        if (!pst.is_ost) {
+            from = t.string(a, r, Tag.sent_repr_name);
+            if (from.len == 0) from = t.string(a, r, Tag.sender_name);
+        }
         m.* = .{
             .nid = t.rowId(r),
             .subject = cleanSubject(t.string(a, r, Tag.subject)),
@@ -863,8 +1006,28 @@ pub fn folderMessages(a: Allocator, pst: *Pst, folder_nid: u32) ![]MessageSummar
             .size = t.int(a, r, Tag.message_size),
             .flags = t.int(a, r, Tag.message_flags),
         };
+        // Row without sender cells (or any OST row): fill the gaps from the message's own properties.
+        if (pst.is_ost or (from.len == 0 and t.cell(a, r, Tag.sent_repr_name) == null and t.cell(a, r, Tag.sender_name) == null))
+            fillFromNode(a, pst, m);
     }
     return out;
+}
+
+/// Fill empty fields of a list entry from the message's own properties (silently keeps them on error).
+fn fillFromNode(a: Allocator, pst: *Pst, m: *MessageSummary) void {
+    var n = pst.node(m.nid) catch return;
+    const pc = PropContext.load(a, &n) catch return;
+    if (m.from.len == 0) m.from = pc.string(a, Tag.sent_repr_name) catch "";
+    if (m.from.len == 0) m.from = pc.string(a, Tag.sender_name) catch "";
+    if (m.subject.len == 0) m.subject = cleanSubject(pc.string(a, Tag.subject) catch "");
+    if (m.to.len == 0) m.to = pc.string(a, Tag.display_to) catch "";
+    if (m.cc.len == 0) m.cc = pc.string(a, Tag.display_cc) catch "";
+    if (m.message_class.len == 0) m.message_class = pc.string(a, Tag.message_class) catch "";
+    m.delivery_time = m.delivery_time orelse pc.time(Tag.delivery_time);
+    m.submit_time = m.submit_time orelse pc.time(Tag.client_submit_time);
+    m.modified_time = m.modified_time orelse pc.time(Tag.last_modified);
+    m.size = m.size orelse pc.int(Tag.message_size);
+    m.flags = m.flags orelse pc.int(Tag.message_flags);
 }
 
 fn rebuildFolderMessages(a: Allocator, pst: *Pst, folder_nid: u32, table_nid: u32) ![]MessageSummary {
@@ -1081,11 +1244,30 @@ pub const Message = struct {
         }
         return try self.pc.string(a, Tag.sender_email);
     }
+    /// Plain-text body. Falls back to text recovered from the compressed RTF body when the message
+    /// has neither a plain-text nor an HTML body (common in OSTs).
     pub fn bodyText(self: *const Message, a: Allocator) ![]const u8 {
-        return self.pc.string(a, Tag.body);
+        const t = try self.pc.string(a, Tag.body);
+        if (t.len > 0 or self.hasHtml()) return t;
+        const r = self.rtfBody(a) orelse return t;
+        return if (r.kind == .text) r.data else "";
     }
+    /// HTML body. Falls back to HTML de-encapsulated from the compressed RTF body (`\fromhtml1`).
     pub fn bodyHtml(self: *const Message, a: Allocator) ![]const u8 {
-        return self.pc.string(a, Tag.body_html);
+        const h = try self.pc.string(a, Tag.body_html);
+        if (h.len > 0) return h;
+        if (self.pc.bytes(Tag.body)) |b| if (b.len > 0) return h;
+        const r = self.rtfBody(a) orelse return h;
+        return if (r.kind == .html) r.data else "";
+    }
+    fn hasHtml(self: *const Message) bool {
+        const b = self.pc.bytes(Tag.body_html) orelse return false;
+        return b.len > 0;
+    }
+    fn rtfBody(self: *const Message, a: Allocator) ?rtfcp.Body {
+        const raw = self.pc.bytes(Tag.rtf_compressed) orelse return null;
+        if (raw.len == 0) return null;
+        return rtfcp.body(a, raw) catch null;
     }
 };
 

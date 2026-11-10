@@ -30,4 +30,14 @@ pub fn build(b: *std.Build) void {
     const run_cli = b.addRunArtifact(cli);
     if (b.args) |args| run_cli.addArgs(args);
     b.step("run", "Run pstx").dependOn(&run_cli.step);
+
+    // Unit tests (portable modules)
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rtfcp.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
 }

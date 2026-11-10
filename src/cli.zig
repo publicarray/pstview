@@ -1,10 +1,10 @@
 //! pstx - command-line companion for pstview.
 //!
-//!   pstx tree   <file.pst>
-//!   pstx list   <file.pst> <folder path | 0xNID>
-//!   pstx show   <file.pst> <message nid (hex)>
-//!   pstx export <file.pst> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
-//!   pstx hash   <file.pst>
+//!   pstx tree   <pst|ost>
+//!   pstx list   <pst|ost> <folder path | 0xNID>
+//!   pstx show   <pst|ost> <message nid (hex)>
+//!   pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
+//!   pstx hash   <pst|ost>
 //!
 //! Dates for --modified are in this computer's local time zone.
 
@@ -35,23 +35,23 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 3) {
         try out.writeAll(
             \\usage:
-            \\  pstx tree   <file.pst>
-            \\  pstx list   <file.pst> <folder path | 0xNID>
-            \\  pstx show   <file.pst> <message nid (hex)>
-            \\  pstx export <file.pst> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
-            \\  pstx hash   <file.pst>
-            \\  pstx hidden <file.pst>      orphaned messages/folders and hidden (FAI) items
-            \\  pstx verify <file.pst>      read every block, check checksums, list problems
-            \\  pstx search <file.pst> <folder|0xNID> "<query>"   e.g. "from:*@gmail.com subject:invoice"
-            \\  pstx triage <file.pst> <folder|0xNID>             header analysis, risky items first
-            \\  pstx headers <file.pst> <message nid>             full header analysis of one message
+            \\  pstx tree   <pst|ost>
+            \\  pstx list   <pst|ost> <folder path | 0xNID>
+            \\  pstx show   <pst|ost> <message nid (hex)>
+            \\  pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
+            \\  pstx hash   <pst|ost>
+            \\  pstx hidden <pst|ost>      orphaned messages/folders and hidden (FAI) items
+            \\  pstx verify <pst|ost>      read every block, check checksums, list problems
+            \\  pstx search <pst|ost> <folder|0xNID> "<query>"   e.g. "from:*@gmail.com subject:invoice"
+            \\  pstx triage <pst|ost> <folder|0xNID>             header analysis, risky items first
+            \\  pstx headers <pst|ost> <message nid>             full header analysis of one message
             \\
         );
         return;
     }
     const cmd = args[1];
     const f = pst.Pst.open(gpa, io, args[2]) catch |e| {
-        try out.print("cannot open {s}: {s}\n", .{ args[2], @errorName(e) });
+        try out.print("cannot open {s}: {s}\n", .{ args[2], pst.Pst.openErrorText(e) });
         return;
     };
     defer f.close();
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
         try printIssues(out, f);
     } else if (std.mem.eql(u8, cmd, "search") or std.mem.eql(u8, cmd, "triage")) {
         const is_search = std.mem.eql(u8, cmd, "search");
-        if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst> <folder|0xNID> <query>   |   pstx triage <pst> <folder|0xNID>\n");
+        if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n");
         const fnid = (try resolveFolder(arena, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
         const msgs = try pst.folderMessages(arena, f, fnid);
         const mctx: ?headers.Context = if (is_search) null else search.buildMailboxContext(arena, f, null);
@@ -124,19 +124,22 @@ pub fn main(init: std.process.Init) !void {
         }
         try out.print("-- {d} of {d} items\n", .{ order.items.len, msgs.len });
     } else if (std.mem.eql(u8, cmd, "headers")) {
-        if (args.len < 4) return out.writeAll("usage: pstx headers <pst> <message nid hex>\n");
+        if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex>\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try pst.loadMessage(arena, f, nid);
         const an = headers.analyse(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
         try out.writeAll(headers.reportText(arena, an, fmtLocal));
     } else if (std.mem.eql(u8, cmd, "locate")) {
-        if (args.len < 4) return out.writeAll("usage: pstx locate <pst> <nid hex>\n");
+        if (args.len < 4) return out.writeAll("usage: pstx locate <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const e = (try f.lookupNode(nid)) orelse return out.print("node 0x{x} not in index\n", .{nid});
         try out.print("node 0x{x:0>8} type 0x{x:0>2} parent 0x{x:0>8} bid_data 0x{x} bid_sub 0x{x}\n", .{ e.nid, e.nid & 0x1F, e.nid_parent, e.bid_data, e.bid_sub });
         inline for (.{ .{ "data", e.bid_data }, .{ "sub", e.bid_sub } }) |kv| {
-            if (kv[1] != 0) if (try f.lookupBlock(kv[1])) |b|
-                try out.print("  {s} block bid 0x{x} at file offset {d} (0x{x}), {d} bytes\n", .{ kv[0], b.bid, b.ib, b.ib, b.cb });
+            if (kv[1] != 0) if (try f.lookupBlock(kv[1])) |b| {
+                try out.print("  {s} block bid 0x{x} at file offset {d} (0x{x}), {d} bytes", .{ kv[0], b.bid, b.ib, b.ib, b.cb });
+                if (b.cb_inflated != b.cb) try out.print(" (zlib, {d} bytes inflated)", .{b.cb_inflated});
+                try out.writeAll("\n");
+            };
         }
     } else if (std.mem.eql(u8, cmd, "verify")) {
         try verifyCmd(arena, out, f);
@@ -145,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "export")) {
         try exportCmd(arena, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
-        if (args.len < 4) return out.writeAll("usage: pstx show <pst> <nid hex>\n");
+        if (args.len < 4) return out.writeAll("usage: pstx show <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, args[3], 16);
         const m = try pst.loadMessage(arena, f, nid);
         var b1: [32]u8 = undefined;
@@ -262,7 +265,7 @@ fn writeOut(io: Io, path: []const u8, data: []const u8) !void {
 }
 
 fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: []const [:0]const u8) !void {
-    if (args.len < 5) return out.writeAll("usage: pstx export <pst> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n");
+    if (args.len < 5) return out.writeAll("usage: pstx export <pst|ost> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n");
     const folder = (try resolveFolder(a, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
     const dir = args[4];
     var kind: []const u8 = "msg";
@@ -333,14 +336,16 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
         try out.print("  {s}  ({d} bytes)\n", .{ name, data.len });
     }
     const now = Io.Clock.real.now(io).toSeconds();
+    var fmt_buf: [128]u8 = undefined;
     const meta: exp.ReportMeta = .{
         .pst_path = args[2],
         .pst_size = f.file_size,
+        .format = f.describe(&fmt_buf),
         .sha256_hex = try sha256File(a, io, f),
         .generated_utc = now,
         .tz_label = "local time",
         .tz_offset = win.localOffset(now),
-        .title = try std.fmt.allocPrint(a, "PST export report - {s}", .{args[3]}),
+        .title = try std.fmt.allocPrint(a, "Export report - {s}", .{args[3]}),
     };
     try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.csv", .{dir}), try exp.reportCsv(a, rows.items, meta));
     try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.html", .{dir}), try exp.reportHtml(a, rows.items, meta));

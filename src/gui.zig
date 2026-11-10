@@ -361,8 +361,8 @@ fn pickFolder(a: Allocator, title: []const u8) ?[]u8 {
 
 fn openDialog() void {
     var file: [1024]u16 = [_]u16{0} ** 1024;
-    const filter = L("Outlook data files (*.pst)\x00*.pst\x00All files (*.*)\x00*.*\x00");
-    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Open PST (read-only)") };
+    const filter = L("Outlook data files (*.pst;*.ost)\x00*.pst;*.ost\x00PST files (*.pst)\x00*.pst\x00OST files (*.ost)\x00*.ost\x00All files (*.*)\x00*.*\x00");
+    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Open PST / OST (read-only)") };
     if (w.GetOpenFileNameW(&ofn) == 0) return;
     const len = std.mem.indexOfScalar(u16, &file, 0) orelse 0;
     const path = std.unicode.utf16LeToUtf8Alloc(app.gpa, file[0..len]) catch return;
@@ -405,7 +405,7 @@ fn openPst(path: []const u8) void {
     defer waitCursor(false);
     const f = pst.Pst.open(app.gpa, app.io, path) catch |e| {
         var b: [512]u8 = undefined;
-        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open PST:\n{s}\n\n{s}", .{ path, @errorName(e) }) catch "error", "pstview", w.MB_ICONERROR);
+        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open:\n{s}\n\n{s}", .{ path, pst.Pst.openErrorText(e) }) catch "error", "pstview", w.MB_ICONERROR);
         return;
     };
     app.file = f;
@@ -419,10 +419,11 @@ fn openPst(path: []const u8) void {
     var tb: [700]u16 = undefined;
     _ = w.SetWindowTextW(app.hwnd.?, toW(&tb, std.fmt.bufPrint(&b, "pstview - {s} (read-only)", .{path}) catch "pstview"));
     const issues = f.issues.items.len;
+    var db: [128]u8 = undefined;
     if (issues > 0)
-        setStatus("Opened {s} - {d} folders. {d} integrity issue(s) found - see Tools > Integrity log. Source opened read-only.", .{ std.fs.path.basename(path), app.folders.items.len, issues })
+        setStatus("Opened {s} ({s}) - {d} folders. {d} integrity issue(s) found - see Tools > Integrity log. Source opened read-only.", .{ std.fs.path.basename(path), f.describe(&db), app.folders.items.len, issues })
     else
-        setStatus("Opened {s} - {d} folders. No integrity issues so far. Source opened read-only.", .{ std.fs.path.basename(path), app.folders.items.len });
+        setStatus("Opened {s} ({s}) - {d} folders. No integrity issues so far. Source opened read-only.", .{ std.fs.path.basename(path), f.describe(&db), app.folders.items.len });
 }
 
 fn insertTreeItem(a: Allocator, parent: ?w.HTREEITEM, label: []const u8, idx: usize, expanded: bool) ?w.HTREEITEM {
@@ -763,7 +764,7 @@ fn buildPreview(a: Allocator, nid: u32) ![]u8 {
 
 fn pstSha256() []const u8 {
     if (app.sha_hex == null) {
-        setStatus("Computing SHA-256 of source PST...", .{});
+        setStatus("Computing SHA-256 of source file...", .{});
         var h = std.crypto.hash.sha2.Sha256.init(.{});
         const buf = app.gpa.alloc(u8, 8 * 1024 * 1024) catch return "";
         defer app.gpa.free(buf);
@@ -866,14 +867,16 @@ fn exportSelected(kind: ExportKind) void {
     const off = w.localOffset(now);
     const tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time";
     const fpath = if (app.cur_folder) |c| app.folders.items[c].path else "";
+    var fmt_buf: [128]u8 = undefined;
     const meta: exp.ReportMeta = .{
         .pst_path = app.file_path,
         .pst_size = app.file.?.file_size,
+        .format = app.file.?.describe(&fmt_buf),
         .sha256_hex = sha,
         .generated_utc = now,
         .tz_label = tz_label,
         .tz_offset = off,
-        .title = std.fmt.allocPrint(a, "PST export report - {s}", .{fpath}) catch "PST export report",
+        .title = std.fmt.allocPrint(a, "Export report - {s}", .{fpath}) catch "Export report",
     };
     // Report times use each item's own DST-correct local offset via a per-row conversion.
     for (rows.items) |*r| {
@@ -988,14 +991,14 @@ fn createChildren(hwnd: w.HWND) void {
 
     const menu = w.CreateMenu().?;
     const file = w.CreatePopupMenu().?;
-    _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN, L("&Open PST...\tCtrl+O"));
+    _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN, L("&Open PST / OST...\tCtrl+O"));
     _ = w.AppendMenuW(file, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_MSG, L("Export selected as .&msg..."));
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_EML, L("Export selected as .&eml..."));
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_SAVE_ATT, L("Save &attachments of message..."));
     _ = w.AppendMenuW(file, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_REPORT, L("&Report (HTML + CSV) of selection / folder..."));
-    _ = w.AppendMenuW(file, w.MF_STRING, CMD_HASH, L("Show SHA-256 of source PST"));
+    _ = w.AppendMenuW(file, w.MF_STRING, CMD_HASH, L("Show SHA-256 of source file"));
     _ = w.AppendMenuW(file, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXIT, L("E&xit"));
     const edit = w.CreatePopupMenu().?;
@@ -1512,7 +1515,7 @@ fn onCommand(id: u16, code: u16) void {
             const h = pstSha256();
             waitCursor(false);
             var b: [1200]u8 = undefined;
-            _ = msgBox(std.fmt.bufPrint(&b, "{s}\n\nSize: {d} bytes\nSHA-256: {s}", .{ app.file_path, app.file.?.file_size, h }) catch "", "Source PST hash", w.MB_ICONINFORMATION);
+            _ = msgBox(std.fmt.bufPrint(&b, "{s}\n\nSize: {d} bytes\nSHA-256: {s}", .{ app.file_path, app.file.?.file_size, h }) catch "", "Source file hash", w.MB_ICONINFORMATION);
             setStatus("SHA-256 {s}", .{h});
         },
         CMD_OPEN_MSG => if (focusedRow()) |mi| openMessageWindow(app.msgs[mi].nid),
@@ -1526,7 +1529,7 @@ fn onCommand(id: u16, code: u16) void {
             showIntegrityLog(st);
         },
         CMD_EXIT => _ = w.DestroyWindow(app.hwnd.?),
-        CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST viewer and exporter.\n\nOpens PST files without write access (Outlook modifies PSTs it opens).\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
+        CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST / OST viewer and exporter.\n\nOpens PST and OST files without write access (Outlook modifies data files it opens).\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
         ID_SEARCH => if (code == w.EN_CHANGE) applyFilter(),
         else => {},
     }
@@ -1673,7 +1676,7 @@ pub fn main(init: std.process.Init) !void {
     const gdip_in: w.GdiplusStartupInput = .{};
     _ = w.GdiplusStartup(&gdip_token, &gdip_in, null);
 
-    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview - read-only PST viewer"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
+    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview - read-only PST / OST viewer"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
     _ = w.ShowWindow(hwnd, w.SW_SHOW);
     _ = w.UpdateWindow(hwnd);
 
