@@ -1,15 +1,15 @@
 # pstview
 
-A small, native Windows viewer and exporter for Outlook `.pst` and `.ost` files (including Acronis M365 mailbox backups and Outlook 2013+ cached-mode OSTs), written in Zig with no dependencies beyond Win32.
+A small, native Windows viewer and exporter for Outlook `.pst` and `.ost` files (including Acronis M365 mailbox backups and Outlook 2013+ cached-mode OSTs) and MBOX mailboxes (Google Takeout, Thunderbird, Apple Mail), written in Zig with no dependencies beyond Win32.
 
-Built for evidence work: the PST/OST is opened **read-only** and never written to. Outlook, by contrast, modifies a data file as soon as it opens one. Outlook also locks its OSTs while running: close Outlook or work on a copy.
+Built for evidence work: sources are opened **read-only** and never written to, and nothing (no index or cache file) is created next to them. Outlook, by contrast, modifies a data file as soon as it opens one. Outlook also locks its OSTs while running: close Outlook or work on a copy.
 
 ## Programs
 
 | File | What it is |
 |---|---|
-| `pstview.exe` | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST or OST onto the window or pass it on the command line. |
-| `pstx.exe` | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `analyse`. Takes a `.pst` or `.ost` (`analyse` takes a `.eml` or a text file of headers). |
+| `pstview.exe` | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST, OST, MBOX file or mail folder onto the window, use *File > Open*, or pass it on the command line. |
+| `pstx.exe` | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `analyse`. Takes a `.pst`, `.ost`, MBOX file or folder of MBOX mailboxes (`hidden`, `verify` and `locate` are PST/OST only; `analyse` takes a `.eml` or a text file of headers). |
 
 ### pstx examples
 
@@ -49,6 +49,11 @@ A message-header analyser in the spirit of Microsoft's Message Header Analyzer, 
   * `wVer` 36 (4 KiB pages, 64 KiB zlib-compressed blocks): Outlook 2013+ OSTs. This variant is not in [MS-PST]; the layout follows libpff's notes and was checked against real OSTs (every block's checksum, every message loaded).
   * Not yet supported: ANSI (97–2002) PSTs/OSTs, "high" encryption.
 * **OST specifics:** an OST's folder contents tables are a cache kept by Outlook. Their sender-name cells are unreliable, so for OSTs the sender shown in lists comes from each message itself. OSTs usually store no plain-text body and many messages carry only compressed RTF; pstview decompresses it ([MS-OXRTFCP]) and shows the HTML it wraps or the text it contains. This applies to PSTs too.
+* **Read MBOX:** any mbox file (mboxo / mboxrd; `>From ` escaping undone, LF or CRLF), plus these layouts:
+  * **Google Takeout:** the `All mail Including Spam and Trash.mbox` file; its `X-Gmail-Labels` become folders (nested labels such as `Clients/ACME` nest), with the labels also shown per message. Multi-gigabyte files are scanned in one streaming pass.
+  * **Thunderbird:** open the profile's `Mail` / `ImapMail` folder (or one mailbox file): extension-less mailboxes, `Name.sbd` subfolders, `.msf` indexes ignored. Messages flagged expunged in `X-Mozilla-Status` but still in the file (deleted, not yet compacted) are marked in the list.
+  * **Apple Mail:** `Name.mbox` export bundles, nested bundles as subfolders.
+  * Message boundaries are `From ` lines carrying a date and followed by a header line, so unescaped `From ` lines in bodies do not split messages. Messages are decoded from MIME (any charset, encoded words, base64 / quoted-printable, nested `message/rfc822`). `.eml` export writes the **original message bytes** (only the mbox separator line is dropped); `.msg` export converts. Reports list the SHA-256 of every source file.
 * **Write .msg:** written directly as a Compound File (no Outlook needed). All message, recipient and attachment properties are copied, and embedded messages are nested. Named properties (IDs ≥ 0x8000, e.g. some calendar fields) are not yet copied.
 * **Write .eml:** MIME with plain + HTML bodies and attachments. Original internet headers (Received chain etc.) are preserved when the PST has them. Adds `X-PST-*` provenance headers (NID, delivery and last-modified times).
 
@@ -67,6 +72,7 @@ zig build                # Debug build
 * `src/rtfcp.zig`: compressed RTF bodies: decompression, HTML de-encapsulation, RTF to text.
 * `src/headers.zig`, `src/headerreport.zig`: header analysis (triage and detailed) and its HTML / text reports.
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
+* `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/store.zig`: one interface over PST/OST and MBOX sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
 * `src/cli.zig`: command line.

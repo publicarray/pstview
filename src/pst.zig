@@ -102,6 +102,7 @@ pub const Tag = struct {
     pub const smtp_address: u16 = 0x39FE;
     pub const sender_smtp: u16 = 0x5D01;
     pub const sent_repr_smtp: u16 = 0x5D02;
+    pub const internet_cpid: u16 = 0x3FDE;
 };
 
 /// NIDs of well-known nodes.
@@ -1213,7 +1214,10 @@ pub const Attachment = struct {
     method: i64,
     size: i64,
     pc: PropContext,
-    node: Node,
+    /// PST sub-node holding the attachment (null for messages built from other sources).
+    node: ?Node,
+    /// Already-parsed embedded message (method 5) for messages built from other sources.
+    embedded: ?*Message = null,
 
     /// Attachment bytes (method 1 = by value). Empty if not available.
     pub fn data(self: *const Attachment) []const u8 {
@@ -1225,7 +1229,8 @@ pub const Attachment = struct {
 
 pub const Message = struct {
     nid: u32,
-    node: Node,
+    /// PST node of the message (null for messages built from other sources, e.g. MBOX).
+    node: ?Node,
     pc: PropContext,
     recipients: []Recipient,
     attachments: []Attachment,
@@ -1347,10 +1352,12 @@ fn loadMessageOpts(a: Allocator, n: *Node, with_attachments: bool) !Message {
 
 /// For an embedded-message attachment (method 5), load the inner message.
 pub fn embeddedMessage(a: Allocator, att: *Attachment) !?Message {
+    if (att.embedded) |e| return e.*;
+    var an = att.node orelse return null;
     const p = att.pc.find(Tag.attach_data) orelse return null;
     if (p.ptype != PT.object or p.hnid == 0) return null;
-    var sub = (try att.node.subNode(a, p.hnid)) orelse return null;
-    return try loadMessageNode(a, att.node.pst, &sub);
+    var sub = (try an.subNode(a, p.hnid)) orelse return null;
+    return try loadMessageNode(a, an.pst, &sub);
 }
 
 // ================================================================ time formatting (UTC)

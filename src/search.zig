@@ -14,6 +14,7 @@
 const std = @import("std");
 const pst = @import("pst.zig");
 const headers = @import("headers.zig");
+const Store = @import("store.zig").Store;
 const Allocator = std.mem.Allocator;
 
 pub const Fields = struct {
@@ -66,8 +67,8 @@ pub fn parse(a: Allocator, q: []const u8) []Term {
         if (i >= q.len) break;
         var field: Field = .any;
         const prefixes = [_]struct { p: []const u8, f: Field }{
-            .{ .p = "from:", .f = .from },     .{ .p = "sender:", .f = .from }, .{ .p = "to:", .f = .to },
-            .{ .p = "recipient:", .f = .to },  .{ .p = "cc:", .f = .cc },       .{ .p = "bcc:", .f = .bcc },
+            .{ .p = "from:", .f = .from },       .{ .p = "sender:", .f = .from }, .{ .p = "to:", .f = .to },
+            .{ .p = "recipient:", .f = .to },    .{ .p = "cc:", .f = .cc },       .{ .p = "bcc:", .f = .bcc },
             .{ .p = "subject:", .f = .subject }, .{ .p = "risk:", .f = .risk },
         };
         for (prefixes) |p| if (std.ascii.startsWithIgnoreCase(q[i..], p.p)) {
@@ -169,10 +170,10 @@ pub const FolderIndex = struct {
 
 /// Organisation knowledge from the WHOLE mailbox: the main recipient domain and the display names
 /// of everyone with an address in it (senders and recipients in every folder, incl. Sent Items).
-pub fn buildMailboxContext(a: Allocator, f: *pst.Pst, progress: ?*const fn (done: usize, total: usize) void) headers.Context {
+pub fn buildMailboxContext(a: Allocator, f: Store, progress: ?*const fn (done: usize, total: usize) void) headers.Context {
     var dir: headers.DirectoryBuilder = .{};
     var queue: std.ArrayList(u32) = .empty;
-    queue.append(a, pst.NID.root_folder) catch return .{};
+    queue.append(a, f.rootFolder()) catch return .{};
     var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
     var done: usize = 0;
     var qi: usize = 0;
@@ -180,14 +181,14 @@ pub fn buildMailboxContext(a: Allocator, f: *pst.Pst, progress: ?*const fn (done
         const fnid = queue.items[qi];
         if (seen.contains(fnid)) continue;
         seen.put(a, fnid, {}) catch {};
-        const kids = pst.subFolders(a, f, fnid) catch &.{};
+        const kids = f.subFolders(a, fnid) catch &.{};
         for (kids) |k| queue.append(a, k) catch {};
         var tmp = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer tmp.deinit();
         const ta = tmp.allocator();
-        const msgs = pst.folderMessages(ta, f, fnid) catch continue;
+        const msgs = f.folderMessages(ta, fnid) catch continue;
         for (msgs) |s| {
-            const m = pst.loadMessageHeaders(ta, f, s.nid) catch continue;
+            const m = f.loadMessageHeaders(ta, s.nid) catch continue;
             // copy what we keep into the long-lived allocator
             for (m.recipients) |r| {
                 dir.addRecipientDomain(a, a.dupe(u8, r.email) catch continue);
@@ -207,16 +208,16 @@ pub fn buildMailboxContext(a: Allocator, f: *pst.Pst, progress: ?*const fn (done
 
 /// Load every message's headers/recipients once, build the organisation directory
 /// (or use `mailbox_ctx` when given), then analyse each message's internet headers.
-pub fn buildIndex(a: Allocator, f: *pst.Pst, msgs: []const pst.MessageSummary, progress: ?*const fn (done: usize, total: usize) void) FolderIndex {
+pub fn buildIndex(a: Allocator, f: Store, msgs: []const pst.MessageSummary, progress: ?*const fn (done: usize, total: usize) void) FolderIndex {
     return buildIndexCtx(a, f, msgs, progress, null);
 }
 
-pub fn buildIndexCtx(a: Allocator, f: *pst.Pst, msgs: []const pst.MessageSummary, progress: ?*const fn (done: usize, total: usize) void, mailbox_ctx: ?headers.Context) FolderIndex {
+pub fn buildIndexCtx(a: Allocator, f: Store, msgs: []const pst.MessageSummary, progress: ?*const fn (done: usize, total: usize) void, mailbox_ctx: ?headers.Context) FolderIndex {
     const fields = a.alloc(Fields, msgs.len) catch return .{ .fields = &.{}, .analyses = &.{}, .ctx = .{} };
     const inputs = a.alloc(headers.Input, msgs.len) catch return .{ .fields = &.{}, .analyses = &.{}, .ctx = .{} };
     var dir: headers.DirectoryBuilder = .{};
     for (msgs, 0..) |s, i| {
-        if (pst.loadMessageHeaders(a, f, s.nid)) |m| {
+        if (f.loadMessageHeaders(a, s.nid)) |m| {
             fields[i] = fieldsFromMessage(a, &m, s);
             inputs[i] = headers.inputFromMessage(a, &m);
             for (m.recipients) |r| {

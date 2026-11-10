@@ -15,6 +15,8 @@ const exp = @import("export.zig");
 const win = @import("win.zig");
 const search = @import("search.zig");
 const headers = @import("headers.zig");
+const store = @import("store.zig");
+const Store = store.Store;
 const hreport = @import("headerreport.zig");
 const mime = @import("mime.zig");
 
@@ -55,21 +57,23 @@ pub fn main(init: std.process.Init) !void {
     }
     const cmd = args[1];
     if (std.mem.eql(u8, cmd, "analyse") or std.mem.eql(u8, cmd, "analyze")) return analyseFileCmd(arena, io, out, args);
-    const f = pst.Pst.open(gpa, io, args[2]) catch |e| {
-        try out.print("cannot open {s}: {s}\n", .{ args[2], pst.Pst.openErrorText(e) });
+    const f = Store.open(gpa, io, args[2]) catch |e| {
+        try out.print("cannot open {s}: {s}\n", .{ args[2], store.openErrorText(e) });
         return;
     };
     defer f.close();
 
     if (std.mem.eql(u8, cmd, "tree")) {
-        try printTree(arena, out, f, pst.NID.root_folder, 0);
+        var db: [200]u8 = undefined;
+        try out.print("{s}\n", .{f.describe(&db)});
+        try printTree(arena, out, f, f.rootFolder(), 0);
     } else if (std.mem.eql(u8, cmd, "list")) {
         const path = if (args.len > 3) args[3] else "";
         const nid = (try resolveFolder(arena, f, path)) orelse {
             try out.print("folder not found: {s}\n", .{path});
             return;
         };
-        const msgs = try pst.folderMessages(arena, f, nid);
+        const msgs = try f.folderMessages(arena, nid);
         var b1: [32]u8 = undefined;
         var b2: [32]u8 = undefined;
         for (msgs) |m| {
@@ -84,7 +88,8 @@ pub fn main(init: std.process.Init) !void {
         }
         try out.print("-- {d} items (times local)\n", .{msgs.len});
     } else if (std.mem.eql(u8, cmd, "hidden")) {
-        const h = try pst.hiddenScan(arena, f);
+        const p = pstOnly(out, f, cmd) orelse return;
+        const h = try pst.hiddenScan(arena, p);
         try out.print("Nodes in index: {d}; folders reachable: {d}; items listed in folder tables: {d}\n\n", .{ h.total_nodes, h.folders_reached, h.listed_messages });
         try out.print("== Orphaned messages (in file, not shown in any folder): {d}\n", .{h.orphans.len});
         try printSummaries(out, h.orphans);
@@ -92,18 +97,18 @@ pub fn main(init: std.process.Init) !void {
         try printSummaries(out, h.fai);
         try out.print("\n== Orphaned folders (not reachable from the folder tree): {d}\n", .{h.orphan_folders.len});
         for (h.orphan_folders) |fnid| {
-            const info = pst.folderInfo(arena, f, fnid) catch {
+            const info = pst.folderInfo(arena, p, fnid) catch {
                 try out.print("  0x{x:0>8}  (unreadable)\n", .{fnid});
                 continue;
             };
             try out.print("  0x{x:0>8}  {s}  ({d} items)\n", .{ fnid, info.name, info.count });
         }
-        try printIssues(out, f);
+        try printIssues(out, p);
     } else if (std.mem.eql(u8, cmd, "search") or std.mem.eql(u8, cmd, "triage")) {
         const is_search = std.mem.eql(u8, cmd, "search");
         if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n");
         const fnid = (try resolveFolder(arena, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
-        const msgs = try pst.folderMessages(arena, f, fnid);
+        const msgs = try f.folderMessages(arena, fnid);
         const mctx: ?headers.Context = if (is_search) null else search.buildMailboxContext(arena, f, null);
         const ix = search.buildIndexCtx(arena, f, msgs, null, mctx);
         const terms = if (is_search) search.parse(arena, args[4]) else &[_]search.Term{};
@@ -131,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "headers")) {
         if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex> [--html out.html]\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
-        const m = try pst.loadMessage(arena, f, nid);
+        const m = try f.loadMessage(arena, nid);
         const an = headers.analyseDetailed(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
         try out.writeAll(try hreport.text(arena, an, fmtLocal));
         if (htmlArg(args)) |path| {
@@ -141,25 +146,29 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "locate")) {
         if (args.len < 4) return out.writeAll("usage: pstx locate <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
-        const e = (try f.lookupNode(nid)) orelse return out.print("node 0x{x} not in index\n", .{nid});
+        const p = pstOnly(out, f, cmd) orelse return;
+        const e = (try p.lookupNode(nid)) orelse return out.print("node 0x{x} not in index\n", .{nid});
         try out.print("node 0x{x:0>8} type 0x{x:0>2} parent 0x{x:0>8} bid_data 0x{x} bid_sub 0x{x}\n", .{ e.nid, e.nid & 0x1F, e.nid_parent, e.bid_data, e.bid_sub });
         inline for (.{ .{ "data", e.bid_data }, .{ "sub", e.bid_sub } }) |kv| {
-            if (kv[1] != 0) if (try f.lookupBlock(kv[1])) |b| {
+            if (kv[1] != 0) if (try p.lookupBlock(kv[1])) |b| {
                 try out.print("  {s} block bid 0x{x} at file offset {d} (0x{x}), {d} bytes", .{ kv[0], b.bid, b.ib, b.ib, b.cb });
                 if (b.cb_inflated != b.cb) try out.print(" (zlib, {d} bytes inflated)", .{b.cb_inflated});
                 try out.writeAll("\n");
             };
         }
     } else if (std.mem.eql(u8, cmd, "verify")) {
-        try verifyCmd(arena, out, f);
+        try verifyCmd(arena, out, pstOnly(out, f, cmd) orelse return);
     } else if (std.mem.eql(u8, cmd, "hash")) {
-        try out.print("{s}  {s}\n", .{ try sha256File(arena, io, f), args[2] });
+        for (try f.sourceFiles(arena, args[2])) |sf| {
+            const h = try Store.sha256File(gpa, io, sf.path);
+            try out.print("{s}  {s}  ({d} bytes)\n", .{ &h, sf.path, sf.size });
+        }
     } else if (std.mem.eql(u8, cmd, "export")) {
         try exportCmd(arena, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
         if (args.len < 4) return out.writeAll("usage: pstx show <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, args[3], 16);
-        const m = try pst.loadMessage(arena, f, nid);
+        const m = try f.loadMessage(arena, nid);
         var b1: [32]u8 = undefined;
         try out.print("Subject: {s}\nFrom: {s} <{s}>\nReceived (UTC): {s}\nClass: {s}\n", .{
             try m.subject(arena),                                     try m.senderName(arena), try m.senderEmail(arena),
@@ -205,25 +214,36 @@ fn verifyCmd(a: std.mem.Allocator, out: *Io.Writer, f: *pst.Pst) !void {
     if (f.issues.items.len == 0) try out.writeAll("No integrity problems found.\n");
 }
 
-fn printTree(a: std.mem.Allocator, out: *Io.Writer, f: *pst.Pst, nid: u32, depth: usize) !void {
-    const info = pst.folderInfo(a, f, nid) catch |e| {
+fn printTree(a: std.mem.Allocator, out: *Io.Writer, f: Store, nid: u32, depth: usize) !void {
+    const info = f.folderInfo(a, nid) catch |e| {
         try out.print("{x}: error {s}\n", .{ nid, @errorName(e) });
         return;
     };
     for (0..depth) |_| try out.writeAll("  ");
-    const msgs = pst.folderMessages(a, f, nid) catch &.{};
+    const msgs = f.folderMessages(a, nid) catch &.{};
     try out.print("{s}  [count={d} table={d}] nid={x}\n", .{ if (info.name.len > 0) info.name else "(root)", info.count, msgs.len, nid });
-    const kids = try pst.subFolders(a, f, nid);
+    const kids = try f.subFolders(a, nid);
     for (kids) |k| try printTree(a, out, f, k, depth + 1);
+}
+
+/// The PST behind `f`, or null (after printing why) for sources without PST structures.
+fn pstOnly(out: *Io.Writer, f: Store, cmd: []const u8) ?*pst.Pst {
+    return switch (f) {
+        .pst => |p| p,
+        else => {
+            out.print("{s}: only available for PST/OST files\n", .{cmd}) catch {};
+            return null;
+        },
+    };
 }
 
 /// Resolve "Inbox/0.1 Inbox read" style paths below the top-of-store folder.
 /// With duplicate names (Acronis exports can contain two "Deleted Items"), the folder with most items wins.
-pub fn findFolder(a: std.mem.Allocator, f: *pst.Pst, path: []const u8) !?u32 {
-    var cur: u32 = pst.NID.root_folder;
-    const top = try pst.subFolders(a, f, cur);
+pub fn findFolder(a: std.mem.Allocator, f: Store, path: []const u8) !?u32 {
+    var cur: u32 = f.rootFolder();
+    const top = try f.subFolders(a, cur);
     for (top) |k| {
-        const i = try pst.folderInfo(a, f, k);
+        const i = try f.folderInfo(a, k);
         if (std.mem.startsWith(u8, i.name, "Top of")) {
             cur = k;
             break;
@@ -231,11 +251,11 @@ pub fn findFolder(a: std.mem.Allocator, f: *pst.Pst, path: []const u8) !?u32 {
     }
     var it = std.mem.tokenizeScalar(u8, path, '/');
     while (it.next()) |part| {
-        const kids = try pst.subFolders(a, f, cur);
+        const kids = try f.subFolders(a, cur);
         var found: ?u32 = null;
         var best: i64 = -1;
         for (kids) |k| {
-            const i = try pst.folderInfo(a, f, k);
+            const i = try f.folderInfo(a, k);
             if (std.ascii.eqlIgnoreCase(i.name, part) and i.count > best) {
                 found = k;
                 best = i.count;
@@ -246,25 +266,18 @@ pub fn findFolder(a: std.mem.Allocator, f: *pst.Pst, path: []const u8) !?u32 {
     return cur;
 }
 
-pub fn resolveFolder(a: std.mem.Allocator, f: *pst.Pst, path: []const u8) !?u32 {
+pub fn resolveFolder(a: std.mem.Allocator, f: Store, path: []const u8) !?u32 {
     if (std.mem.startsWith(u8, path, "0x")) return try std.fmt.parseInt(u32, path[2..], 16);
     return findFolder(a, f, path);
 }
 
-fn sha256File(a: std.mem.Allocator, io: Io, f: *pst.Pst) ![]const u8 {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
-    const buf = try a.alloc(u8, 8 * 1024 * 1024);
-    var off: u64 = 0;
-    while (off < f.file_size) {
-        const n = try f.file.readPositionalAll(io, buf, off);
-        if (n == 0) break;
-        h.update(buf[0..n]);
-        off += n;
-    }
-    var d: [32]u8 = undefined;
-    h.final(&d);
-    const hex = std.fmt.bytesToHex(d, .lower);
-    return try a.dupe(u8, &hex);
+/// SHA-256 of the source: one hash, or "path: hash" per file for multi-file sources.
+fn sourceHash(a: std.mem.Allocator, gpa: std.mem.Allocator, io: Io, f: Store, path: []const u8) ![]const u8 {
+    const files = try f.sourceFiles(a, path);
+    if (files.len == 1) return try a.dupe(u8, &(try Store.sha256File(gpa, io, files[0].path)));
+    var out: std.ArrayList(u8) = .empty;
+    for (files) |sf| try out.print(a, "{s}: {s}; ", .{ sf.path, &(try Store.sha256File(gpa, io, sf.path)) });
+    return out.items;
 }
 
 fn writeOut(io: Io, path: []const u8, data: []const u8) !void {
@@ -273,8 +286,8 @@ fn writeOut(io: Io, path: []const u8, data: []const u8) !void {
     try file.writeStreamingAll(io, data);
 }
 
-fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: []const [:0]const u8) !void {
-    if (args.len < 5) return out.writeAll("usage: pstx export <pst|ost> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n");
+fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []const [:0]const u8) !void {
+    if (args.len < 5) return out.writeAll("usage: pstx export <source> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n");
     const folder = (try resolveFolder(a, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
     const dir = args[4];
     var kind: []const u8 = "msg";
@@ -293,7 +306,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
     }
     const is_msg = std.mem.eql(u8, kind, "msg");
     try Io.Dir.cwd().createDirPath(io, dir);
-    const msgs = try pst.folderMessages(a, f, folder);
+    const msgs = try f.folderMessages(a, folder);
     var rows: std.ArrayList(exp.ReportRow) = .empty;
     var n: usize = 0;
     var tb: [64]u8 = undefined;
@@ -308,7 +321,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
         var ia_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer ia_state.deinit();
         const ia = ia_state.allocator();
-        var m = pst.loadMessage(ia, f, s.nid) catch |e| {
+        var m = f.loadMessage(ia, s.nid) catch |e| {
             try out.print("  FAILED load 0x{x}: {s}\n", .{ s.nid, @errorName(e) });
             continue;
         };
@@ -320,7 +333,9 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
             c.* = '-';
         };
         const name = try exp.safeName(a, pfx, s.subject, if (is_msg) "msg" else "eml");
-        const data = if (is_msg) try exp.buildMsg(ia, &m) else try exp.buildEml(ia, &m, 0);
+        // .eml from an MBOX is the original message, byte for byte
+        const raw: ?[]const u8 = if (is_msg) null else try f.rawMessage(ia, s.nid);
+        const data = if (is_msg) try exp.buildMsg(ia, &m) else if (raw) |r| r else try exp.buildEml(ia, &m, 0);
         try writeOut(io, try std.fmt.allocPrint(ia, "{s}\\{s}", .{ dir, name }), data);
         var al: std.ArrayList(u8) = .empty;
         for (m.attachments, 0..) |att, k| {
@@ -348,9 +363,9 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: *pst.Pst, args: [
     var fmt_buf: [128]u8 = undefined;
     const meta: exp.ReportMeta = .{
         .pst_path = args[2],
-        .pst_size = f.file_size,
+        .pst_size = f.totalSize(),
         .format = f.describe(&fmt_buf),
-        .sha256_hex = try sha256File(a, io, f),
+        .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
         .generated_utc = now,
         .tz_label = "local time",
         .tz_offset = win.localOffset(now),

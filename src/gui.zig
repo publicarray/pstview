@@ -9,6 +9,7 @@ const exp = @import("export.zig");
 const render = @import("render.zig");
 const search = @import("search.zig");
 const hdrs = @import("headers.zig");
+const store = @import("store.zig");
 const hreport = @import("headerreport.zig");
 const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
@@ -37,6 +38,7 @@ const CMD_ANALYSE = 14;
 const CMD_HDR_REPORT = 15;
 const CMD_HDR_CLIP = 16;
 const CMD_HDR_FILE = 17;
+const CMD_OPEN_FOLDER = 18;
 
 // message-window commands
 const MW_HTML = 201;
@@ -82,7 +84,7 @@ const App = struct {
     split_y_frac: f32 = 0.45,
     dragging: bool = false,
 
-    file: ?*pst.Pst = null,
+    file: ?store.Store = null,
     file_path: []u8 = &.{},
     file_arena: std.heap.ArenaAllocator,
     folder_arena: std.heap.ArenaAllocator,
@@ -93,7 +95,7 @@ const App = struct {
     view: std.ArrayList(u32) = .empty,
     sort_col: i32 = 0,
     sort_desc: bool = true,
-    sha_hex: ?[64]u8 = null,
+    sha_hex: ?[]const u8 = null,
     hidden: ?pst.HiddenScan = null,
     temp_files: std.ArrayList([]u8) = .empty,
     index: ?search.FolderIndex = null,
@@ -367,12 +369,20 @@ fn pickFolder(a: Allocator, title: []const u8) ?[]u8 {
 
 fn openDialog() void {
     var file: [1024]u16 = [_]u16{0} ** 1024;
-    const filter = L("Outlook data files (*.pst;*.ost)\x00*.pst;*.ost\x00PST files (*.pst)\x00*.pst\x00OST files (*.ost)\x00*.ost\x00All files (*.*)\x00*.*\x00");
-    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Open PST / OST (read-only)") };
+    const filter = L("Mail files (*.pst;*.ost;*.mbox;*.mbx)\x00*.pst;*.ost;*.mbox;*.mbx\x00Outlook data files (*.pst;*.ost)\x00*.pst;*.ost\x00MBOX files (*.mbox;*.mbx)\x00*.mbox;*.mbx\x00All files - e.g. Thunderbird mailboxes (*.*)\x00*.*\x00");
+    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Open PST / OST / MBOX (read-only)") };
     if (w.GetOpenFileNameW(&ofn) == 0) return;
     const len = std.mem.indexOfScalar(u16, &file, 0) orelse 0;
     const path = std.unicode.utf16LeToUtf8Alloc(app.gpa, file[0..len]) catch return;
     defer app.gpa.free(path);
+    openPst(path);
+}
+
+/// Open a folder of mailboxes: Thunderbird profile/Mail folder, Apple Mail export, or any folder of MBOX files.
+fn openFolderDialog() void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const path = pickFolder(arena.allocator(), "Open a folder of MBOX mailboxes (Thunderbird mail folder, Apple Mail export .mbox, or any folder of .mbox files) - read-only") orelse return;
     openPst(path);
 }
 
@@ -409,22 +419,22 @@ fn openPst(path: []const u8) void {
     closePst();
     waitCursor(true);
     defer waitCursor(false);
-    const f = pst.Pst.open(app.gpa, app.io, path) catch |e| {
+    const f = store.Store.open(app.gpa, app.io, path) catch |e| {
         var b: [512]u8 = undefined;
-        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open:\n{s}\n\n{s}", .{ path, pst.Pst.openErrorText(e) }) catch "error", "pstview", w.MB_ICONERROR);
+        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open:\n{s}\n\n{s}", .{ path, store.openErrorText(e) }) catch "error", "pstview", w.MB_ICONERROR);
         return;
     };
     app.file = f;
     app.file_path = app.gpa.dupe(u8, path) catch &.{};
     const a = app.file_arena.allocator();
-    addFolder(a, pst.NID.root_folder, "", null, 0) catch |e| {
+    addFolder(a, app.file.?.rootFolder(), "", null, 0) catch |e| {
         _ = msgBox(@errorName(e), "Error reading folders", w.MB_ICONERROR);
     };
-    addHiddenBranch(a);
+    if (f.isPst()) addHiddenBranch(a); // orphan / FAI scan needs PST structures
     var b: [600]u8 = undefined;
     var tb: [700]u16 = undefined;
     _ = w.SetWindowTextW(app.hwnd.?, toW(&tb, std.fmt.bufPrint(&b, "pstview - {s} (read-only)", .{path}) catch "pstview"));
-    const issues = f.issues.items.len;
+    const issues = f.issueCount();
     var db: [128]u8 = undefined;
     if (issues > 0)
         setStatus("Opened {s} ({s}) - {d} folders. {d} integrity issue(s) found - see Tools > Integrity log. Source opened read-only.", .{ std.fs.path.basename(path), f.describe(&db), app.folders.items.len, issues })
@@ -448,7 +458,7 @@ fn insertTreeItem(a: Allocator, parent: ?w.HTREEITEM, label: []const u8, idx: us
 /// Scan the whole node index for items the folder tables don't show, and add a "Hidden items" branch.
 fn addHiddenBranch(a: Allocator) void {
     setStatus("Scanning for hidden and orphaned items...", .{});
-    const h = pst.hiddenScan(a, app.file.?) catch |e| {
+    const h = pst.hiddenScan(a, app.file.?.pst) catch |e| {
         setStatus("Hidden-item scan failed: {s}", .{@errorName(e)});
         return;
     };
@@ -468,7 +478,7 @@ fn addHiddenBranch(a: Allocator) void {
     _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Associated (FAI) items ({d})", .{h.fai.len}) catch "Associated items", fi, false);
 
     for (h.orphan_folders) |fnid| {
-        const info = pst.folderInfo(a, app.file.?, fnid) catch continue;
+        const info = pst.folderInfo(a, app.file.?.pst, fnid) catch continue;
         const idx = app.folders.items.len;
         const name = std.fmt.allocPrint(a, "Orphaned folder: {s}", .{info.name}) catch continue;
         app.folders.append(a, .{ .nid = fnid, .path = std.fmt.allocPrint(a, "[Hidden items]/{s}", .{name}) catch name, .name = name, .count = info.count }) catch continue;
@@ -478,8 +488,8 @@ fn addHiddenBranch(a: Allocator) void {
 
 fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HTREEITEM, depth: u32) !void {
     if (depth > 64) return;
-    const info = pst.folderInfo(a, app.file.?, nid) catch return;
-    const is_root = nid == pst.NID.root_folder;
+    const info = app.file.?.folderInfo(a, nid) catch return;
+    const is_root = nid == app.file.?.rootFolder();
     var item = parent_item;
     var path = parent_path;
     if (!is_root) {
@@ -498,7 +508,7 @@ fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HT
         const r = w.SendMessageW(app.tree.?, w.TVM_INSERTITEMW, 0, @bitCast(@intFromPtr(&ins)));
         item = if (r != 0) @ptrFromInt(@as(usize, @bitCast(r))) else parent_item;
     }
-    const kids = pst.subFolders(a, app.file.?, nid) catch return;
+    const kids = app.file.?.subFolders(a, nid) catch return;
     for (kids) |k| try addFolder(a, k, if (is_root) "" else path, item, depth + 1);
 }
 
@@ -516,7 +526,7 @@ fn selectFolder(idx: usize) void {
         .orphans => if (app.hidden) |h| h.orphans else &.{},
         .fai => if (app.hidden) |h| h.fai else &.{},
         .label => &.{},
-        .normal => pst.folderMessages(a, app.file.?, fo.nid) catch |e| blk: {
+        .normal => app.file.?.folderMessages(a, fo.nid) catch |e| blk: {
             setStatus("Error reading folder: {s}", .{@errorName(e)});
             break :blk &.{};
         },
@@ -718,7 +728,7 @@ fn headerAnalysisText(a: Allocator, m: *const pst.Message) []const u8 {
 }
 
 fn buildPreview(a: Allocator, nid: u32) ![]u8 {
-    const m = try pst.loadMessage(a, app.file.?, nid);
+    const m = try app.file.?.loadMessage(a, nid);
     var out: std.ArrayList(u8) = .empty;
     var tb: [64]u8 = undefined;
     var tb2: [64]u8 = undefined;
@@ -768,24 +778,25 @@ fn buildPreview(a: Allocator, nid: u32) ![]u8 {
 
 // ================================================================ export & reports
 
+/// SHA-256 of the source (cached): one hash, or "path: hash; ..." for multi-file sources (MBOX folders).
 fn pstSha256() []const u8 {
     if (app.sha_hex == null) {
-        setStatus("Computing SHA-256 of source file...", .{});
-        var h = std.crypto.hash.sha2.Sha256.init(.{});
-        const buf = app.gpa.alloc(u8, 8 * 1024 * 1024) catch return "";
-        defer app.gpa.free(buf);
-        var off: u64 = 0;
-        while (off < app.file.?.file_size) {
-            const n = app.file.?.file.readPositionalAll(app.io, buf, off) catch return "";
-            if (n == 0) break;
-            h.update(buf[0..n]);
-            off += n;
+        setStatus("Computing SHA-256 of source file(s)...", .{});
+        const a = app.file_arena.allocator();
+        const files = app.file.?.sourceFiles(a, app.file_path) catch return "";
+        if (files.len == 1) {
+            const h = store.Store.sha256File(app.gpa, app.io, files[0].path) catch return "";
+            app.sha_hex = a.dupe(u8, &h) catch return "";
+        } else {
+            var out: std.ArrayList(u8) = .empty;
+            for (files) |sf| {
+                const h = store.Store.sha256File(app.gpa, app.io, sf.path) catch continue;
+                out.print(a, "{s}: {s}; ", .{ sf.path, &h }) catch {};
+            }
+            app.sha_hex = out.items;
         }
-        var d: [32]u8 = undefined;
-        h.final(&d);
-        app.sha_hex = std.fmt.bytesToHex(d, .lower);
     }
-    return &app.sha_hex.?;
+    return app.sha_hex.?;
 }
 
 const ExportKind = enum { msg, eml, none };
@@ -823,7 +834,7 @@ fn exportSelected(kind: ExportKind) void {
         const ia = item_arena.allocator();
         var export_name: []const u8 = "";
         var atts: []const u8 = "";
-        if (pst.loadMessage(ia, app.file.?, s.nid)) |m_const| {
+        if (app.file.?.loadMessage(ia, s.nid)) |m_const| {
             var m = m_const;
             var al: std.ArrayList(u8) = .empty;
             for (m.attachments, 0..) |att, i| {
@@ -842,7 +853,9 @@ fn exportSelected(kind: ExportKind) void {
                     c.* = '-';
                 };
                 const name = exp.safeName(a, pfx, s.subject, if (kind == .msg) "msg" else "eml") catch "item";
-                const data = (if (kind == .msg) exp.buildMsg(ia, &m) else exp.buildEml(ia, &m, 0)) catch null;
+                // .eml from an MBOX is the original message, byte for byte
+                const raw: ?[]const u8 = if (kind == .msg) null else (app.file.?.rawMessage(ia, s.nid) catch null);
+                const data = if (raw) |r| r else (if (kind == .msg) exp.buildMsg(ia, &m) else exp.buildEml(ia, &m, 0)) catch null;
                 if (data) |d| {
                     if (writeFile(ia, dir, name, d)) {
                         export_name = name;
@@ -876,7 +889,7 @@ fn exportSelected(kind: ExportKind) void {
     var fmt_buf: [128]u8 = undefined;
     const meta: exp.ReportMeta = .{
         .pst_path = app.file_path,
-        .pst_size = app.file.?.file_size,
+        .pst_size = app.file.?.totalSize(),
         .format = app.file.?.describe(&fmt_buf),
         .sha256_hex = sha,
         .generated_utc = now,
@@ -912,7 +925,7 @@ fn saveAttachments() void {
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const m = pst.loadMessage(a, app.file.?, app.msgs[mi].nid) catch return;
+    const m = app.file.?.loadMessage(a, app.msgs[mi].nid) catch return;
     if (m.attachments.len == 0) {
         _ = msgBox("This message has no attachments.", "pstview", w.MB_ICONINFORMATION);
         return;
@@ -997,7 +1010,8 @@ fn createChildren(hwnd: w.HWND) void {
 
     const menu = w.CreateMenu().?;
     const file = w.CreatePopupMenu().?;
-    _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN, L("&Open PST / OST...\tCtrl+O"));
+    _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN, L("&Open PST / OST / MBOX file...\tCtrl+O"));
+    _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN_FOLDER, L("Open MBOX &folder (Thunderbird / Apple Mail)..."));
     _ = w.AppendMenuW(file, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_MSG, L("Export selected as .&msg..."));
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_EML, L("Export selected as .&eml..."));
@@ -1088,7 +1102,7 @@ fn viewSafeHtml(nid: u32) void {
     const a = arena.allocator();
     waitCursor(true);
     defer waitCursor(false);
-    const m = pst.loadMessage(a, app.file.?, nid) catch |e| {
+    const m = app.file.?.loadMessage(a, nid) catch |e| {
         _ = msgBox(@errorName(e), "Cannot read message", w.MB_ICONERROR);
         return;
     };
@@ -1138,7 +1152,7 @@ fn headerReportForMessage(nid: u32) void {
     const a = arena.allocator();
     waitCursor(true);
     defer waitCursor(false);
-    const m = pst.loadMessage(a, app.file.?, nid) catch |e| {
+    const m = app.file.?.loadMessage(a, nid) catch |e| {
         _ = msgBox(@errorName(e), "Cannot read message", w.MB_ICONERROR);
         return;
     };
@@ -1233,7 +1247,7 @@ fn openMessageWindow(nid: u32) void {
     const st = app.gpa.create(MsgWin) catch return;
     st.* = .{ .arena = std.heap.ArenaAllocator.init(app.gpa), .msg = undefined, .nid = nid };
     const a = st.arena.allocator();
-    st.msg = pst.loadMessage(a, app.file.?, nid) catch |e| {
+    st.msg = app.file.?.loadMessage(a, nid) catch |e| {
         _ = msgBox(@errorName(e), "Cannot read message", w.MB_ICONERROR);
         st.arena.deinit();
         app.gpa.destroy(st);
@@ -1581,6 +1595,10 @@ fn imgProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
     return w.DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+fn mboxProgress(done: u64, total: u64) void {
+    setStatus("Scanning MBOX... {d}%", .{if (total > 0) done * 100 / total else 0});
+}
+
 fn verifyProgress(done: usize, total: usize) void {
     setStatus("Verifying every block... {d}/{d} nodes", .{ done, total });
 }
@@ -1592,9 +1610,9 @@ fn showIntegrityLog(st: ?pst.VerifyStats) void {
     var out: std.ArrayList(u8) = .empty;
     if (st) |s| out.print(a, "Verified {d} nodes, {d} sub-nodes, {d} data blocks ({d} MB); every page and block checksum checked.\n\n", .{ s.nodes, s.subnodes, s.blocks, s.bytes / (1024 * 1024) }) catch {};
     if (app.hidden) |h| out.print(a, "Hidden-item scan: {d} nodes in index, {d} folders reachable, {d} items listed in folder tables;\n{d} orphaned message(s), {d} associated (FAI) item(s), {d} orphaned folder(s).\n\n", .{ h.total_nodes, h.folders_reached, h.listed_messages, h.orphans.len, h.fai.len, h.orphan_folders.len }) catch {};
-    out.appendSlice(a, pst.issuesText(a, app.file.?) catch "") catch {};
+    out.appendSlice(a, pst.issuesText(a, app.file.?.pst) catch "") catch {};
     setRich(a, app.preview.?, out.items);
-    setStatus("Integrity log: {d} issue(s)", .{app.file.?.issues.items.len});
+    setStatus("Integrity log: {d} issue(s)", .{app.file.?.issueCount()});
 }
 
 fn selectAll() void {
@@ -1605,6 +1623,7 @@ fn selectAll() void {
 fn onCommand(id: u16, code: u16) void {
     switch (id) {
         CMD_OPEN => openDialog(),
+        CMD_OPEN_FOLDER => openFolderDialog(),
         CMD_EXPORT_MSG => exportSelected(.msg),
         CMD_EXPORT_EML => exportSelected(.eml),
         CMD_REPORT => exportSelected(.none),
@@ -1614,9 +1633,10 @@ fn onCommand(id: u16, code: u16) void {
             waitCursor(true);
             const h = pstSha256();
             waitCursor(false);
-            var b: [1200]u8 = undefined;
-            _ = msgBox(std.fmt.bufPrint(&b, "{s}\n\nSize: {d} bytes\nSHA-256: {s}", .{ app.file_path, app.file.?.file_size, h }) catch "", "Source file hash", w.MB_ICONINFORMATION);
-            setStatus("SHA-256 {s}", .{h});
+            var b: [4096]u8 = undefined;
+            const shown = h[0..@min(h.len, 3500)];
+            _ = msgBox(std.fmt.bufPrint(&b, "{s}\n\nSize: {d} bytes\nSHA-256: {s}{s}", .{ app.file_path, app.file.?.totalSize(), shown, if (shown.len < h.len) " ... (all hashes are in the export report)" else "" }) catch "", "Source file hash", w.MB_ICONINFORMATION);
+            setStatus("SHA-256 {s}", .{shown});
         },
         CMD_OPEN_MSG => if (focusedRow()) |mi| openMessageWindow(app.msgs[mi].nid),
         CMD_SAFE_HTML => if (focusedRow()) |mi| viewSafeHtml(app.msgs[mi].nid),
@@ -1626,15 +1646,18 @@ fn onCommand(id: u16, code: u16) void {
         },
         CMD_HDR_CLIP => analyseClipboard(),
         CMD_HDR_FILE => analyseHeaderFile(),
-        CMD_INTEGRITY => if (app.file != null) showIntegrityLog(null),
-        CMD_VERIFY => if (app.file != null) {
+        CMD_INTEGRITY, CMD_VERIFY => if (app.file != null and !app.file.?.isPst()) {
+            _ = msgBox("The integrity log and block verification apply to PST/OST files (MBOX has no internal checksums).\n\nUse File > Show SHA-256 of source file to fix the evidence state.", "pstview", w.MB_ICONINFORMATION);
+        } else if (id == CMD_INTEGRITY) {
+            if (app.file != null) showIntegrityLog(null);
+        } else if (app.file != null) {
             waitCursor(true);
-            const st = pst.verifyAll(app.file.?, &verifyProgress) catch null;
+            const st = pst.verifyAll(app.file.?.pst, &verifyProgress) catch null;
             waitCursor(false);
             showIntegrityLog(st);
         },
         CMD_EXIT => _ = w.DestroyWindow(app.hwnd.?),
-        CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST / OST viewer and exporter.\n\nOpens PST and OST files without write access (Outlook modifies data files it opens).\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
+        CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST / OST and MBOX viewer and exporter.\n\nOpens PST, OST and MBOX files (incl. Google Takeout, Thunderbird and Apple Mail folders) without write access; nothing is written next to the source.\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
         ID_SEARCH => if (code == w.EN_CHANGE) applyFilter(),
         else => {},
     }
@@ -1745,6 +1768,7 @@ pub fn main(init: std.process.Init) !void {
         .preview_arena = std.heap.ArenaAllocator.init(init.gpa),
     };
     mime.charset_hook = &w.charsetToUtf8; // decode any charset in headers via Windows code pages
+    store.mbox.scan_progress = &mboxProgress;
     _ = w.CoInitializeEx(null, 0x2); // apartment-threaded, needed by the folder picker
     const icc: w.INITCOMMONCONTROLSEX = .{ .dwICC = w.ICC_LISTVIEW_CLASSES | w.ICC_TREEVIEW_CLASSES | w.ICC_BAR_CLASSES };
     _ = w.InitCommonControlsEx(&icc);
@@ -1782,7 +1806,7 @@ pub fn main(init: std.process.Init) !void {
     const gdip_in: w.GdiplusStartupInput = .{};
     _ = w.GdiplusStartup(&gdip_token, &gdip_in, null);
 
-    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview - read-only PST / OST viewer"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
+    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview - read-only PST / OST / MBOX viewer"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
     _ = w.ShowWindow(hwnd, w.SW_SHOW);
     _ = w.UpdateWindow(hwnd);
 

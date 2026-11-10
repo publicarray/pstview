@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests (portable modules)
     const test_step = b.step("test", "Run unit tests");
-    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig" }) |src| {
+    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig", "src/mbox.zig" }) |src| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(src),
