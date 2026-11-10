@@ -45,3 +45,12 @@ zig build                # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
 * `src/cli.zig`: command line.
+
+## Releases
+
+GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on Windows and uploads the zip as a workflow artifact. Pushing a `v*` tag also publishes a GitHub release with `pstview-<tag>-windows-x64.zip` and `SHA256SUMS.txt`:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
