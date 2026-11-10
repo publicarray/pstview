@@ -36,7 +36,8 @@ pstx hash    backup.pst
 Requires Zig 0.16.
 
 ```
-zig build                # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
+zig build -Drelease      # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
+zig build                # Debug build
 ```
 
 ## Layout
