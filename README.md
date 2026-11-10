@@ -24,9 +24,20 @@ pstx hash    backup.pst
 pstx verify  "%LOCALAPPDATA%\Microsoft\Outlook\user@example.com.ost"   # close Outlook first
 pstx headers backup.pst 00200044 --html hdr.html  # full header analysis of one message
 pstx analyse suspicious.eml --html hdr.html       # headers of a saved message or pasted text, no mailbox needed
+pstx tree    "D:\Case\Acronis export"             # folder of PST parts: merged into one mailbox
+pstx list    "part1.pst;part2.pst" "Sent Items"   # or name the parts, separated by ';'
 ```
 
 `export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date.
+
+## Multi-file PST sets (Acronis exports in parts)
+
+Open several PST/OST files together (multi-select in *File > Open*, drop several files on the window, open the folder that holds them, or `pstx ... "a.pst;b.pst"`) and they are shown as **one mailbox**:
+
+* The user folders of every part (the IPM subtree: "Top of Outlook data file" in a PST, "Root - Mailbox/IPM_SUBTREE" in an OST) are merged under *Mailbox (merged)*; same-path folders such as Inbox or Sent Items are combined. Other folders (search roots, system folders) are merged by path beside it.
+* Each item's *Note* names the part file it came from. Items found in more than one part (same subject, sender and times) are **flagged as duplicates**, not hidden.
+* Parts are sorted naturally (`export.pst`, `export_1.pst`, ..., `export_10.pst`) and every part stays a separate read-only file: block verification, the integrity log, the hidden-item scan (`pstx hidden`) and SHA-256 hashes are reported per part.
+* Message ids encode the part, so `pstx show` / `headers` ids from `pstx list` stay valid between runs.
 
 ## Header analysis
 
@@ -72,7 +83,7 @@ zig build                # Debug build
 * `src/rtfcp.zig`: compressed RTF bodies: decompression, HTML de-encapsulation, RTF to text.
 * `src/headers.zig`, `src/headerreport.zig`: header analysis (triage and detailed) and its HTML / text reports.
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
-* `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/store.zig`: one interface over PST/OST and MBOX sources.
+* `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
 * `src/cli.zig`: command line.

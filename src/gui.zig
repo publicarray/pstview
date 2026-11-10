@@ -368,14 +368,30 @@ fn pickFolder(a: Allocator, title: []const u8) ?[]u8 {
 }
 
 fn openDialog() void {
-    var file: [1024]u16 = [_]u16{0} ** 1024;
+    var file: [32768]u16 = [_]u16{0} ** 32768;
     const filter = L("Mail files (*.pst;*.ost;*.mbox;*.mbx)\x00*.pst;*.ost;*.mbox;*.mbx\x00Outlook data files (*.pst;*.ost)\x00*.pst;*.ost\x00MBOX files (*.mbox;*.mbx)\x00*.mbox;*.mbx\x00All files - e.g. Thunderbird mailboxes (*.*)\x00*.*\x00");
-    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Open PST / OST / MBOX (read-only)") };
+    var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY | w.OFN_ALLOWMULTISELECT, .lpstrTitle = L("Open PST / OST / MBOX - select several PST parts to merge them (read-only)") };
     if (w.GetOpenFileNameW(&ofn) == 0) return;
-    const len = std.mem.indexOfScalar(u16, &file, 0) orelse 0;
-    const path = std.unicode.utf16LeToUtf8Alloc(app.gpa, file[0..len]) catch return;
-    defer app.gpa.free(path);
-    openPst(path);
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // one file: "C:\dir\file.pst\0\0"; several: "C:\dir\0a.pst\0b.pst\0\0"
+    var parts: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < file.len and file[i] != 0) {
+        const e = std.mem.indexOfScalarPos(u16, &file, i, 0) orelse break;
+        parts.append(a, std.unicode.utf16LeToUtf8Alloc(a, file[i..e]) catch return) catch return;
+        i = e + 1;
+    }
+    if (parts.items.len == 0) return;
+    if (parts.items.len == 1) return openPaths(parts.items);
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (parts.items[1..]) |name| paths.append(a, std.fs.path.join(a, &.{ parts.items[0], name }) catch return) catch return;
+    openPaths(paths.items);
+}
+
+fn openPst(path: []const u8) void {
+    openPaths(&.{path});
 }
 
 /// Open a folder of mailboxes: Thunderbird profile/Mail folder, Apple Mail export, or any folder of MBOX files.
@@ -415,17 +431,21 @@ fn closePst() void {
     _ = w.SetWindowTextW(app.preview.?, L(""));
 }
 
-fn openPst(path: []const u8) void {
+/// Open one source, or several PST/OST parts as one merged mailbox.
+fn openPaths(paths: []const []const u8) void {
     closePst();
     waitCursor(true);
     defer waitCursor(false);
-    const f = store.Store.open(app.gpa, app.io, path) catch |e| {
-        var b: [512]u8 = undefined;
-        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open:\n{s}\n\n{s}", .{ path, store.openErrorText(e) }) catch "error", "pstview", w.MB_ICONERROR);
+    // several files are remembered as a ';' list, which Store.open accepts again
+    const path = std.mem.join(app.gpa, ";", paths) catch return;
+    const f = store.Store.openMany(app.gpa, app.io, paths) catch |e| {
+        var b: [1024]u8 = undefined;
+        _ = msgBox(std.fmt.bufPrint(&b, "Cannot open:\n{s}\n\n{s}", .{ path[0..@min(path.len, 600)], store.openErrorText(e) }) catch "error", "pstview", w.MB_ICONERROR);
+        app.gpa.free(path);
         return;
     };
     app.file = f;
-    app.file_path = app.gpa.dupe(u8, path) catch &.{};
+    app.file_path = path;
     const a = app.file_arena.allocator();
     addFolder(a, app.file.?.rootFolder(), "", null, 0) catch |e| {
         _ = msgBox(@errorName(e), "Error reading folders", w.MB_ICONERROR);
@@ -1610,7 +1630,12 @@ fn showIntegrityLog(st: ?pst.VerifyStats) void {
     var out: std.ArrayList(u8) = .empty;
     if (st) |s| out.print(a, "Verified {d} nodes, {d} sub-nodes, {d} data blocks ({d} MB); every page and block checksum checked.\n\n", .{ s.nodes, s.subnodes, s.blocks, s.bytes / (1024 * 1024) }) catch {};
     if (app.hidden) |h| out.print(a, "Hidden-item scan: {d} nodes in index, {d} folders reachable, {d} items listed in folder tables;\n{d} orphaned message(s), {d} associated (FAI) item(s), {d} orphaned folder(s).\n\n", .{ h.total_nodes, h.folders_reached, h.listed_messages, h.orphans.len, h.fai.len, h.orphan_folders.len }) catch {};
-    out.appendSlice(a, pst.issuesText(a, app.file.?.pst) catch "") catch {};
+    const parts = app.file.?.pstParts(a, app.file_path) catch &.{};
+    for (parts) |p| {
+        if (parts.len > 1) out.print(a, "======== {s}\n", .{p.name}) catch {};
+        out.appendSlice(a, pst.issuesText(a, p.file) catch "") catch {};
+        if (parts.len > 1) out.append(a, '\n') catch {};
+    }
     setRich(a, app.preview.?, out.items);
     setStatus("Integrity log: {d} issue(s)", .{app.file.?.issueCount()});
 }
@@ -1646,15 +1671,25 @@ fn onCommand(id: u16, code: u16) void {
         },
         CMD_HDR_CLIP => analyseClipboard(),
         CMD_HDR_FILE => analyseHeaderFile(),
-        CMD_INTEGRITY, CMD_VERIFY => if (app.file != null and !app.file.?.isPst()) {
+        CMD_INTEGRITY, CMD_VERIFY => if (app.file != null and app.file.? == .mbox) {
             _ = msgBox("The integrity log and block verification apply to PST/OST files (MBOX has no internal checksums).\n\nUse File > Show SHA-256 of source file to fix the evidence state.", "pstview", w.MB_ICONINFORMATION);
         } else if (id == CMD_INTEGRITY) {
             if (app.file != null) showIntegrityLog(null);
         } else if (app.file != null) {
+            // every PST/OST behind the source (all parts of a merged set)
             waitCursor(true);
-            const st = pst.verifyAll(app.file.?.pst, &verifyProgress) catch null;
+            var tot: pst.VerifyStats = .{};
+            var arena = std.heap.ArenaAllocator.init(app.gpa);
+            defer arena.deinit();
+            for (app.file.?.pstParts(arena.allocator(), app.file_path) catch &.{}) |p| {
+                const st = pst.verifyAll(p.file, &verifyProgress) catch continue;
+                tot.nodes += st.nodes;
+                tot.subnodes += st.subnodes;
+                tot.blocks += st.blocks;
+                tot.bytes += st.bytes;
+            }
             waitCursor(false);
-            showIntegrityLog(st);
+            showIntegrityLog(tot);
         },
         CMD_EXIT => _ = w.DestroyWindow(app.hwnd.?),
         CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST / OST and MBOX viewer and exporter.\n\nOpens PST, OST and MBOX files (incl. Google Takeout, Thunderbird and Apple Mail folders) without write access; nothing is written next to the source.\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
@@ -1740,14 +1775,17 @@ fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
         },
         w.WM_DROPFILES => {
             const hdrop: *anyopaque = @ptrFromInt(wp);
-            var buf: [1024]u16 = [_]u16{0} ** 1024;
-            const n = w.DragQueryFileW(hdrop, 0, &buf, buf.len);
-            w.DragFinish(hdrop);
-            if (n > 0) {
-                const p = std.unicode.utf16LeToUtf8Alloc(app.gpa, buf[0..n]) catch return 0;
-                defer app.gpa.free(p);
-                openPst(p);
+            var arena = std.heap.ArenaAllocator.init(app.gpa);
+            defer arena.deinit();
+            var paths: std.ArrayList([]const u8) = .empty;
+            const count = w.DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
+            for (0..count) |k| {
+                var buf: [1024]u16 = [_]u16{0} ** 1024;
+                const n = w.DragQueryFileW(hdrop, @intCast(k), &buf, buf.len);
+                if (n > 0) paths.append(arena.allocator(), std.unicode.utf16LeToUtf8Alloc(arena.allocator(), buf[0..n]) catch continue) catch {};
             }
+            w.DragFinish(hdrop);
+            if (paths.items.len > 0) openPaths(paths.items); // several PST parts are merged into one mailbox
             return 0;
         },
         w.WM_DESTROY => {

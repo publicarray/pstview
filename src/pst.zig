@@ -941,6 +941,34 @@ pub const MessageSummary = struct {
     note: []const u8 = "",
 };
 
+/// NID of the top of the user's folders (IPM subtree) from the message store's
+/// PR_IPM_SUBTREE_ENTRYID: "Top of Outlook data file" in a PST, "Root - Mailbox/IPM_SUBTREE" in an OST.
+/// OSTs carry no PST-style entry id there, so the folder is also found by its well-known name.
+pub fn ipmSubtree(a: Allocator, pst: *Pst) ?u32 {
+    entry_id: {
+        var n = pst.node(NID.message_store) catch break :entry_id;
+        const pc = PropContext.load(a, &n) catch break :entry_id;
+        const eid = pc.bytes(0x35E0) orelse break :entry_id;
+        if (eid.len != 24) break :entry_id;
+        // PST entry id: flags(4) provider uid(16) nid(4)
+        const nid = rd32(eid, 20);
+        if ((nid & 0x1F) == NID_TYPE.normal_folder and (pst.lookupNode(nid) catch null) != null) return nid;
+    }
+    const top = subFolders(a, pst, NID.root_folder) catch return null;
+    for (top) |k| {
+        const name = (folderInfo(a, pst, k) catch continue).name;
+        if (std.mem.startsWith(u8, name, "Top of") or std.mem.eql(u8, name, "IPM_SUBTREE")) return k;
+        if (std.mem.eql(u8, name, "Root - Mailbox")) {
+            const inner = subFolders(a, pst, k) catch continue;
+            for (inner) |c| {
+                const cn = (folderInfo(a, pst, c) catch continue).name;
+                if (std.mem.eql(u8, cn, "IPM_SUBTREE") or std.mem.startsWith(u8, cn, "Top of")) return c;
+            }
+        }
+    }
+    return null;
+}
+
 pub fn folderInfo(a: Allocator, pst: *Pst, nid: u32) !FolderInfo {
     var n = try pst.node(nid);
     const pc = try PropContext.load(a, &n);

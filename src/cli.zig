@@ -88,22 +88,12 @@ pub fn main(init: std.process.Init) !void {
         }
         try out.print("-- {d} items (times local)\n", .{msgs.len});
     } else if (std.mem.eql(u8, cmd, "hidden")) {
-        const p = pstOnly(out, f, cmd) orelse return;
-        const h = try pst.hiddenScan(arena, p);
-        try out.print("Nodes in index: {d}; folders reachable: {d}; items listed in folder tables: {d}\n\n", .{ h.total_nodes, h.folders_reached, h.listed_messages });
-        try out.print("== Orphaned messages (in file, not shown in any folder): {d}\n", .{h.orphans.len});
-        try printSummaries(out, h.orphans);
-        try out.print("\n== Hidden associated (FAI) items - rules, views, forms: {d}\n", .{h.fai.len});
-        try printSummaries(out, h.fai);
-        try out.print("\n== Orphaned folders (not reachable from the folder tree): {d}\n", .{h.orphan_folders.len});
-        for (h.orphan_folders) |fnid| {
-            const info = pst.folderInfo(arena, p, fnid) catch {
-                try out.print("  0x{x:0>8}  (unreadable)\n", .{fnid});
-                continue;
-            };
-            try out.print("  0x{x:0>8}  {s}  ({d} items)\n", .{ fnid, info.name, info.count });
+        const parts = try f.pstParts(arena, args[2]);
+        if (parts.len == 0) return out.print("{s}: only available for PST/OST files\n", .{cmd});
+        for (parts) |part| {
+            if (parts.len > 1) try out.print("\n######## {s}  (ids below are NIDs within this part)\n", .{part.name});
+            try hiddenCmd(arena, out, part.file);
         }
-        try printIssues(out, p);
     } else if (std.mem.eql(u8, cmd, "search") or std.mem.eql(u8, cmd, "triage")) {
         const is_search = std.mem.eql(u8, cmd, "search");
         if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n");
@@ -157,7 +147,12 @@ pub fn main(init: std.process.Init) !void {
             };
         }
     } else if (std.mem.eql(u8, cmd, "verify")) {
-        try verifyCmd(arena, out, pstOnly(out, f, cmd) orelse return);
+        const parts = try f.pstParts(arena, args[2]);
+        if (parts.len == 0) return out.print("{s}: only available for PST/OST files\n", .{cmd});
+        for (parts) |part| {
+            if (parts.len > 1) try out.print("\n######## {s}\n", .{part.name});
+            try verifyCmd(arena, out, part.file);
+        }
     } else if (std.mem.eql(u8, cmd, "hash")) {
         for (try f.sourceFiles(arena, args[2])) |sf| {
             const h = try Store.sha256File(gpa, io, sf.path);
@@ -198,6 +193,25 @@ fn printSummaries(out: *Io.Writer, list: []const pst.MessageSummary) !void {
             m.note,
         });
     }
+}
+
+/// Orphaned messages / folders and hidden (FAI) items of one PST/OST.
+fn hiddenCmd(a: std.mem.Allocator, out: *Io.Writer, p: *pst.Pst) !void {
+    const h = try pst.hiddenScan(a, p);
+    try out.print("Nodes in index: {d}; folders reachable: {d}; items listed in folder tables: {d}\n\n", .{ h.total_nodes, h.folders_reached, h.listed_messages });
+    try out.print("== Orphaned messages (in file, not shown in any folder): {d}\n", .{h.orphans.len});
+    try printSummaries(out, h.orphans);
+    try out.print("\n== Hidden associated (FAI) items - rules, views, forms: {d}\n", .{h.fai.len});
+    try printSummaries(out, h.fai);
+    try out.print("\n== Orphaned folders (not reachable from the folder tree): {d}\n", .{h.orphan_folders.len});
+    for (h.orphan_folders) |fnid| {
+        const info = pst.folderInfo(a, p, fnid) catch {
+            try out.print("  0x{x:0>8}  (unreadable)\n", .{fnid});
+            continue;
+        };
+        try out.print("  0x{x:0>8}  {s}  ({d} items)\n", .{ fnid, info.name, info.count });
+    }
+    try printIssues(out, p);
 }
 
 fn printIssues(out: *Io.Writer, f: *pst.Pst) !void {
@@ -242,11 +256,19 @@ fn pstOnly(out: *Io.Writer, f: Store, cmd: []const u8) ?*pst.Pst {
 pub fn findFolder(a: std.mem.Allocator, f: Store, path: []const u8) !?u32 {
     var cur: u32 = f.rootFolder();
     const top = try f.subFolders(a, cur);
+    // start at the user's folders: "Top of ..." (PST), "Mailbox (merged)" (multi-file set);
+    // an OST keeps them in "Root - Mailbox/IPM_SUBTREE"
     for (top) |k| {
         const i = try f.folderInfo(a, k);
-        if (std.mem.startsWith(u8, i.name, "Top of")) {
+        if (std.mem.startsWith(u8, i.name, "Top of") or std.mem.eql(u8, i.name, "Mailbox (merged)")) {
             cur = k;
             break;
+        }
+        if (std.mem.eql(u8, i.name, "Root - Mailbox")) {
+            for (try f.subFolders(a, k)) |c| if (std.mem.eql(u8, (try f.folderInfo(a, c)).name, "IPM_SUBTREE")) {
+                cur = c;
+                break;
+            };
         }
     }
     var it = std.mem.tokenizeScalar(u8, path, '/');
