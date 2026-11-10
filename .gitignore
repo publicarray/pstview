@@ -1,0 +1,15 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Exported case data / test output (never commit evidence)
+test-output/
+*.pst
+*.ost
+*.msg
+*.eml
+
+# Python
+__pycache__/
+*.pyc

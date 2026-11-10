@@ -1,0 +1,25 @@
+// pstview resources: application icon ("Sealed Signal" mark, see design/)
+1 ICON "../design/pstview.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,4,0,0
+PRODUCTVERSION 0,4,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "publicarray"
+      VALUE "FileDescription", "pstview - read-only PST viewer and exporter"
+      VALUE "FileVersion", "0.4.0"
+      VALUE "ProductName", "pstview"
+      VALUE "ProductVersion", "0.4.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

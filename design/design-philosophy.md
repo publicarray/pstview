@@ -1,0 +1,13 @@
+# Sealed Signal
+
+**A visual philosophy for things that must be read without being touched.**
+
+Sealed Signal begins from restraint. A mark is a closed vessel: one deep, still field, and a single bright figure set inside it with the calm of an object under glass. Nothing leaks past its edge. The ground is a dense ink-navy, the colour of archival boxes and courtroom binders, and it does the quiet work of holding everything in place. Every form is drawn to be understood at a glance and to survive extreme reduction. It should read as clearly at sixteen pixels as at a metre wide, because something that only reads at one scale has not been resolved. Arriving at that economy should take painstaking refinement, until every remaining line has been earned.
+
+Form is geometric and slightly softened, never sharp enough to cut and never round enough to bounce. Corners carry one consistent radius, chosen with care and applied everywhere, so the eye finds no exception. The primary figure is drawn in a single stroke weight, heavy enough to hold its shape when shrunk and calm enough to stay dignified when enlarged. A second, smaller figure sits against the first and overlaps it, the way a note is clipped to a file or a seal is pressed onto paper. The overlap is the story. Placing it should feel like long, master-level deliberation.
+
+Colour is a strict system of three. Ink for the ground. Paper-white for what is being kept. One signal amber, the hue of evidence tape and warning lamps, used only once in any composition and always at the point of attention. Amber is never decoration; where it appears, something is being watched. There are no gradients, shadows or glows, because the work has to stand on flat, honest colour, calibrated until the contrast is exact.
+
+Space is generous and measured. Each figure keeps a margin of exactly one stroke-width from its neighbours and from the edge of its field, so nothing crowds anything else. Larger compositions repeat this rhythm on a strict grid: the mark at several sizes in a disciplined row, like specimens pinned in a cabinet, with whispered reference numerals beside each one. Typography stays thin, spare and clinical, a wordmark set with careful tracking and small labels that read like catalogue annotations, never like advertising.
+
+The finished work should look inevitable, as if it could not have been drawn any other way, and it should carry the quiet authority of something made by an expert who had all the time in the world. Every alignment is checked, every curve is resolved, every pixel at the smallest size is placed by hand rather than left to chance.
