@@ -41,6 +41,7 @@ const CMD_HDR_CLIP = 16;
 const CMD_HDR_FILE = 17;
 const CMD_OPEN_FOLDER = 18;
 const CMD_PROPS = 19;
+const CMD_RECOVER = 20;
 
 // message-window commands
 const MW_HTML = 201;
@@ -56,7 +57,7 @@ const ID_MW_ATTS = 302;
 const ID_MW_BODY = 303;
 const ID_MW_IMG = 304;
 
-const FolderKind = enum { normal, orphans, fai, label };
+const FolderKind = enum { normal, orphans, fai, label, recovered, versions };
 const Folder = struct { nid: u32, path: []const u8, name: []const u8, count: i64, kind: FolderKind = .normal };
 
 const columns = [_]struct { title: [:0]const u16, width: i32, right: bool = false }{
@@ -100,6 +101,7 @@ const App = struct {
     sort_desc: bool = true,
     sha_hex: ?[]const u8 = null,
     hidden: ?pst.HiddenScan = null,
+    recovery: ?store.Store.Recovery = null,
     temp_files: std.ArrayList([]u8) = .empty,
     index: ?search.FolderIndex = null,
     mailbox_ctx: ?hdrs.Context = null,
@@ -428,6 +430,7 @@ fn closePst() void {
     app.cur_folder = null;
     app.sha_hex = null;
     app.hidden = null;
+    app.recovery = null;
     app.mailbox_ctx = null;
     _ = w.SendMessageW(app.tree.?, w.TVM_DELETEITEM, 0, @bitCast(@intFromPtr(w.TVI_ROOT)));
     _ = w.SendMessageW(app.list.?, w.LVM_SETITEMCOUNT, 0, 0);
@@ -519,7 +522,10 @@ fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HT
         path = if (parent_path.len == 0) info.name else try std.fmt.allocPrint(a, "{s}/{s}", .{ parent_path, info.name });
         const idx = app.folders.items.len;
         try app.folders.append(a, .{ .nid = nid, .path = path, .name = info.name, .count = info.count });
-        const label = if (info.count > 0) try std.fmt.allocPrint(a, "{s} ({d})", .{ info.name, info.count }) else info.name;
+        // Exchange dumpster folders (in eDiscovery / server exports) hold deleted and purged items
+        const dumpster = std.mem.eql(u8, info.name, "Recoverable Items");
+        const shown = if (dumpster) "Recoverable Items (Exchange dumpster: deleted / purged items)" else info.name;
+        const label = if (info.count > 0) try std.fmt.allocPrint(a, "{s} ({d})", .{ shown, info.count }) else shown;
         const lw = try toWAlloc(a, if (label.len > 0) label else "(unnamed)");
         var ins: w.TVINSERTSTRUCTW = .{ .hParent = parent_item orelse w.TVI_ROOT, .hInsertAfter = w.TVI_LAST, .item = .{
             .mask = w.TVIF_TEXT | w.TVIF_PARAM | w.TVIF_STATE,
@@ -548,6 +554,8 @@ fn selectFolder(idx: usize) void {
     app.msgs = switch (fo.kind) {
         .orphans => if (app.hidden) |h| h.orphans else &.{},
         .fai => if (app.hidden) |h| h.fai else &.{},
+        .recovered => if (app.recovery) |r| r.deleted else &.{},
+        .versions => if (app.recovery) |r| r.versions else &.{},
         .label => &.{},
         .normal => app.file.?.folderMessages(a, fo.nid) catch |e| blk: {
             setStatus("Error reading folder: {s}", .{@errorName(e)});
@@ -1060,6 +1068,8 @@ fn createChildren(hwnd: w.HWND) void {
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report for selected message\tCtrl+I"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_CLIP, L("Analyse headers from &clipboard (paste)"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_FILE, L("Analyse headers from .eml / .txt &file..."));
+    _ = w.AppendMenuW(tools, w.MF_SEPARATOR, 0, null);
+    _ = w.AppendMenuW(tools, w.MF_STRING, CMD_RECOVER, L("&Recover deleted items (scan the whole file)..."));
     _ = w.AppendMenuW(tools, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_INTEGRITY, L("&Integrity log"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_VERIFY, L("&Verify every block (checksums)..."));
@@ -1658,6 +1668,46 @@ fn mboxProgress(done: u64, total: u64) void {
     setStatus("Scanning MBOX... {d}%", .{if (total > 0) done * 100 / total else 0});
 }
 
+fn recoverProgress(done: u64, total: u64) void {
+    setStatus("Scanning the file for stale index pages... {d}%", .{if (total > 0) done * 100 / total else 0});
+}
+
+/// Scan every page of the PST/OST part(s) for stale index pages and list what they recover
+/// (items no longer indexed, earlier versions) in a "[Recovered items]" branch.
+fn recoverDeletedItems() void {
+    if (app.file == null) return;
+    if (app.file.? == .mbox) {
+        _ = msgBox("Recovery from stale index pages applies to PST/OST files.\n\nFor Thunderbird mailboxes, messages deleted but not yet compacted are already listed and marked in their folders.", "pstview", w.MB_ICONINFORMATION);
+        return;
+    }
+    if (app.recovery != null) {
+        _ = msgBox("Recovery has already run for this file - see the [Recovered items] branch.", "pstview", w.MB_ICONINFORMATION);
+        return;
+    }
+    waitCursor(true);
+    const a = app.file_arena.allocator();
+    const r = app.file.?.recoverDeleted(a, app.file_path, &recoverProgress) catch |e| {
+        waitCursor(false);
+        _ = msgBox(@errorName(e), "Recovery failed", w.MB_ICONERROR);
+        return;
+    };
+    waitCursor(false);
+    app.recovery = r;
+    const root_idx = app.folders.items.len;
+    app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]", .name = "Recovered items", .count = 0, .kind = .label }) catch return;
+    const root = insertTreeItem(a, null, std.fmt.allocPrint(a, "[Recovered items] ({d})", .{r.deleted.len + r.versions.len}) catch "[Recovered items]", root_idx, true);
+    const di = app.folders.items.len;
+    app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]/No longer indexed", .name = "No longer indexed", .count = @intCast(r.deleted.len), .kind = .recovered }) catch return;
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "No longer indexed - deleted or moved ({d})", .{r.deleted.len}) catch "No longer indexed", di, false);
+    const vi = app.folders.items.len;
+    app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]/Earlier versions", .name = "Earlier versions", .count = @intCast(r.versions.len), .kind = .versions }) catch return;
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Earlier versions of existing items ({d})", .{r.versions.len}) catch "Earlier versions", vi, false);
+    var b: [600]u8 = undefined;
+    const summary = std.fmt.bufPrint(&b, "Recovery scan finished.\n\n{d} item(s) no longer in the index (deleted, or moved and re-numbered) and {d} earlier version(s) of existing items were recovered from {d} stale node-tree and {d} stale block-tree page(s); {d} unindexed block(s) were verified intact by id and checksum.\n\nSee the [Recovered items] branch. Each item's Note names the stale page and the folder it was in.", .{ r.deleted.len, r.versions.len, r.stale_node_pages, r.stale_block_pages, r.blocks }) catch "Recovery finished.";
+    setStatus("Recovery: {d} no longer indexed, {d} earlier versions.", .{ r.deleted.len, r.versions.len });
+    _ = msgBox(summary, "pstview", w.MB_ICONINFORMATION);
+}
+
 fn verifyProgress(done: usize, total: usize) void {
     setStatus("Verifying every block... {d}/{d} nodes", .{ done, total });
 }
@@ -1712,6 +1762,7 @@ fn onCommand(id: u16, code: u16) void {
             _ = msgBox("Select a message first.", "pstview", w.MB_ICONINFORMATION);
         },
         CMD_HDR_CLIP => analyseClipboard(),
+        CMD_RECOVER => recoverDeletedItems(),
         CMD_HDR_FILE => analyseHeaderFile(),
         CMD_INTEGRITY, CMD_VERIFY => if (app.file != null and app.file.? == .mbox) {
             _ = msgBox("The integrity log and block verification apply to PST/OST files (MBOX has no internal checksums).\n\nUse File > Show SHA-256 of source file to fix the evidence state.", "pstview", w.MB_ICONINFORMATION);

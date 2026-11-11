@@ -148,7 +148,7 @@ pub const Set = struct {
 
     // ------------------------------------------------------------ ids
 
-    fn packId(self: *Set, part: u16, nid: u32) u32 {
+    pub fn packId(self: *Set, part: u16, nid: u32) u32 {
         const index = nid >> 5;
         if ((nid & 0x1F) == pst.NID_TYPE.normal_message and index < (1 << index_bits) and part < max_parts)
             return (@as(u32, part) << index_bits) | index;

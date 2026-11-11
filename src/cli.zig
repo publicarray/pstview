@@ -46,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
             \\  pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
             \\  pstx hash   <pst|ost>
             \\  pstx hidden <pst|ost>      orphaned messages/folders and hidden (FAI) items
+            \\  pstx recover <pst|ost>     deleted items and earlier versions recovered from stale index pages
             \\  pstx verify <pst|ost>      read every block, check checksums, list problems
             \\  pstx search <pst|ost> <folder|0xNID> "<query>"   e.g. "from:*@gmail.com subject:invoice"
             \\  pstx triage <pst|ost> <folder|0xNID>             header analysis, risky items first
@@ -95,6 +96,15 @@ pub fn main(init: std.process.Init) !void {
             if (parts.len > 1) try out.print("\n######## {s}  (ids below are NIDs within this part)\n", .{part.name});
             try hiddenCmd(arena, out, part.file);
         }
+    } else if (std.mem.eql(u8, cmd, "recover")) {
+        if (f == .mbox) return out.print("{s}: only available for PST/OST files (Thunderbird messages deleted but not compacted are marked in `list`)\n", .{cmd});
+        const r = try f.recoverDeleted(arena, args[2], null);
+        try out.print("Stale index pages: {d} node-tree, {d} block-tree; {d} unindexed block(s) verified intact by id and checksum.\n\n", .{ r.stale_node_pages, r.stale_block_pages, r.blocks });
+        try out.print("== Recovered items no longer in the index (deleted, or moved and re-numbered): {d}\n", .{r.deleted.len});
+        try printSummaries(out, r.deleted);
+        try out.print("\n== Earlier versions of existing items: {d}\n", .{r.versions.len});
+        try printSummaries(out, r.versions);
+        try out.writeAll("\nThe ids above work with `pstx show`, `headers` and `props` (the file is re-scanned when an id is not in the live index).\n");
     } else if (std.mem.eql(u8, cmd, "search") or std.mem.eql(u8, cmd, "triage")) {
         const is_search = std.mem.eql(u8, cmd, "search");
         if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n");
@@ -127,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "headers")) {
         if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex> [--html out.html]\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
-        const m = try f.loadMessage(arena, nid);
+        const m = try loadAny(arena, f, args[2], nid);
         const an = headers.analyseDetailed(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
         try out.writeAll(try hreport.text(arena, an, fmtLocal));
         if (htmlArg(args)) |path| {
@@ -137,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "props")) {
         if (args.len < 4) return out.writeAll("usage: pstx props <source> <message nid hex> [--html out.html]\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
-        const m = try f.loadMessage(arena, nid);
+        const m = try loadAny(arena, f, args[2], nid);
         const propview = @import("propview.zig");
         try out.writeAll(propview.text(arena, &m, fmtLocal));
         if (htmlArg(args)) |path| {
@@ -174,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "show")) {
         if (args.len < 4) return out.writeAll("usage: pstx show <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, args[3], 16);
-        const m = try f.loadMessage(arena, nid);
+        const m = try loadAny(arena, f, args[2], nid);
         var b1: [32]u8 = undefined;
         try out.print("Subject: {s}\nFrom: {s} <{s}>\nReceived (UTC): {s}\nClass: {s}\n", .{
             try m.subject(arena),                                     try m.senderName(arena), try m.senderEmail(arena),
@@ -426,4 +436,14 @@ fn analyseFileCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, args: []const [
         try writeOut(io, path, try hreport.html(a, an, args[2], fmtLocal));
         try out.print("\nHTML report written to {s}\n", .{path});
     }
+}
+
+/// Load a message by id; ids of recovered items (not in the live index) are found by running
+/// the stale-page recovery scan once and retrying.
+fn loadAny(a: std.mem.Allocator, f: Store, path: []const u8, nid: u32) !pst.Message {
+    return f.loadMessage(a, nid) catch |e| {
+        if (f == .mbox) return e;
+        _ = f.recoverDeleted(a, path, null) catch return e;
+        return f.loadMessage(a, nid);
+    };
 }

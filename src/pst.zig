@@ -152,7 +152,7 @@ pub const Format = enum {
         };
     }
 
-    fn pageSize(f: Format) usize {
+    pub fn pageSize(f: Format) usize {
         return switch (f) {
             .unicode => 512,
             .unicode_4k => 4096,
@@ -189,7 +189,7 @@ pub const Format = enum {
 };
 
 /// B-tree page metadata (from the bytes after the entries).
-const PageMeta = struct { c_ent: usize, cb_ent: usize, level: u8 };
+pub const PageMeta = struct { c_ent: usize, cb_ent: usize, level: u8 };
 
 fn permuteDecode(buf: []u8) void {
     for (buf) |*c| c.* = crypt_permute_decode[c.*];
@@ -292,6 +292,10 @@ pub const Pst = struct {
     /// Named-property map (NID 0x61), loaded on first use.
     names: ?namemap.NameMap = null,
     names_arena: ?std.heap.ArenaAllocator = null,
+    /// Nodes and blocks recovered from stale index pages (see recover.zig); consulted when the
+    /// live index has no entry, so recovered items load like any other.
+    recovered_nodes: std.AutoHashMapUnmanaged(u32, NbtEntry) = .empty,
+    recovered_blocks: std.AutoHashMapUnmanaged(u64, BbtEntry) = .empty,
 
     pub fn nameMap(self: *Pst) namemap.NameMap {
         if (self.names) |n| return n;
@@ -372,8 +376,70 @@ pub const Pst = struct {
         self.issue_keys.deinit(self.gpa);
         if (self.all_nodes) |n| self.gpa.free(n);
         if (self.names_arena) |*ar| ar.deinit();
+        self.recovered_nodes.deinit(self.gpa);
+        self.recovered_blocks.deinit(self.gpa);
         self.file.close(self.io);
         self.gpa.destroy(self);
+    }
+
+    /// Raw bytes at `off` (fewer at the end of the file); used by whole-file scans.
+    pub fn readRaw(self: *Pst, buf: []u8, off: u64) !usize {
+        if (off >= self.file_size) return 0;
+        const len: usize = @intCast(@min(buf.len, self.file_size - off));
+        return self.file.readPositionalAll(self.io, buf[0..len], off);
+    }
+
+    /// Page type (0x80 block tree, 0x81 node tree) if `p` is a well-formed B-tree page with a
+    /// correct checksum, else null. Does not log: used to probe arbitrary file positions.
+    pub fn pageType(self: *Pst, p: []const u8) ?u8 {
+        const t = self.format.pageTrailer();
+        if (p.len < self.format.pageSize()) return null;
+        const ptype = p[t];
+        if ((ptype != 0x80 and ptype != 0x81) or p[t + 1] != ptype) return null;
+        if (PstCrc.hash(p[0..t]) != rd32(p, t + 4)) return null;
+        _ = self.pageMeta(p) catch return null;
+        return ptype;
+    }
+
+    /// Is the block described by `e` still on disk with its own id and a correct checksum?
+    pub fn blockIntact(self: *Pst, a: Allocator, e: BbtEntry) bool {
+        const tl = self.format.blockTrailerLen();
+        const al = self.format.blockAlign();
+        const aligned: usize = (@as(usize, e.cb) + tl + al - 1) & ~(al - 1);
+        const full = a.alloc(u8, aligned) catch return false;
+        self.readAt(full, e.ib) catch return false;
+        const t = full[aligned - tl ..];
+        if (rd16(t, 0) != e.cb) return false;
+        if ((rd64(t, 8) & ~@as(u64, 1)) != (e.bid & ~@as(u64, 1))) return false;
+        return PstCrc.hash(full[0..e.cb]) == rd32(t, 4);
+    }
+
+    /// Block ids referenced by an internal block (XBLOCK / XXBLOCK entries, SLBLOCK data and
+    /// sub-node blocks, SIBLOCK child blocks).
+    pub fn childBlocks(self: *Pst, a: Allocator, bid: u64) ![]u64 {
+        const b = try self.readBlock(a, bid);
+        try need(b, 0, 8);
+        const c_ent: usize = rd16(b, 2);
+        var out: std.ArrayList(u64) = .empty;
+        switch (b[0]) {
+            0x01 => {
+                try need(b, 8, c_ent * 8);
+                for (0..c_ent) |i| try out.append(a, rd64(b, 8 + i * 8));
+            },
+            0x02 => if (b[1] == 0) {
+                try need(b, 8, c_ent * 24);
+                for (0..c_ent) |i| {
+                    try out.append(a, rd64(b, 8 + i * 24 + 8));
+                    const sub = rd64(b, 8 + i * 24 + 16);
+                    if (sub != 0) try out.append(a, sub);
+                }
+            } else {
+                try need(b, 8, c_ent * 16);
+                for (0..c_ent) |i| try out.append(a, rd64(b, 8 + i * 16 + 8));
+            },
+            else => return error.Corrupt,
+        }
+        return out.items;
     }
 
     fn readAt(self: *Pst, buf: []u8, off: u64) !void {
@@ -383,7 +449,7 @@ pub const Pst = struct {
     }
 
     /// One B-tree page (512 or 4096 bytes depending on the format), cached for the life of the Pst.
-    fn page(self: *Pst, ib: u64) ![]const u8 {
+    pub fn page(self: *Pst, ib: u64) ![]const u8 {
         if (self.page_cache.get(ib)) |p| return p;
         const p = try self.gpa.alloc(u8, self.format.pageSize());
         errdefer self.gpa.free(p);
@@ -404,7 +470,7 @@ pub const Pst = struct {
     }
 
     /// Entry count, entry size and level of a B-tree page; error.Corrupt if they do not fit the page.
-    fn pageMeta(self: *Pst, p: []const u8) Error!PageMeta {
+    pub fn pageMeta(self: *Pst, p: []const u8) Error!PageMeta {
         const e = self.format.pageEntriesLen();
         const m: PageMeta = switch (self.format) {
             // cEnt(1) cEntMax(1) cbEnt(1) cLevel(1)
@@ -481,12 +547,12 @@ pub const Pst = struct {
     }
 
     pub fn lookupNode(self: *Pst, nid: u32) !?NbtEntry {
-        const e = (try self.btreeFind(self.nbt_ib, nid, false)) orelse return null;
+        const e = (try self.btreeFind(self.nbt_ib, nid, false)) orelse return self.recovered_nodes.get(nid);
         return .{ .nid = @truncate(rd64(e, 0)), .bid_data = rd64(e, 8), .bid_sub = rd64(e, 16), .nid_parent = rd32(e, 24) };
     }
 
     pub fn lookupBlock(self: *Pst, bid: u64) !?BbtEntry {
-        const e = (try self.btreeFind(self.bbt_ib, bid, true)) orelse return null;
+        const e = (try self.btreeFind(self.bbt_ib, bid, true)) orelse return self.recovered_blocks.get(bid & ~@as(u64, 1));
         // BBTENTRY: bref(bid, ib) cb(2) then cRef(2) for wVer 23, cbInflated(2) cRef(4) for 4K
         const cb = rd16(e, 16);
         const cb_inflated = if (self.format == .unicode_4k and e.len >= 20) rd16(e, 18) else cb;

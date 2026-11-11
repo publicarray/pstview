@@ -27,6 +27,7 @@ pstx analyse suspicious.eml --html hdr.html       # headers of a saved message o
 pstx tree    "D:\Case\Acronis export"             # folder of PST parts: merged into one mailbox
 pstx list    "part1.pst;part2.pst" "Sent Items"   # or name the parts, separated by ';'
 pstx props   backup.pst 00200044 --html props.html  # every MAPI property of one item, named properties resolved
+pstx recover backup.ost                             # deleted items / earlier versions from stale index pages
 ```
 
 `export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date.
@@ -41,6 +42,16 @@ Item fields are shown in the preview, the message window, the HTML view and `pst
 * **All items:** categories, importance, sensitivity, follow-up flag, reminder.
 
 *Message > All properties* (`pstx props`) lists every MAPI property of the item, its recipients and attachments: tag, name (named properties as property set and dispid or name), type and decoded value - the raw view for anything the summary does not show.
+
+## Hidden, deleted and recovered items
+
+* **Hidden-item scan** (automatic on open, *[Hidden items]* branch, `pstx hidden`): messages in the file that no folder lists (orphans), folder-associated (FAI) items such as rules and views, and folders not reachable from the tree.
+* **Recover deleted items** (*Tools > Recover deleted items*, `pstx recover`): when Outlook changes its index it writes the changed B-tree pages elsewhere and frees the old ones, which usually stay in the file. pstview reads every page-aligned position of the file, keeps pages that are valid (type repeated, checksum correct) but no longer part of the live index, and recovers the messages they list:
+  * **No longer indexed** - the item's node is gone from the live index (deleted, or moved and re-numbered);
+  * **Earlier versions** - the node still exists but pointed at different data before (e.g. an edited draft or a later sync change).
+  An item is recovered only when its data blocks can still be read with a matching block trailer (block id and checksum), using live or stale block-index entries. Each recovered item's *Note* names the stale page and the folder it was in. Recovered items open, analyse and export like any other; nothing is written to the file. The approach follows libpff's `pffrecover` (see *Personal Folder File forensics*, J. Metz). On test OSTs it recovered 84 and 81 deleted items (mail, appointments, meeting requests, a contact) plus several hundred earlier versions, in seconds.
+* **Exchange dumpster:** a *Recoverable Items* folder (Deletions, Purges, Versions - present in eDiscovery and server-side exports, never in an OST) is labelled as such in the tree.
+* **Thunderbird:** messages flagged expunged but still in the mbox (not yet compacted) are listed and marked.
 
 ## Multi-file PST sets (Acronis exports in parts)
 
@@ -95,6 +106,7 @@ zig build                # Debug build
 * `src/rtfcp.zig`: compressed RTF bodies: decompression, HTML de-encapsulation, RTF to text.
 * `src/headers.zig`, `src/headerreport.zig`: header analysis (triage and detailed) and its HTML / text reports.
 * `src/namemap.zig`: PST named-property map; `src/itemview.zig`: calendar / contact / task / note / journal fields; `src/propview.zig`: all-properties view.
+* `src/recover.zig`: deleted-item recovery from stale index pages.
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
 * `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.

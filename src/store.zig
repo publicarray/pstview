@@ -12,6 +12,7 @@ pub const pst = @import("pst.zig");
 pub const mbox = @import("mbox.zig");
 pub const mime = @import("mime.zig");
 pub const multi = @import("multi.zig");
+pub const recover = @import("recover.zig");
 
 pub const Store = union(enum) {
     pst: *pst.Pst,
@@ -101,6 +102,40 @@ pub const Store = union(enum) {
             },
             .mbox => return &.{},
         }
+    }
+
+    pub const Recovery = struct {
+        deleted: []pst.MessageSummary,
+        versions: []pst.MessageSummary,
+        stale_node_pages: usize = 0,
+        stale_block_pages: usize = 0,
+        blocks: usize = 0,
+    };
+
+    /// Recover items from stale index pages of every PST/OST part (see recover.zig). The returned
+    /// summaries carry ids that load through this store. MBOX sources return nothing (deleted
+    /// Thunderbird messages that are still in the file are already marked in the lists).
+    pub fn recoverDeleted(self: Store, a: Allocator, path: []const u8, progress: ?*const fn (done: u64, total: u64) void) !Recovery {
+        var deleted: std.ArrayList(pst.MessageSummary) = .empty;
+        var versions: std.ArrayList(pst.MessageSummary) = .empty;
+        var res: Recovery = .{ .deleted = &.{}, .versions = &.{} };
+        for (try self.pstParts(a, path), 0..) |part, i| {
+            const r = try recover.scan(a, part.file, progress);
+            res.stale_node_pages += r.stale_node_pages;
+            res.stale_block_pages += r.stale_block_pages;
+            res.blocks += r.blocks_found;
+            for (r.items) |it| {
+                var s = it.summary;
+                if (self == .set) {
+                    s.nid = self.set.packId(@intCast(i), it.nid);
+                    s.note = try std.fmt.allocPrint(a, "{s}: {s}", .{ part.name, s.note });
+                }
+                try (if (it.kind == .deleted) &deleted else &versions).append(a, s);
+            }
+        }
+        res.deleted = deleted.items;
+        res.versions = versions.items;
+        return res;
     }
 
     pub fn rootFolder(self: Store) u32 {
