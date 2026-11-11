@@ -11,6 +11,16 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 | `pstview.exe` | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST, OST, MBOX file or mail folder onto the window, use *File > Open*, or pass it on the command line. |
 | `pstx.exe` | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `analyse`. Takes a `.pst`, `.ost`, MBOX file or folder of MBOX mailboxes (`hidden`, `verify` and `locate` are PST/OST only; `analyse` takes a `.eml` or a text file of headers). |
 
+## Portable or installed
+
+pstview runs straight from the release zip; portable use writes nothing to the PC. On start it offers to install for the current user, and *Help > Install pstview for this user* does the same at any time. Ticking *Don't offer this again* keeps it portable and stores only that choice (`HKCU\Software\pstview`, value `NoInstallPrompt`). Installing:
+
+* copies `pstview.exe` and `pstx.exe` to `%LOCALAPPDATA%\Programs\pstview`, with a Start menu shortcut;
+* registers file handlers for `.pst`, `.ost`, `.mbox` and `.mbx` (an *Open with* entry everywhere; the default only for types no other app has claimed - Windows asks the user to confirm defaults, see *Help > Choose default apps*);
+* adds an uninstall entry to *Settings > Apps*.
+
+Everything is per user under `HKCU`, so no administrator rights are needed. *Help > Uninstall pstview* (or *Settings > Apps*) removes the files, the shortcut and only the registry values pstview added.
+
 ### pstx examples
 
 ```
@@ -100,6 +110,8 @@ zig build -Drelease      # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
 zig build                # Debug build
 ```
 
+The version shown in *Help > About* and by `pstx --version` comes from `git describe`; set `release_version` in `build.zig` before tagging a release (a tag that does not match it fails the build).
+
 ## Layout
 
 * `src/pst.zig`: PST/OST reader (NDB B-trees and blocks incl. the 4K OST variant, heap-on-node, property and table contexts, folders, messages, recipients, attachments).
@@ -111,6 +123,7 @@ zig build                # Debug build
 * `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
+* `src/ui.zig`: visual style (palette from `design/`, folder glyphs, welcome screen, task dialogs); `src/install.zig`: per-user install / uninstall.
 * `src/cli.zig`: command line.
 
 ## Releases

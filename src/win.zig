@@ -459,3 +459,238 @@ pub fn charsetToUtf8(a: std.mem.Allocator, charset: []const u8, bytes: []const u
     if (got <= 0) return null;
     return std.unicode.wtf16LeToWtf8Alloc(a, wbuf[0..@intCast(got)]) catch null;
 }
+
+// ================================================================ registry, shell and files (installer)
+
+pub const HKEY = *opaque {};
+// Predefined keys are sign-extended 32-bit values on x64.
+pub const HKEY_CLASSES_ROOT: HKEY = @ptrFromInt(0xFFFFFFFF80000000);
+pub const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0xFFFFFFFF80000001);
+pub const KEY_READ: u32 = 0x20019;
+pub const KEY_WRITE: u32 = 0x20006;
+pub const KEY_ALL_ACCESS: u32 = 0xF003F;
+pub const REG_NONE: u32 = 0;
+pub const REG_SZ: u32 = 1;
+pub const REG_DWORD: u32 = 4;
+pub const ERROR_SUCCESS: i32 = 0;
+pub extern "advapi32" fn RegCreateKeyExW(key: HKEY, sub: [*:0]const u16, reserved: u32, class: ?[*:0]const u16, options: u32, sam: u32, sa: ?*anyopaque, result: *?HKEY, disposition: ?*u32) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegOpenKeyExW(key: HKEY, sub: ?[*:0]const u16, options: u32, sam: u32, result: *?HKEY) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegSetValueExW(key: HKEY, name: ?[*:0]const u16, reserved: u32, typ: u32, data: ?[*]const u8, cb: u32) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegQueryValueExW(key: HKEY, name: ?[*:0]const u16, reserved: ?*u32, typ: ?*u32, data: ?[*]u8, cb: ?*u32) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegQueryInfoKeyW(key: HKEY, class: ?[*]u16, class_len: ?*u32, reserved: ?*u32, subkeys: ?*u32, max_subkey: ?*u32, max_class: ?*u32, values: ?*u32, max_value_name: ?*u32, max_value: ?*u32, security: ?*u32, last_write: ?*FILETIME) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegDeleteTreeW(key: HKEY, sub: ?[*:0]const u16) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegDeleteKeyW(key: HKEY, sub: [*:0]const u16) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegDeleteValueW(key: HKEY, name: ?[*:0]const u16) callconv(WINAPI) i32;
+pub extern "advapi32" fn RegCloseKey(key: HKEY) callconv(WINAPI) i32;
+
+pub const GUID = extern struct { a: u32, b: u16, c: u16, d: [8]u8 };
+pub const KF_FLAG_CREATE: u32 = 0x8000;
+/// %LOCALAPPDATA%\Programs
+pub const FOLDERID_UserProgramFiles: GUID = .{ .a = 0x5CD7AEE2, .b = 0x2219, .c = 0x4A67, .d = .{ 0xB8, 0x5D, 0x6C, 0x9C, 0xE1, 0x56, 0x60, 0xCB } };
+/// Start Menu\Programs of the current user
+pub const FOLDERID_Programs: GUID = .{ .a = 0xA77F5D77, .b = 0x2E2B, .c = 0x44C3, .d = .{ 0xA6, 0xA2, 0xAB, 0xA6, 0x01, 0x05, 0x4A, 0x51 } };
+pub extern "shell32" fn SHGetKnownFolderPath(id: *const GUID, flags: u32, token: ?*anyopaque, path: *?[*:0]u16) callconv(WINAPI) i32;
+pub const SHCNE_ASSOCCHANGED: i32 = 0x08000000;
+pub extern "shell32" fn SHChangeNotify(event: i32, flags: u32, a: ?*const anyopaque, b: ?*const anyopaque) callconv(WINAPI) void;
+pub extern "kernel32" fn GetModuleFileNameW(module: ?HINSTANCE, buf: [*]u16, n: u32) callconv(WINAPI) u32;
+pub extern "kernel32" fn CopyFileW(src: [*:0]const u16, dst: [*:0]const u16, fail_if_exists: BOOL) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn CreateDirectoryW(path: [*:0]const u16, sa: ?*anyopaque) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn DeleteFileW(path: [*:0]const u16) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn RemoveDirectoryW(path: [*:0]const u16) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(WINAPI) u32;
+pub extern "kernel32" fn GetLastError() callconv(WINAPI) u32;
+pub const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const ERROR_ALREADY_EXISTS: u32 = 183;
+
+pub const CLSCTX_INPROC_SERVER: u32 = 0x1;
+pub extern "ole32" fn CoCreateInstance(clsid: *const GUID, outer: ?*anyopaque, ctx: u32, iid: *const GUID, out: *?*anyopaque) callconv(WINAPI) i32;
+pub const CLSID_ShellLink: GUID = .{ .a = 0x00021401, .b = 0, .c = 0, .d = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
+pub const IID_IShellLinkW: GUID = .{ .a = 0x000214F9, .b = 0, .c = 0, .d = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
+pub const IID_IPersistFile: GUID = .{ .a = 0x0000010B, .b = 0, .c = 0, .d = .{ 0xC0, 0, 0, 0, 0, 0, 0, 0x46 } };
+
+/// Vtable of IShellLinkW (only the slots pstview calls are typed).
+pub const IShellLinkWVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(WINAPI) i32,
+    AddRef: *const anyopaque,
+    Release: *const fn (*anyopaque) callconv(WINAPI) u32,
+    GetPath: *const anyopaque,
+    GetIDList: *const anyopaque,
+    SetIDList: *const anyopaque,
+    GetDescription: *const anyopaque,
+    SetDescription: *const fn (*anyopaque, [*:0]const u16) callconv(WINAPI) i32,
+    GetWorkingDirectory: *const anyopaque,
+    SetWorkingDirectory: *const fn (*anyopaque, [*:0]const u16) callconv(WINAPI) i32,
+    GetArguments: *const anyopaque,
+    SetArguments: *const anyopaque,
+    GetHotkey: *const anyopaque,
+    SetHotkey: *const anyopaque,
+    GetShowCmd: *const anyopaque,
+    SetShowCmd: *const anyopaque,
+    GetIconLocation: *const anyopaque,
+    SetIconLocation: *const fn (*anyopaque, [*:0]const u16, i32) callconv(WINAPI) i32,
+    SetRelativePath: *const anyopaque,
+    Resolve: *const anyopaque,
+    SetPath: *const fn (*anyopaque, [*:0]const u16) callconv(WINAPI) i32,
+};
+/// Vtable of IPersistFile (only Save is typed).
+pub const IPersistFileVtbl = extern struct {
+    QueryInterface: *const anyopaque,
+    AddRef: *const anyopaque,
+    Release: *const fn (*anyopaque) callconv(WINAPI) u32,
+    GetClassID: *const anyopaque,
+    IsDirty: *const anyopaque,
+    Load: *const anyopaque,
+    Save: *const fn (*anyopaque, [*:0]const u16, BOOL) callconv(WINAPI) i32,
+    SaveCompleted: *const anyopaque,
+    GetCurFile: *const anyopaque,
+};
+
+// ---- task dialog (comctl32 v6; the structures are byte-packed in commctrl.h)
+pub const TASKDIALOG_BUTTON = extern struct { nButtonID: i32 align(1), pszButtonText: [*:0]const u16 align(1) };
+pub const TASKDIALOGCONFIG = extern struct {
+    cbSize: u32 align(1) = @sizeOf(TASKDIALOGCONFIG),
+    hwndParent: ?HWND align(1) = null,
+    hInstance: ?HINSTANCE align(1) = null,
+    dwFlags: u32 align(1) = 0,
+    dwCommonButtons: u32 align(1) = 0,
+    pszWindowTitle: ?[*:0]const u16 align(1) = null,
+    hMainIcon: ?*anyopaque align(1) = null,
+    pszMainInstruction: ?[*:0]const u16 align(1) = null,
+    pszContent: ?[*:0]const u16 align(1) = null,
+    cButtons: u32 align(1) = 0,
+    pButtons: ?[*]const TASKDIALOG_BUTTON align(1) = null,
+    nDefaultButton: i32 align(1) = 0,
+    cRadioButtons: u32 align(1) = 0,
+    pRadioButtons: ?[*]const TASKDIALOG_BUTTON align(1) = null,
+    nDefaultRadioButton: i32 align(1) = 0,
+    pszVerificationText: ?[*:0]const u16 align(1) = null,
+    pszExpandedInformation: ?[*:0]const u16 align(1) = null,
+    pszExpandedControlText: ?[*:0]const u16 align(1) = null,
+    pszCollapsedControlText: ?[*:0]const u16 align(1) = null,
+    hFooterIcon: ?*anyopaque align(1) = null,
+    pszFooter: ?[*:0]const u16 align(1) = null,
+    pfCallback: ?*const anyopaque align(1) = null,
+    lpCallbackData: isize align(1) = 0,
+    cxWidth: u32 align(1) = 0,
+};
+comptime {
+    std.debug.assert(@sizeOf(TASKDIALOGCONFIG) == 160);
+    std.debug.assert(@sizeOf(TASKDIALOG_BUTTON) == 12);
+}
+pub const TDF_USE_HICON_MAIN: u32 = 0x0002;
+pub const TDF_ALLOW_DIALOG_CANCELLATION: u32 = 0x0008;
+pub const TDF_USE_COMMAND_LINKS: u32 = 0x0010;
+pub const TDF_POSITION_RELATIVE_TO_WINDOW: u32 = 0x1000;
+pub const TDCBF_CANCEL_BUTTON: u32 = 0x8;
+pub const TDCBF_CLOSE_BUTTON: u32 = 0x20;
+pub const IDCANCEL: i32 = 2;
+pub extern "comctl32" fn TaskDialogIndirect(cfg: *const TASKDIALOGCONFIG, button: ?*i32, radio: ?*i32, verified: ?*BOOL) callconv(WINAPI) i32;
+
+// ================================================================ theming and drawing
+
+pub extern "dwmapi" fn DwmSetWindowAttribute(hwnd: HWND, attr: u32, value: *const anyopaque, size: u32) callconv(WINAPI) i32;
+pub const DWMWA_BORDER_COLOR: u32 = 34;
+pub const DWMWA_CAPTION_COLOR: u32 = 35;
+pub const DWMWA_TEXT_COLOR: u32 = 36;
+pub extern "uxtheme" fn SetWindowTheme(hwnd: HWND, app_name: ?[*:0]const u16, id_list: ?[*:0]const u16) callconv(WINAPI) i32;
+
+pub const HBITMAP = *opaque {};
+pub const HPEN = *opaque {};
+pub const HIMAGELIST = *opaque {};
+pub const BITMAPINFOHEADER = extern struct {
+    biSize: u32 = @sizeOf(BITMAPINFOHEADER),
+    biWidth: i32,
+    biHeight: i32,
+    biPlanes: u16 = 1,
+    biBitCount: u16 = 32,
+    biCompression: u32 = 0,
+    biSizeImage: u32 = 0,
+    biXPelsPerMeter: i32 = 0,
+    biYPelsPerMeter: i32 = 0,
+    biClrUsed: u32 = 0,
+    biClrImportant: u32 = 0,
+};
+pub extern "gdi32" fn CreateCompatibleDC(hdc: ?HDC) callconv(WINAPI) ?HDC;
+pub extern "gdi32" fn DeleteDC(hdc: HDC) callconv(WINAPI) BOOL;
+pub extern "gdi32" fn CreateDIBSection(hdc: ?HDC, bmi: *const BITMAPINFOHEADER, usage: u32, bits: *?*anyopaque, section: ?*anyopaque, offset: u32) callconv(WINAPI) ?HBITMAP;
+pub extern "gdi32" fn DeleteObject(obj: *anyopaque) callconv(WINAPI) BOOL;
+pub extern "gdi32" fn SetTextColor(hdc: HDC, color: u32) callconv(WINAPI) u32;
+pub extern "gdi32" fn SetBkColor(hdc: HDC, color: u32) callconv(WINAPI) u32;
+pub extern "gdi32" fn CreateSolidBrush(color: u32) callconv(WINAPI) ?HBRUSH;
+pub extern "gdi32" fn CreatePen(style: i32, width: i32, color: u32) callconv(WINAPI) ?HPEN;
+pub extern "gdi32" fn RoundRect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, w: i32, h: i32) callconv(WINAPI) BOOL;
+pub extern "gdi32" fn Ellipse(hdc: HDC, l: i32, t: i32, r: i32, b: i32) callconv(WINAPI) BOOL;
+pub extern "user32" fn GetDC(hwnd: ?HWND) callconv(WINAPI) ?HDC;
+pub extern "user32" fn ReleaseDC(hwnd: ?HWND, hdc: HDC) callconv(WINAPI) i32;
+pub extern "user32" fn LoadImageW(inst: ?HINSTANCE, name: usize, typ: u32, cx: i32, cy: i32, flags: u32) callconv(WINAPI) ?*anyopaque;
+pub extern "user32" fn DrawIconEx(hdc: HDC, x: i32, y: i32, icon: HICON, cx: i32, cy: i32, step: u32, brush: ?HBRUSH, flags: u32) callconv(WINAPI) BOOL;
+pub extern "user32" fn PostMessageW(hwnd: ?HWND, msg: u32, wp: WPARAM, lp: LPARAM) callconv(WINAPI) BOOL;
+pub extern "user32" fn EnableMenuItem(menu: HMENU, id: u32, flags: u32) callconv(WINAPI) BOOL;
+pub extern "comctl32" fn ImageList_Create(cx: i32, cy: i32, flags: u32, initial: i32, grow: i32) callconv(WINAPI) ?HIMAGELIST;
+pub extern "comctl32" fn ImageList_Add(himl: HIMAGELIST, image: HBITMAP, mask: ?HBITMAP) callconv(WINAPI) i32;
+pub const IMAGE_ICON: u32 = 1;
+pub const DI_NORMAL: u32 = 3;
+pub const ILC_COLOR32: u32 = 0x20;
+pub const NULL_PEN: i32 = 8;
+pub const NULL_BRUSH: i32 = 5;
+pub const PS_SOLID: i32 = 0;
+pub const DT_CENTER: u32 = 0x1;
+pub const DT_VCENTER: u32 = 0x4;
+pub const DT_WORDBREAK: u32 = 0x10;
+pub const DT_SINGLELINE: u32 = 0x20;
+pub const DT_NOPREFIX: u32 = 0x800;
+pub const DT_END_ELLIPSIS: u32 = 0x8000;
+pub const TRANSPARENT: i32 = 1;
+pub const WM_APP: u32 = 0x8000;
+pub const WM_DRAWITEM: u32 = 0x002B;
+pub const WM_CTLCOLOREDIT: u32 = 0x0133;
+pub const WM_CTLCOLORSTATIC: u32 = 0x0138;
+pub const WM_INITMENUPOPUP: u32 = 0x0117;
+pub const MF_BYCOMMAND: u32 = 0x0;
+pub const MF_ENABLED: u32 = 0x0;
+pub const SW_SHOWNORMAL: i32 = 1;
+pub const WS_CLIPSIBLINGS: u32 = 0x04000000;
+pub const BS_COMMANDLINK: u32 = 0x0E;
+pub const BCM_SETNOTE: u32 = 0x1609;
+pub const BN_CLICKED: u16 = 0;
+pub const EM_SETRECT: u32 = 0x00B3;
+pub const SBT_OWNERDRAW: usize = 0x1000;
+pub const DRAWITEMSTRUCT = extern struct { CtlType: u32, CtlID: u32, itemID: u32, itemAction: u32, itemState: u32, hwndItem: ?HWND, hDC: ?HDC, rcItem: RECT, itemData: usize };
+pub const TVIF_IMAGE: u32 = 0x2;
+pub const TVIF_SELECTEDIMAGE: u32 = 0x20;
+pub const TVS_TRACKSELECT: u32 = 0x200;
+pub const TVS_FULLROWSELECT: u32 = 0x1000;
+pub const TVS_EX_DOUBLEBUFFER: usize = 0x4;
+pub const TVS_EX_FADEINOUTEXPANDOS: usize = 0x40;
+pub const TVM_GETNEXTITEM = TV_FIRST + 10;
+pub const TVM_SETIMAGELIST = TV_FIRST + 9;
+pub const TVM_SETITEMHEIGHT = TV_FIRST + 27;
+pub const TVM_SETBKCOLOR = TV_FIRST + 29;
+pub const TVM_SETTEXTCOLOR = TV_FIRST + 30;
+pub const TVM_SETEXTENDEDSTYLE = TV_FIRST + 44;
+pub const TVGN_ROOT: WPARAM = 0;
+pub const TVGN_NEXT: WPARAM = 1;
+pub const TVGN_CHILD: WPARAM = 4;
+pub const LVM_SETBKCOLOR = LVM_FIRST + 1;
+pub const LVM_SETIMAGELIST = LVM_FIRST + 3;
+pub const LVM_SETTEXTCOLOR = LVM_FIRST + 36;
+pub const LVM_SETTEXTBKCOLOR = LVM_FIRST + 38;
+pub const LVSIL_SMALL: WPARAM = 1;
+
+/// COLORREF (0x00BBGGRR) from 0xRRGGBB.
+pub fn rgb(hex: u32) u32 {
+    return ((hex & 0xFF) << 16) | (hex & 0xFF00) | ((hex >> 16) & 0xFF);
+}
+pub extern "gdi32" fn GdiFlush() callconv(WINAPI) BOOL;
+pub extern "gdi32" fn GetTextFaceW(hdc: HDC, n: i32, buf: [*]u16) callconv(WINAPI) i32;
+pub extern "user32" fn IsWindowVisible(hwnd: HWND) callconv(WINAPI) BOOL;
+pub const WM_PRINTCLIENT: u32 = 0x0318;
+pub const WM_CTLCOLORBTN: u32 = 0x0135;
+pub const IDC_SIZENS: usize = 32645;
+pub const EM_SETMARGINS: u32 = 0x00D3;
+pub const EC_LEFTMARGIN: usize = 0x1;
+pub const EC_RIGHTMARGIN: usize = 0x2;
+pub const LVN_GETEMPTYMARKUP: i32 = -187;
+pub const EMF_CENTERED: u32 = 0x1;
+pub const NMLVEMPTYMARKUP = extern struct { hdr: NMHDR, dwFlags: u32, szMarkup: [2084]u16 };

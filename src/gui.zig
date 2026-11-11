@@ -14,6 +14,8 @@ const hreport = @import("headerreport.zig");
 const itemview = @import("itemview.zig");
 const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
+const ui = @import("ui.zig");
+const install = @import("install.zig");
 const build_options = @import("build_options");
 const L = w.L;
 
@@ -43,6 +45,13 @@ const CMD_HDR_FILE = 17;
 const CMD_OPEN_FOLDER = 18;
 const CMD_PROPS = 19;
 const CMD_RECOVER = 20;
+const CMD_INSTALL = 21;
+const CMD_UNINSTALL = 22;
+const CMD_DEFAULT_APPS = 23;
+const CMD_CLOSE = 24;
+
+/// Posted after the main window is shown: offer to install (first run of the portable exe).
+const WM_APP_FIRST_RUN = w.WM_APP + 1;
 
 // message-window commands
 const MW_HTML = 201;
@@ -59,7 +68,7 @@ const ID_MW_BODY = 303;
 const ID_MW_IMG = 304;
 
 const FolderKind = enum { normal, orphans, fai, label, recovered, versions };
-const Folder = struct { nid: u32, path: []const u8, name: []const u8, count: i64, kind: FolderKind = .normal };
+const Folder = struct { nid: u32, path: []const u8, name: []const u8, count: i64, kind: FolderKind = .normal, item: ?w.HTREEITEM = null };
 
 const columns = [_]struct { title: [:0]const u16, width: i32, right: bool = false }{
     .{ .title = L("Received"), .width = 140 },
@@ -88,6 +97,19 @@ const App = struct {
     split_x: i32 = 300,
     split_y_frac: f32 = 0.45,
     dragging: bool = false,
+    dragging_y: bool = false,
+    // visual style (ui.zig)
+    bold: ?w.HFONT = null,
+    pane_brush: ?w.HBRUSH = null,
+    white_brush: ?w.HBRUSH = null,
+    hairline_brush: ?w.HBRUSH = null,
+    glyph_font: ?w.HFONT = null,
+    /// Left-pane header: source name and description.
+    source_name: []u8 = &.{},
+    source_desc: []u8 = &.{},
+    /// No message selected: the preview is hidden and a hint painted in its place.
+    preview_empty: bool = true,
+    help_menu: ?w.HMENU = null,
 
     file: ?store.Store = null,
     file_path: []u8 = &.{},
@@ -376,11 +398,51 @@ fn msgBox(text: []const u8, title: []const u8, flags: u32) i32 {
     return w.MessageBoxW(app.hwnd, tw, ti, flags);
 }
 
+/// Status bar parts: 0 = read-only seal (owner-drawn), 1 = source, 2 = messages.
+const SB_PART_SEAL = 0;
+const SB_PART_SOURCE = 1;
+const SB_PART_TEXT = 2;
+
 fn setStatus(comptime fmt: []const u8, args: anytype) void {
     var b: [512]u8 = undefined;
     const s = std.fmt.bufPrint(&b, fmt, args) catch return;
+    setStatusPart(SB_PART_TEXT, s);
+}
+
+fn setStatusPart(part: usize, s: []const u8) void {
     var wb: [512]u16 = undefined;
-    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, 0, @intCast(@intFromPtr(toW(&wb, s))));
+    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, part, @intCast(@intFromPtr(toW(&wb, s))));
+}
+
+fn statusParts() void {
+    var rc: w.RECT = undefined;
+    _ = w.GetClientRect(app.hwnd.?, &rc);
+    const seal = sc(118);
+    const parts = [3]i32{ seal, @max(seal + sc(200), @min(seal + sc(460), rc.right - sc(260))), -1 };
+    _ = w.SendMessageW(app.status.?, w.SB_SETPARTS, parts.len, @intCast(@intFromPtr(&parts)));
+    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, SB_PART_SEAL | w.SBT_OWNERDRAW, 0);
+}
+
+/// The status bar's first part: an amber dot and "Read-only" - the one amber mark in the window.
+fn drawSeal(di: *const w.DRAWITEMSTRUCT) void {
+    const dc = di.hDC orelse return;
+    const r = di.rcItem;
+    const d = sc(8);
+    const cy = @divTrunc(r.top + r.bottom, 2);
+    const x = r.left + sc(8);
+    if (w.CreateSolidBrush(w.rgb(ui.amber))) |br| {
+        const ob = w.SelectObject(dc, @ptrCast(br));
+        const op = w.SelectObject(dc, w.GetStockObject(w.NULL_PEN));
+        _ = w.Ellipse(dc, x, cy - @divTrunc(d, 2), x + d, cy - @divTrunc(d, 2) + d);
+        _ = w.SelectObject(dc, op);
+        _ = w.SelectObject(dc, ob);
+        _ = w.DeleteObject(@ptrCast(br));
+    }
+    _ = w.SetBkMode(dc, w.TRANSPARENT);
+    _ = w.SetTextColor(dc, w.rgb(ui.ink));
+    var tr: w.RECT = .{ .left = x + d + sc(8), .top = r.top, .right = r.right, .bottom = r.bottom };
+    const t = L("Read-only");
+    _ = w.DrawTextW(dc, t.ptr, @intCast(t.len), &tr, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_NOPREFIX);
 }
 
 fn waitCursor(on: bool) void {
@@ -464,6 +526,47 @@ fn closePst() void {
     _ = w.SendMessageW(app.tree.?, w.TVM_DELETEITEM, 0, @bitCast(@intFromPtr(w.TVI_ROOT)));
     _ = w.SendMessageW(app.list.?, w.LVM_SETITEMCOUNT, 0, 0);
     _ = w.SetWindowTextW(app.preview.?, L(""));
+    app.gpa.free(app.source_name);
+    app.gpa.free(app.source_desc);
+    app.source_name = &.{};
+    app.source_desc = &.{};
+    setPreviewEmpty(true);
+    _ = w.SetWindowTextW(app.hwnd.?, L("pstview"));
+    setStatusPart(SB_PART_SOURCE, "");
+    setStatusPart(SB_PART_TEXT, "");
+    showMailboxView(false);
+}
+
+/// Mailbox panes when a source is open, the welcome screen otherwise.
+fn showMailboxView(on: bool) void {
+    inline for (.{ app.tree, app.search, app.list }) |h| _ = w.ShowWindow(h.?, if (on) w.SW_SHOW else w.SW_HIDE);
+    if (!on) _ = w.ShowWindow(app.preview.?, w.SW_HIDE) else if (!app.preview_empty) _ = w.ShowWindow(app.preview.?, w.SW_SHOW);
+    if (ui.welcome.hwnd) |h| _ = w.ShowWindow(h, if (on) w.SW_HIDE else w.SW_SHOW);
+    layout();
+    _ = w.InvalidateRect(app.hwnd.?, null, 1);
+}
+
+/// Hide the preview (and paint a hint in its place) while no message is selected.
+fn setPreviewEmpty(empty: bool) void {
+    if (app.preview_empty == empty) return;
+    app.preview_empty = empty;
+    _ = w.ShowWindow(app.preview.?, if (empty or app.file == null) w.SW_HIDE else w.SW_SHOW);
+    _ = w.InvalidateRect(app.hwnd.?, null, 1);
+}
+
+/// Select the Inbox, or else the first folder that holds messages.
+fn selectStartFolder() void {
+    var pick: ?usize = null;
+    for (app.folders.items, 0..) |f, i| {
+        if (f.kind != .normal or f.item == null) continue;
+        if (std.ascii.eqlIgnoreCase(f.name, "Inbox") and f.count > 0) {
+            pick = i;
+            break;
+        }
+        if (pick == null and f.count > 0) pick = i;
+    }
+    const i = pick orelse return;
+    _ = w.SendMessageW(app.tree.?, w.TVM_SELECTITEM, w.TVGN_CARET, @bitCast(@intFromPtr(app.folders.items[i].item.?)));
 }
 
 /// Open one source, or several PST/OST parts as one merged mailbox.
@@ -488,26 +591,37 @@ fn openPaths(paths: []const []const u8) void {
     if (f.isPst()) addHiddenBranch(a); // orphan / FAI scan needs PST structures
     var b: [600]u8 = undefined;
     var tb: [700]u16 = undefined;
-    _ = w.SetWindowTextW(app.hwnd.?, toW(&tb, std.fmt.bufPrint(&b, "pstview - {s} (read-only)", .{path}) catch "pstview"));
-    const issues = f.issueCount();
+    const shown_name = if (paths.len == 1) std.fs.path.basename(paths[0]) else std.fmt.bufPrint(&b, "{d} PST/OST parts", .{paths.len}) catch "mailbox";
+    app.source_name = app.gpa.dupe(u8, shown_name) catch &.{};
     var db: [128]u8 = undefined;
+    app.source_desc = app.gpa.dupe(u8, f.describe(&db)) catch &.{};
+    var b2: [700]u8 = undefined;
+    _ = w.SetWindowTextW(app.hwnd.?, toW(&tb, std.fmt.bufPrint(&b2, "{s} \u{2014} pstview (read-only)", .{app.source_name}) catch "pstview"));
+    setStatusPart(SB_PART_SOURCE, app.source_desc);
+    showMailboxView(true);
+    selectStartFolder();
+    const issues = f.issueCount();
     if (issues > 0)
         setStatus("Opened {s} ({s}) - {d} folders. {d} integrity issue(s) found - see Tools > Integrity log. Source opened read-only.", .{ std.fs.path.basename(path), f.describe(&db), app.folders.items.len, issues })
     else
         setStatus("Opened {s} ({s}) - {d} folders. No integrity issues so far. Source opened read-only.", .{ std.fs.path.basename(path), f.describe(&db), app.folders.items.len });
 }
 
-fn insertTreeItem(a: Allocator, parent: ?w.HTREEITEM, label: []const u8, idx: usize, expanded: bool) ?w.HTREEITEM {
+fn insertTreeItem(a: Allocator, parent: ?w.HTREEITEM, label: []const u8, idx: usize, expanded: bool, glyph: ui.Glyph) ?w.HTREEITEM {
     const lw = toWAlloc(a, label) catch return null;
     var ins: w.TVINSERTSTRUCTW = .{ .hParent = parent orelse w.TVI_ROOT, .hInsertAfter = w.TVI_LAST, .item = .{
-        .mask = w.TVIF_TEXT | w.TVIF_PARAM | w.TVIF_STATE,
+        .mask = w.TVIF_TEXT | w.TVIF_PARAM | w.TVIF_STATE | w.TVIF_IMAGE | w.TVIF_SELECTEDIMAGE,
+        .iImage = @intFromEnum(glyph),
+        .iSelectedImage = @intFromEnum(glyph),
         .pszText = lw,
         .lParam = @intCast(idx),
         .state = if (expanded) w.TVIS_EXPANDED else 0,
         .stateMask = w.TVIS_EXPANDED,
     } };
     const r = w.SendMessageW(app.tree.?, w.TVM_INSERTITEMW, 0, @bitCast(@intFromPtr(&ins)));
-    return if (r != 0) @ptrFromInt(@as(usize, @bitCast(r))) else null;
+    const item: ?w.HTREEITEM = if (r != 0) @ptrFromInt(@as(usize, @bitCast(r))) else null;
+    if (idx < app.folders.items.len) app.folders.items[idx].item = item;
+    return item;
 }
 
 /// Scan the whole node index for items the folder tables don't show, and add a "Hidden items" branch.
@@ -522,22 +636,22 @@ fn addHiddenBranch(a: Allocator) void {
     app.folders.append(a, .{ .nid = 0, .path = "[Hidden items]", .name = "Hidden items", .count = 0, .kind = .label }) catch return;
     const total = h.orphans.len + h.fai.len + h.orphan_folders.len;
     const root_label = std.fmt.allocPrint(a, "[Hidden items] ({d})", .{total}) catch "[Hidden items]";
-    const root = insertTreeItem(a, null, root_label, root_idx, true);
+    const root = insertTreeItem(a, null, root_label, root_idx, true, .hidden);
 
     const oi = app.folders.items.len;
     app.folders.append(a, .{ .nid = 0, .path = "[Hidden items]/Orphaned messages", .name = "Orphaned messages", .count = @intCast(h.orphans.len), .kind = .orphans }) catch return;
-    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Orphaned messages ({d})", .{h.orphans.len}) catch "Orphaned messages", oi, false);
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Orphaned messages ({d})", .{h.orphans.len}) catch "Orphaned messages", oi, false, .document);
 
     const fi = app.folders.items.len;
     app.folders.append(a, .{ .nid = 0, .path = "[Hidden items]/Associated (FAI) items", .name = "Associated (FAI) items", .count = @intCast(h.fai.len), .kind = .fai }) catch return;
-    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Associated (FAI) items ({d})", .{h.fai.len}) catch "Associated items", fi, false);
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Associated (FAI) items ({d})", .{h.fai.len}) catch "Associated items", fi, false, .document);
 
     for (h.orphan_folders) |fnid| {
         const info = pst.folderInfo(a, app.file.?.pst, fnid) catch continue;
         const idx = app.folders.items.len;
         const name = std.fmt.allocPrint(a, "Orphaned folder: {s}", .{info.name}) catch continue;
         app.folders.append(a, .{ .nid = fnid, .path = std.fmt.allocPrint(a, "[Hidden items]/{s}", .{name}) catch name, .name = name, .count = info.count }) catch continue;
-        _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "{s} ({d})", .{ name, info.count }) catch name, idx, false);
+        _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "{s} ({d})", .{ name, info.count }) catch name, idx, false, .folder);
     }
 }
 
@@ -555,9 +669,13 @@ fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HT
         const dumpster = std.mem.eql(u8, info.name, "Recoverable Items");
         const shown = if (dumpster) "Recoverable Items (Exchange dumpster: deleted / purged items)" else info.name;
         const label = if (info.count > 0) try std.fmt.allocPrint(a, "{s} ({d})", .{ shown, info.count }) else shown;
+        var glyph = ui.folderGlyph(info.name, info.container_class);
+        if (depth == 1 and glyph == .folder and info.has_subfolders) glyph = .mailbox; // top of the mailbox
         const lw = try toWAlloc(a, if (label.len > 0) label else "(unnamed)");
         var ins: w.TVINSERTSTRUCTW = .{ .hParent = parent_item orelse w.TVI_ROOT, .hInsertAfter = w.TVI_LAST, .item = .{
-            .mask = w.TVIF_TEXT | w.TVIF_PARAM | w.TVIF_STATE,
+            .mask = w.TVIF_TEXT | w.TVIF_PARAM | w.TVIF_STATE | w.TVIF_IMAGE | w.TVIF_SELECTEDIMAGE,
+            .iImage = @intFromEnum(glyph),
+            .iSelectedImage = @intFromEnum(glyph),
             .pszText = lw,
             .lParam = @intCast(idx),
             .state = if (depth <= 2) w.TVIS_EXPANDED else 0,
@@ -565,6 +683,7 @@ fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HT
         } };
         const r = w.SendMessageW(app.tree.?, w.TVM_INSERTITEMW, 0, @bitCast(@intFromPtr(&ins)));
         item = if (r != 0) @ptrFromInt(@as(usize, @bitCast(r))) else parent_item;
+        if (r != 0) app.folders.items[idx].item = item;
     }
     const kids = app.file.?.subFolders(a, nid) catch return;
     for (kids) |k| try addFolder(a, k, if (is_root) "" else path, item, depth + 1);
@@ -593,6 +712,7 @@ fn selectFolder(idx: usize) void {
     };
     applyFilter();
     _ = w.SetWindowTextW(app.preview.?, L(""));
+    setPreviewEmpty(true);
 }
 
 // ================================================================ list view model
@@ -769,6 +889,7 @@ fn showPreview() void {
     const a = app.preview_arena.allocator();
     const text = buildPreview(a, app.msgs[mi].nid) catch |e| std.fmt.allocPrint(a, "Error reading message: {s}", .{@errorName(e)}) catch "error";
     setRich(a, app.preview.?, text);
+    setPreviewEmpty(false);
 }
 
 /// Put syntax-coloured text into a Rich Edit control.
@@ -1029,46 +1150,179 @@ fn sc(v: i32) i32 {
     return @intFromFloat(@as(f32, @floatFromInt(v)) * app.scale);
 }
 
-fn layout() void {
+/// Pane geometry of the main window (client coordinates), shared by layout and painting.
+const Geo = struct {
+    W: i32,
+    H: i32,
+    /// Right edge of the left pane; a hairline is drawn here.
+    sx: i32,
+    /// Height of the left-pane header (source name and description).
+    head_h: i32,
+    search: w.RECT,
+    list: w.RECT,
+    preview: w.RECT,
+};
+
+fn geometry() Geo {
     var rc: w.RECT = undefined;
     _ = w.GetClientRect(app.hwnd.?, &rc);
-    _ = w.SendMessageW(app.status.?, w.WM_SIZE, 0, 0);
     var src: w.RECT = undefined;
     _ = w.GetWindowRect(app.status.?, &src);
-    const sh = src.bottom - src.top;
     const W = rc.right;
-    const H = rc.bottom - sh;
-    const sx = std.math.clamp(app.split_x, sc(120), @max(sc(120), W - sc(200)));
-    const gap = sc(5);
-    const search_h = sc(26);
-    _ = w.MoveWindow(app.tree.?, 0, 0, sx, H, 1);
-    const rx = sx + gap;
-    const rw = W - rx;
-    _ = w.MoveWindow(app.search.?, rx, sc(2), rw, search_h - sc(4), 1);
-    const list_h: i32 = @intFromFloat(@as(f32, @floatFromInt(H - search_h)) * app.split_y_frac);
-    _ = w.MoveWindow(app.list.?, rx, search_h, rw, list_h, 1);
-    _ = w.MoveWindow(app.preview.?, rx, search_h + list_h + gap, rw, H - search_h - list_h - gap, 1);
+    const H = rc.bottom - (src.bottom - src.top);
+    const sx = std.math.clamp(app.split_x, sc(180), @max(sc(180), W - sc(360)));
+    const rx = sx + sc(4); // splitter grab zone: hairline at sx, then white
+    const bar_h = sc(52);
+    const avail = @max(H - bar_h - sc(5), sc(10));
+    const want: i32 = @intFromFloat(@as(f32, @floatFromInt(avail)) * app.split_y_frac);
+    const list_h = std.math.clamp(want, @min(sc(90), avail), @max(@min(sc(90), avail), avail - sc(90)));
+    return .{
+        .W = W,
+        .H = H,
+        .sx = sx,
+        .head_h = sc(66),
+        .search = .{ .left = rx, .top = 0, .right = W, .bottom = bar_h },
+        .list = .{ .left = rx, .top = bar_h, .right = W, .bottom = bar_h + list_h },
+        .preview = .{ .left = rx, .top = bar_h + list_h + sc(5), .right = W, .bottom = H },
+    };
+}
+
+/// The rounded search field painted in the search bar; the borderless EDIT sits inside it.
+fn searchPill(g: Geo) w.RECT {
+    return .{ .left = g.search.left + sc(10), .top = g.search.top + sc(10), .right = g.search.right - sc(14), .bottom = g.search.bottom - sc(10) };
+}
+
+fn moveTo(h: ?w.HWND, r: w.RECT) void {
+    _ = w.MoveWindow(h.?, r.left, r.top, r.right - r.left, r.bottom - r.top, 1);
+}
+
+fn layout() void {
+    if (app.hwnd == null or app.status == null or app.tree == null) return;
+    _ = w.SendMessageW(app.status.?, w.WM_SIZE, 0, 0);
+    statusParts();
+    const g = geometry();
+    if (ui.welcome.hwnd) |h| _ = w.MoveWindow(h, 0, 0, g.W, g.H, 1);
+    _ = w.MoveWindow(app.tree.?, 0, g.head_h, g.sx, g.H - g.head_h, 1);
+    const pill = searchPill(g);
+    const eh = sc(20);
+    _ = w.MoveWindow(app.search.?, pill.left + sc(36), @divTrunc(pill.top + pill.bottom - eh, 2), pill.right - pill.left - sc(48), eh, 1);
+    moveTo(app.list, g.list);
+    moveTo(app.preview, g.preview);
+    // generous margins inside the reading pane
+    var pr: w.RECT = .{ .left = sc(24), .top = sc(14), .right = g.preview.right - g.preview.left - sc(24), .bottom = g.preview.bottom - g.preview.top - sc(6) };
+    _ = w.SendMessageW(app.preview.?, w.EM_SETRECT, 0, @intCast(@intFromPtr(&pr)));
+    _ = w.InvalidateRect(app.hwnd.?, null, 0);
+}
+
+fn fillRect(dc: w.HDC, r: w.RECT, brush: ?w.HBRUSH) void {
+    _ = w.FillRect(dc, &r, brush);
+}
+
+fn paintText(dc: w.HDC, font: ?w.HFONT, color: u32, text: []const u8, r: w.RECT, flags: u32) void {
+    var wb: [600]u16 = undefined;
+    const p = toW(&wb, text);
+    var rr = r;
+    if (font) |f| _ = w.SelectObject(dc, @ptrCast(f));
+    _ = w.SetTextColor(dc, w.rgb(color));
+    _ = w.DrawTextW(dc, p, @intCast(std.mem.len(p)), &rr, flags | w.DT_NOPREFIX);
+}
+
+/// The chrome between the panes: left-pane header, search field, hairlines and the empty-preview hint.
+fn paintMain(dc: w.HDC) void {
+    if (app.file == null) return; // the welcome screen covers the client area
+    const g = geometry();
+    _ = w.SetBkMode(dc, w.TRANSPARENT);
+    // left-pane header: what is open
+    fillRect(dc, .{ .left = 0, .top = 0, .right = g.sx, .bottom = g.head_h }, app.pane_brush);
+    const tx = sc(18);
+    paintText(dc, app.bold, ui.ink, app.source_name, .{ .left = tx, .top = sc(14), .right = g.sx - sc(12), .bottom = sc(36) }, w.DT_SINGLELINE | w.DT_END_ELLIPSIS);
+    paintText(dc, app.font, ui.muted, app.source_desc, .{ .left = tx, .top = sc(37), .right = g.sx - sc(12), .bottom = sc(58) }, w.DT_SINGLELINE | w.DT_END_ELLIPSIS);
+    // splitter: hairline, then white up to the right-hand panes
+    fillRect(dc, .{ .left = g.sx, .top = 0, .right = g.sx + 1, .bottom = g.H }, app.hairline_brush);
+    fillRect(dc, .{ .left = g.sx + 1, .top = 0, .right = g.search.left, .bottom = g.H }, app.white_brush);
+    // search bar with a rounded field
+    fillRect(dc, g.search, app.white_brush);
+    const pill = searchPill(g);
+    if (w.CreatePen(w.PS_SOLID, 1, w.rgb(ui.hairline))) |pen| {
+        const op = w.SelectObject(dc, @ptrCast(pen));
+        const ob = w.SelectObject(dc, @ptrCast(app.pane_brush));
+        _ = w.RoundRect(dc, pill.left, pill.top, pill.right, pill.bottom, sc(8), sc(8));
+        _ = w.SelectObject(dc, ob);
+        _ = w.SelectObject(dc, op);
+        _ = w.DeleteObject(@ptrCast(pen));
+    }
+    if (app.glyph_font) |gf| {
+        _ = w.SelectObject(dc, @ptrCast(gf));
+        _ = w.SetTextColor(dc, w.rgb(ui.muted));
+        var gr: w.RECT = .{ .left = pill.left + sc(10), .top = pill.top, .right = pill.left + sc(32), .bottom = pill.bottom };
+        const mag = [1]u16{0xE721};
+        _ = w.DrawTextW(dc, &mag, 1, &gr, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_NOPREFIX);
+    }
+    // list | reading pane
+    fillRect(dc, .{ .left = g.list.left, .top = g.list.bottom, .right = g.W, .bottom = g.preview.top }, app.white_brush);
+    fillRect(dc, .{ .left = g.list.left, .top = g.list.bottom, .right = g.W, .bottom = g.list.bottom + 1 }, app.hairline_brush);
+    if (app.preview_empty) {
+        fillRect(dc, g.preview, app.white_brush);
+        paintText(dc, app.font, ui.muted, if (app.view.items.len > 0) "Select a message to read it." else "", g.preview, w.DT_SINGLELINE | w.DT_CENTER | w.DT_VCENTER);
+    }
+}
+
+/// Splitter under the cursor: vertical (tree | messages) or horizontal (list | reading pane).
+fn splitterAt(x: i32, y: i32) enum { none, vertical, horizontal } {
+    if (app.file == null) return .none;
+    const g = geometry();
+    if (x >= g.sx - sc(2) and x <= g.search.left + sc(1) and y < g.H) return .vertical;
+    if (x > g.search.left and y >= g.list.bottom - sc(2) and y <= g.preview.top + sc(1)) return .horizontal;
+    return .none;
 }
 
 fn createChildren(hwnd: w.HWND) void {
     app.scale = @as(f32, @floatFromInt(w.GetDpiForWindow(hwnd))) / 96.0;
-    app.split_x = sc(300);
-    app.font = w.CreateFontW(-sc(13), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI"));
+    app.split_x = sc(290);
+    app.font = w.CreateFontW(-sc(14), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI"));
+    app.bold = w.CreateFontW(-sc(15), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI Semibold"));
     const font = app.font;
     const mono = w.CreateFontW(-sc(13), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, L("Consolas"));
     app.mono = mono;
+    if (w.GetDC(null)) |sdc| {
+        app.glyph_font = ui.iconFont(sdc, -sc(14));
+        _ = w.ReleaseDC(null, sdc);
+    }
+    app.pane_brush = w.CreateSolidBrush(w.rgb(ui.pane));
+    app.white_brush = w.CreateSolidBrush(w.rgb(ui.white));
+    app.hairline_brush = w.CreateSolidBrush(w.rgb(ui.hairline));
 
-    app.tree = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("SysTreeView32"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.TVS_HASBUTTONS | w.TVS_HASLINES | w.TVS_LINESATROOT | w.TVS_SHOWSELALWAYS, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_TREE), app.hinst, null);
-    app.search = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_SEARCH), app.hinst, null);
-    app.list = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("SysListView32"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.LVS_REPORT | w.LVS_SHOWSELALWAYS | w.LVS_OWNERDATA, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_LIST), app.hinst, null);
-    app.preview = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L(w.RICHEDIT_CLASS), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.WS_VSCROLL | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.ES_NOHIDESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_PREVIEW), app.hinst, null);
+    // ink title bar (Windows 11; ignored elsewhere)
+    const cap = w.rgb(ui.ink);
+    const cap_text = w.rgb(ui.paper);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
+
+    app.tree = w.CreateWindowExW(0, L("SysTreeView32"), null, w.WS_CHILD | w.WS_TABSTOP | w.TVS_HASBUTTONS | w.TVS_LINESATROOT | w.TVS_SHOWSELALWAYS | w.TVS_FULLROWSELECT, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_TREE), app.hinst, null);
+    app.search = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_TABSTOP | w.ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_SEARCH), app.hinst, null);
+    app.list = w.CreateWindowExW(0, L("SysListView32"), null, w.WS_CHILD | w.WS_TABSTOP | w.LVS_REPORT | w.LVS_SHOWSELALWAYS | w.LVS_OWNERDATA, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_LIST), app.hinst, null);
+    app.preview = w.CreateWindowExW(0, L(w.RICHEDIT_CLASS), null, w.WS_CHILD | w.WS_TABSTOP | w.WS_VSCROLL | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.ES_NOHIDESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_PREVIEW), app.hinst, null);
     app.status = w.CreateWindowExW(0, L("msctls_statusbar32"), null, w.WS_CHILD | w.WS_VISIBLE | w.SBARS_SIZEGRIP, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_STATUS), app.hinst, null);
 
     inline for (.{ app.tree, app.search, app.list, app.status }) |h| _ = w.SendMessageW(h.?, w.WM_SETFONT, @intFromPtr(font), 1);
     _ = w.SendMessageW(app.preview.?, w.WM_SETFONT, @intFromPtr(mono), 1);
     _ = w.SendMessageW(app.preview.?, w.EM_EXLIMITTEXT, 0, 0x7FFFFFFE);
-    _ = w.SendMessageW(app.search.?, w.EM_SETCUEBANNER, 1, @intCast(@intFromPtr(L("Search sender / recipients / subject.  from:domain.com  to: (any recipient)  cc:  bcc:  subject:  risk:high   * ? wildcards, \"phrases\"").ptr)));
-    _ = w.SendMessageW(app.list.?, w.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, @intCast(w.LVS_EX_FULLROWSELECT | w.LVS_EX_DOUBLEBUFFER | w.LVS_EX_GRIDLINES));
+    _ = w.SendMessageW(app.search.?, w.EM_SETCUEBANNER, 1, @intCast(@intFromPtr(L("Search    from:   to:   subject:   risk:high    * ? wildcards, \"phrases\"").ptr)));
+
+    // folder tree: Explorer style, glyph icons, airy rows on the pane colour
+    _ = w.SetWindowTheme(app.tree.?, L("Explorer"), null);
+    _ = w.SendMessageW(app.tree.?, w.TVM_SETEXTENDEDSTYLE, w.TVS_EX_DOUBLEBUFFER | w.TVS_EX_FADEINOUTEXPANDOS, w.TVS_EX_DOUBLEBUFFER | w.TVS_EX_FADEINOUTEXPANDOS);
+    _ = w.SendMessageW(app.tree.?, w.TVM_SETBKCOLOR, 0, @intCast(w.rgb(ui.pane)));
+    _ = w.SendMessageW(app.tree.?, w.TVM_SETTEXTCOLOR, 0, @intCast(w.rgb(ui.ink)));
+    _ = w.SendMessageW(app.tree.?, w.TVM_SETITEMHEIGHT, @intCast(sc(30)), 0);
+    if (ui.glyphList(sc(16))) |il| _ = w.SendMessageW(app.tree.?, w.TVM_SETIMAGELIST, 0, @bitCast(@intFromPtr(il)));
+
+    // message list: Explorer style, no grid, taller rows (a 1-pixel-wide image list sets the height)
+    _ = w.SetWindowTheme(app.list.?, L("Explorer"), null);
+    _ = w.SendMessageW(app.list.?, w.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, @intCast(w.LVS_EX_FULLROWSELECT | w.LVS_EX_DOUBLEBUFFER));
+    _ = w.SendMessageW(app.list.?, w.LVM_SETTEXTCOLOR, 0, @intCast(w.rgb(ui.ink)));
+    if (w.ImageList_Create(1, sc(30), w.ILC_COLOR32, 1, 0)) |il| _ = w.SendMessageW(app.list.?, w.LVM_SETIMAGELIST, w.LVSIL_SMALL, @bitCast(@intFromPtr(il)));
     for (columns, 0..) |c, i| {
         var col: w.LVCOLUMNW = .{ .mask = w.LVCF_TEXT | w.LVCF_WIDTH | w.LVCF_FMT | w.LVCF_SUBITEM, .cx = sc(c.width), .pszText = c.title, .iSubItem = @intCast(i), .fmt = if (c.right) w.LVCFMT_RIGHT else 0 };
         _ = w.SendMessageW(app.list.?, w.LVM_INSERTCOLUMNW, i, @intCast(@intFromPtr(&col)));
@@ -1078,6 +1332,7 @@ fn createChildren(hwnd: w.HWND) void {
     const file = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN, L("&Open PST / OST / MBOX file...\tCtrl+O"));
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_OPEN_FOLDER, L("Open MBOX &folder (Thunderbird / Apple Mail)..."));
+    _ = w.AppendMenuW(file, w.MF_STRING, CMD_CLOSE, L("&Close mailbox"));
     _ = w.AppendMenuW(file, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_MSG, L("Export selected as .&msg..."));
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXPORT_EML, L("Export selected as .&eml..."));
@@ -1105,12 +1360,20 @@ fn createChildren(hwnd: w.HWND) void {
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_INTEGRITY, L("&Integrity log"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_VERIFY, L("&Verify every block (checksums)..."));
     const help = w.CreatePopupMenu().?;
+    _ = w.AppendMenuW(help, w.MF_STRING, CMD_INSTALL, L("&Install pstview for this user..."));
+    _ = w.AppendMenuW(help, w.MF_STRING, CMD_DEFAULT_APPS, L("Choose &default apps for mailbox files..."));
+    _ = w.AppendMenuW(help, w.MF_STRING, CMD_UNINSTALL, L("&Uninstall pstview..."));
+    _ = w.AppendMenuW(help, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(help, w.MF_STRING, CMD_ABOUT, L("&About pstview"));
+    app.help_menu = help;
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(file), L("&File"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(edit), L("&Message"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(tools), L("&Tools"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(help), L("&Help"));
     _ = w.SetMenu(hwnd, menu);
+
+    ui.createWelcome(hwnd, app.hinst, app.scale, "v" ++ build_options.version, .{ CMD_OPEN, CMD_OPEN_FOLDER, CMD_INSTALL });
+    if (ui.welcome.hwnd) |h| _ = w.ShowWindow(h, w.SW_SHOW);
     w.DragAcceptFiles(hwnd, 1);
 }
 
@@ -1409,14 +1672,21 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
     st.hwnd = hwnd;
     const a = st.arena.allocator();
     const font = app.font;
-    st.header = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L(w.RICHEDIT_CLASS), null, w.WS_CHILD | w.WS_VISIBLE | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.WS_VSCROLL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_HEADER), app.hinst, null);
-    st.atts = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("SysListView32"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.LVS_REPORT | w.LVS_SHOWSELALWAYS | w.LVS_SINGLESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_ATTS), app.hinst, null);
-    st.body = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_VSCROLL | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.ES_NOHIDESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_BODY), app.hinst, null);
-    st.img = w.CreateWindowExW(w.WS_EX_CLIENTEDGE, L("pstview.img"), null, w.WS_CHILD, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_IMG), app.hinst, null);
+    st.header = w.CreateWindowExW(0, L(w.RICHEDIT_CLASS), null, w.WS_CHILD | w.WS_VISIBLE | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.WS_VSCROLL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_HEADER), app.hinst, null);
+    st.atts = w.CreateWindowExW(0, L("SysListView32"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | w.LVS_REPORT | w.LVS_SHOWSELALWAYS | w.LVS_SINGLESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_ATTS), app.hinst, null);
+    st.body = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.WS_VSCROLL | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.ES_NOHIDESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_BODY), app.hinst, null);
+    st.img = w.CreateWindowExW(0, L("pstview.img"), null, w.WS_CHILD, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_MW_IMG), app.hinst, null);
     inline for (.{ st.header, st.atts }) |h| _ = w.SendMessageW(h.?, w.WM_SETFONT, @intFromPtr(font), 1);
     _ = w.SendMessageW(st.body.?, w.WM_SETFONT, @intFromPtr(app.mono), 1);
     _ = w.SendMessageW(st.body.?, w.EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
     _ = w.SendMessageW(st.atts.?, w.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, @intCast(w.LVS_EX_FULLROWSELECT | w.LVS_EX_DOUBLEBUFFER));
+    _ = w.SetWindowTheme(st.atts.?, L("Explorer"), null);
+    _ = w.SendMessageW(st.body.?, w.EM_SETMARGINS, w.EC_LEFTMARGIN | w.EC_RIGHTMARGIN, @intCast((@as(u32, @intCast(sc(16))) << 16) | @as(u32, @intCast(sc(16)))));
+    const cap = w.rgb(ui.ink);
+    const cap_text = w.rgb(ui.paper);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
     const cols = [_]struct { t: [:0]const u16, wd: i32 }{ .{ .t = L("Part / attachment"), .wd = 420 }, .{ .t = L("Size"), .wd = 90 }, .{ .t = L("Type"), .wd = 200 }, .{ .t = L("Preview"), .wd = 160 } };
     for (cols, 0..) |c, i| {
         var col: w.LVCOLUMNW = .{ .mask = w.LVCF_TEXT | w.LVCF_WIDTH | w.LVCF_SUBITEM, .cx = sc(c.wd), .pszText = c.t, .iSubItem = @intCast(i) };
@@ -1469,10 +1739,13 @@ fn mwLayout(st: *MsgWin) void {
     const hh = sc(230);
     const n_rows: i32 = @intCast(st.msg.attachments.len + 1);
     const ah = @min(sc(26) + n_rows * sc(20), sc(170));
+    // 1-pixel gaps let the hairline-coloured window background act as separators
     _ = w.MoveWindow(st.header.?, 0, 0, W, hh, 1);
-    _ = w.MoveWindow(st.atts.?, 0, hh, W, ah, 1);
-    _ = w.MoveWindow(st.body.?, 0, hh + ah, W, H - hh - ah, 1);
-    _ = w.MoveWindow(st.img.?, 0, hh + ah, W, H - hh - ah, 1);
+    _ = w.MoveWindow(st.atts.?, 0, hh + 1, W, ah, 1);
+    _ = w.MoveWindow(st.body.?, 0, hh + ah + 2, W, H - hh - ah - 2, 1);
+    _ = w.MoveWindow(st.img.?, 0, hh + ah + 2, W, H - hh - ah - 2, 1);
+    var hr: w.RECT = .{ .left = sc(18), .top = sc(12), .right = W - sc(18), .bottom = hh - sc(6) };
+    _ = w.SendMessageW(st.header.?, w.EM_SETRECT, 0, @intCast(@intFromPtr(&hr)));
 }
 
 fn mwSelectedAtt(st: *MsgWin) ?usize {
@@ -1615,6 +1888,13 @@ fn mwProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI)
             if (mwFromHwnd(hwnd)) |st| mwLayout(st);
             return 0;
         },
+        w.WM_CTLCOLORSTATIC => {
+            // the read-only body would otherwise be painted grey
+            const dc: w.HDC = @ptrFromInt(wp);
+            _ = w.SetBkColor(dc, w.rgb(ui.white));
+            _ = w.SetTextColor(dc, w.rgb(ui.ink));
+            return @bitCast(@intFromPtr(app.white_brush));
+        },
         w.WM_COMMAND => {
             if (mwFromHwnd(hwnd)) |st| mwCommand(st, @truncate(wp));
             return 0;
@@ -1734,13 +2014,13 @@ fn recoverDeletedItems() void {
     app.recovery = r;
     const root_idx = app.folders.items.len;
     app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]", .name = "Recovered items", .count = 0, .kind = .label }) catch return;
-    const root = insertTreeItem(a, null, std.fmt.allocPrint(a, "[Recovered items] ({d})", .{r.deleted.len + r.versions.len}) catch "[Recovered items]", root_idx, true);
+    const root = insertTreeItem(a, null, std.fmt.allocPrint(a, "[Recovered items] ({d})", .{r.deleted.len + r.versions.len}) catch "[Recovered items]", root_idx, true, .recovered);
     const di = app.folders.items.len;
     app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]/No longer indexed", .name = "No longer indexed", .count = @intCast(r.deleted.len), .kind = .recovered }) catch return;
-    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "No longer indexed - deleted or moved ({d})", .{r.deleted.len}) catch "No longer indexed", di, false);
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "No longer indexed - deleted or moved ({d})", .{r.deleted.len}) catch "No longer indexed", di, false, .recovered);
     const vi = app.folders.items.len;
     app.folders.append(a, .{ .nid = 0, .path = "[Recovered items]/Earlier versions", .name = "Earlier versions", .count = @intCast(r.versions.len), .kind = .versions }) catch return;
-    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Earlier versions of existing items ({d})", .{r.versions.len}) catch "Earlier versions", vi, false);
+    _ = insertTreeItem(a, root, std.fmt.allocPrint(a, "Earlier versions of existing items ({d})", .{r.versions.len}) catch "Earlier versions", vi, false, .journal);
     var b: [600]u8 = undefined;
     const summary = std.fmt.bufPrint(&b, "Recovery scan finished.\n\n{d} item(s) no longer in the index (deleted, or moved and re-numbered) and {d} earlier version(s) of existing items were recovered from {d} stale node-tree and {d} stale block-tree page(s); {d} unindexed block(s) were verified intact by id and checksum.\n\nSee the [Recovered items] branch. Each item's Note names the stale page and the folder it was in.", .{ r.deleted.len, r.versions.len, r.stale_node_pages, r.stale_block_pages, r.blocks }) catch "Recovery finished.";
     setStatus("Recovery: {d} no longer indexed, {d} earlier versions.", .{ r.deleted.len, r.versions.len });
@@ -1773,10 +2053,126 @@ fn selectAll() void {
     _ = w.SendMessageW(app.list.?, w.LVM_SETITEMSTATE, @bitCast(@as(isize, -1)), @intCast(@intFromPtr(&it)));
 }
 
+// ================================================================ install / uninstall (install.zig)
+
+fn appIcon() ?w.HICON {
+    return @ptrCast(w.LoadImageW(app.hinst, 1, w.IMAGE_ICON, sc(32), sc(32), 0));
+}
+
+/// Help menu: Install only from a portable copy; Default apps / Uninstall only when installed.
+fn updateInstallMenu(hm: w.HMENU) void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = install.defaultLayout(a) catch return;
+    const installed = install.isInstalled(a, l);
+    _ = w.EnableMenuItem(hm, CMD_INSTALL, if (install.runningInstalled(a, l)) w.MF_GRAYED else w.MF_ENABLED);
+    _ = w.EnableMenuItem(hm, CMD_DEFAULT_APPS, if (installed) w.MF_ENABLED else w.MF_GRAYED);
+    _ = w.EnableMenuItem(hm, CMD_UNINSTALL, if (installed) w.MF_ENABLED else w.MF_GRAYED);
+}
+
+/// Show the welcome screen's install offer only for a portable copy that is not installed.
+fn refreshInstallOffer() void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = install.defaultLayout(a) catch return ui.showInstallOffer(false);
+    ui.showInstallOffer(!install.isInstalled(a, l) and !install.runningInstalled(a, l));
+}
+
+/// Offer to install: on the first run of a portable copy (unless declined for good), or on request.
+fn offerInstall(requested: bool) void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = install.defaultLayout(a) catch return;
+    if (install.runningInstalled(a, l)) return;
+    const updating = install.isInstalled(a, l);
+    if (!requested and (updating or install.promptDismissed(a))) return;
+    const instruction = if (updating) L("Update the installed copy of pstview?") else L("Install pstview on this PC?");
+    const content = toWAlloc(a, if (updating)
+        std.fmt.allocPrint(a, "Replaces the copy installed in {s} with this version ({s}). File handlers and the Start menu entry are refreshed.", .{ l.dir, build_options.version }) catch return
+    else
+        std.fmt.allocPrint(a, "pstview is running as a portable app. Installing copies it to {s}, adds it to the Start menu and lets Explorer open .pst, .ost and .mbox files with it. No administrator rights are needed; uninstall any time from Settings > Apps.\n\nThe portable copy keeps working either way - nothing is written to this PC unless you install.", .{l.dir}) catch return) catch return;
+    const r = ui.taskDialog(app.hwnd, appIcon(), instruction, content, &.{
+        .{ .id = 100, .text = if (updating) L("Update for this user") else L("Install for this user\nStart menu entry, file handlers and an uninstaller") },
+        .{ .id = 101, .text = L("Keep using it portable\nNothing is written to this PC") },
+    }, if (requested) null else L("Don't offer this again"));
+    if (r.button == 100) return doInstall(a, l);
+    if (r.verified) install.dismissPrompt(a);
+}
+
+fn doInstall(a: Allocator, l: install.Layout) void {
+    waitCursor(true);
+    install.install(a, app.io, l, build_options.version) catch |e| {
+        waitCursor(false);
+        const why = switch (e) {
+            error.CopyFailed => std.fmt.allocPrint(a, "pstview could not be copied to {s}.\n\nIf the installed copy is running, close it and try again.", .{l.dir}) catch "copy failed",
+            error.InstallDir => std.fmt.allocPrint(a, "The folder {s} could not be created.", .{l.dir}) catch "folder",
+            else => @errorName(e),
+        };
+        _ = msgBox(why, "pstview - install failed", w.MB_ICONERROR);
+        return;
+    };
+    waitCursor(false);
+    refreshInstallOffer();
+    setStatus("pstview is installed for this user ({s}).", .{l.dir});
+    const r = ui.taskDialog(app.hwnd, appIcon(), L("pstview is installed"), L("Start it from the Start menu. Explorer now offers pstview under \"Open with\" for .pst, .ost, .mbox and .mbx files; to make it the default, Windows asks you to confirm in Settings > Default apps.\n\nThis portable copy is no longer needed and can be deleted."), &.{
+        .{ .id = 100, .text = L("Done") },
+        .{ .id = 101, .text = L("Choose default apps\nOpens Settings > Default apps for pstview") },
+    }, null);
+    if (r.button == 101) openDefaultApps();
+}
+
+fn openDefaultApps() void {
+    _ = w.ShellExecuteW(app.hwnd, L("open"), L("ms-settings:defaultapps?registeredAppUser=pstview"), null, null, w.SW_SHOWNORMAL);
+}
+
+/// Confirm and uninstall (Help menu, or `pstview.exe --uninstall` from Settings > Apps).
+/// Returns true when pstview should exit because the running exe is the one being removed.
+fn uninstallInteractive(owner: ?w.HWND) bool {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const l = install.defaultLayout(a) catch return false;
+    const content = toWAlloc(a, std.fmt.allocPrint(a, "Removes pstview from {s}, its Start menu entry, its file handlers and its entry in Settings > Apps.\n\nMailbox files, exports and reports are not touched.", .{l.dir}) catch return false) catch return false;
+    const r = ui.taskDialog(owner, appIcon(), L("Uninstall pstview?"), content, &.{
+        .{ .id = 100, .text = L("Uninstall") },
+        .{ .id = 101, .text = L("Keep pstview") },
+    }, null);
+    if (r.button != 100) return false;
+    const res = install.uninstall(a, l) catch |e| {
+        _ = msgBox(@errorName(e), "pstview - uninstall failed", w.MB_ICONERROR);
+        return false;
+    };
+    if (res == .after_exit) {
+        _ = msgBox("pstview has been uninstalled for this user and closes now.", "pstview", w.MB_ICONINFORMATION);
+        return true;
+    }
+    _ = msgBox("pstview has been uninstalled for this user.", "pstview", w.MB_ICONINFORMATION);
+    if (app.hwnd != null) refreshInstallOffer();
+    return false;
+}
+
+/// List view text while it has no rows.
+fn emptyMarkup(m: *w.NMLVEMPTYMARKUP) LRESULT {
+    if (app.file == null) return 0;
+    const text: []const u8 = if (app.cur_folder == null) "Select a folder." else if (app.msgs.len > 0) "No messages match the search." else "This folder is empty.";
+    m.dwFlags = w.EMF_CENTERED;
+    _ = toW(&m.szMarkup, text);
+    return 1;
+}
+
 fn onCommand(id: u16, code: u16) void {
     switch (id) {
         CMD_OPEN => openDialog(),
         CMD_OPEN_FOLDER => openFolderDialog(),
+        CMD_CLOSE => closePst(),
+        CMD_INSTALL => offerInstall(true),
+        CMD_DEFAULT_APPS => openDefaultApps(),
+        CMD_UNINSTALL => if (uninstallInteractive(app.hwnd)) {
+            _ = w.DestroyWindow(app.hwnd.?);
+        },
         CMD_EXPORT_MSG => exportSelected(.msg),
         CMD_EXPORT_EML => exportSelected(.eml),
         CMD_REPORT => exportSelected(.none),
@@ -1834,6 +2230,7 @@ fn onNotify(nm: *w.NMHDR) LRESULT {
     if (nm.idFrom == ID_LIST) {
         switch (nm.code) {
             w.LVN_GETDISPINFOW => dispInfo(@ptrCast(@alignCast(nm))),
+            w.LVN_GETEMPTYMARKUP => return emptyMarkup(@ptrCast(@alignCast(nm))),
             w.LVN_ITEMCHANGED => {
                 const lv: *w.NMLISTVIEW = @ptrCast(@alignCast(nm));
                 if ((lv.uNewState & w.LVIS_FOCUSED) != 0 or (lv.uNewState & w.LVIS_SELECTED) != 0) showPreview();
@@ -1881,26 +2278,68 @@ fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
             return 0;
         },
         w.WM_NOTIFY => return onNotify(@ptrFromInt(@as(usize, @bitCast(lp)))),
+        w.WM_PAINT => {
+            var ps: w.PAINTSTRUCT = undefined;
+            const dc = w.BeginPaint(hwnd, &ps) orelse return 0;
+            paintMain(dc);
+            _ = w.EndPaint(hwnd, &ps);
+            return 0;
+        },
+        w.WM_CTLCOLOREDIT => {
+            // the search field: same fill as the rounded box around it
+            const dc: w.HDC = @ptrFromInt(wp);
+            _ = w.SetBkColor(dc, w.rgb(ui.pane));
+            _ = w.SetTextColor(dc, w.rgb(ui.ink));
+            return @bitCast(@intFromPtr(app.pane_brush)); // handles may be sign-extended: bitCast, not intCast
+        },
+        w.WM_DRAWITEM => {
+            const di: *const w.DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lp)));
+            if (di.CtlID == ID_STATUS) drawSeal(di);
+            return 1;
+        },
+        w.WM_INITMENUPOPUP => {
+            if (app.help_menu) |hm| if (@intFromPtr(hm) == wp) updateInstallMenu(hm);
+            return 0;
+        },
+        WM_APP_FIRST_RUN => {
+            offerInstall(false);
+            return 0;
+        },
         w.WM_LBUTTONDOWN => {
             const x: i32 = @as(i16, @truncate(lp));
-            if (x >= app.split_x - sc(2) and x <= app.split_x + sc(8)) {
-                app.dragging = true;
-                _ = w.SetCapture(hwnd);
+            const y: i32 = @as(i16, @truncate(lp >> 16));
+            switch (splitterAt(x, y)) {
+                .vertical => app.dragging = true,
+                .horizontal => app.dragging_y = true,
+                .none => return 0,
             }
+            _ = w.SetCapture(hwnd);
             return 0;
         },
         w.WM_MOUSEMOVE => {
             const x: i32 = @as(i16, @truncate(lp));
+            const y: i32 = @as(i16, @truncate(lp >> 16));
             if (app.dragging) {
                 app.split_x = x;
                 layout();
+            } else if (app.dragging_y) {
+                const g = geometry();
+                const avail = @max(g.H - g.list.top - sc(5), 1);
+                app.split_y_frac = std.math.clamp(@as(f32, @floatFromInt(y - g.list.top)) / @as(f32, @floatFromInt(avail)), 0.1, 0.9);
+                layout();
             }
-            if (app.dragging or (x >= app.split_x - sc(2) and x <= app.split_x + sc(8))) _ = w.SetCursor(w.LoadCursorW(null, w.IDC_SIZEWE));
+            const over = if (app.dragging) .vertical else if (app.dragging_y) .horizontal else splitterAt(x, y);
+            switch (over) {
+                .vertical => _ = w.SetCursor(w.LoadCursorW(null, w.IDC_SIZEWE)),
+                .horizontal => _ = w.SetCursor(w.LoadCursorW(null, w.IDC_SIZENS)),
+                .none => {},
+            }
             return 0;
         },
         w.WM_LBUTTONUP => {
-            if (app.dragging) {
+            if (app.dragging or app.dragging_y) {
                 app.dragging = false;
+                app.dragging_y = false;
                 _ = w.ReleaseCapture();
             }
             return 0;
@@ -1945,13 +2384,20 @@ pub fn main(init: std.process.Init) !void {
     _ = w.LoadLibraryW(L("Msftedit.dll")); // Rich Edit 4.1+ for coloured previews
     app.hinst = w.GetModuleHandleW(null);
 
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    // Settings > Apps runs the installed exe with --uninstall
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--uninstall")) {
+        _ = uninstallInteractive(null);
+        return;
+    }
+
     const cls = L("pstview.main");
     const wc: w.WNDCLASSEXW = .{
         .lpfnWndProc = wndProc,
         .hInstance = app.hinst,
         .hCursor = w.LoadCursorW(null, w.IDC_ARROW),
         .hIcon = w.LoadIconW(app.hinst, 1),
-        .hbrBackground = @ptrFromInt(w.COLOR_BTNFACE + 1),
+        .hbrBackground = @ptrFromInt(w.COLOR_WINDOW + 1),
         .lpszClassName = cls,
     };
     _ = w.RegisterClassExW(&wc);
@@ -1960,7 +2406,7 @@ pub fn main(init: std.process.Init) !void {
         .hInstance = app.hinst,
         .hCursor = w.LoadCursorW(null, w.IDC_ARROW),
         .hIcon = w.LoadIconW(app.hinst, 1),
-        .hbrBackground = @ptrFromInt(w.COLOR_BTNFACE + 1),
+        .hbrBackground = w.CreateSolidBrush(w.rgb(ui.hairline)), // shows through 1-pixel gaps as separators
         .lpszClassName = L("pstview.msg"),
     };
     _ = w.RegisterClassExW(&mwc);
@@ -1976,12 +2422,12 @@ pub fn main(init: std.process.Init) !void {
     const gdip_in: w.GdiplusStartupInput = .{};
     _ = w.GdiplusStartup(&gdip_token, &gdip_in, null);
 
-    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview - read-only PST / OST / MBOX viewer"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
+    const hwnd = w.CreateWindowExW(w.WS_EX_ACCEPTFILES, cls, L("pstview"), w.WS_OVERLAPPEDWINDOW | w.WS_CLIPCHILDREN, w.CW_USEDEFAULT, w.CW_USEDEFAULT, 1400, 900, null, null, app.hinst, null) orelse return error.CreateWindowFailed;
     _ = w.ShowWindow(hwnd, w.SW_SHOW);
     _ = w.UpdateWindow(hwnd);
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 1) openPst(args[1]);
+    refreshInstallOffer();
+    if (args.len > 1) openPst(args[1]) else _ = w.PostMessageW(hwnd, WM_APP_FIRST_RUN, 0, 0);
 
     var msg: w.MSG = undefined;
     while (w.GetMessageW(&msg, null, 0, 0) > 0) {

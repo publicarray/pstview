@@ -25,29 +25,43 @@ pub const C = enum(u8) {
     title,
 };
 
-// colour table entries in enum order (index 1..)
+// colour table entries in enum order (index 1..); muted tones around the ink of ui.zig
 const palette = [_][3]u8{
-    .{ 0x1f, 0x23, 0x28 }, // normal
-    .{ 0x6a, 0x73, 0x7d }, // label
-    .{ 0x00, 0x55, 0xb3 }, // header name
-    .{ 0x8a, 0x3f, 0xc8 }, // ip
-    .{ 0x00, 0x7a, 0x7a }, // email
-    .{ 0x1a, 0x7f, 0x37 }, // pass
-    .{ 0xcf, 0x22, 0x2e }, // fail
-    .{ 0xc2, 0x6a, 0x00 }, // warn
-    .{ 0x8c, 0x95, 0x9f }, // subtle
-    .{ 0xcf, 0x22, 0x2e }, // high
-    .{ 0xc2, 0x6a, 0x00 }, // medium
-    .{ 0x9a, 0x7d, 0x00 }, // low
-    .{ 0x0b, 0x6e, 0x8a }, // date
-    .{ 0x1f, 0x38, 0x64 }, // title
+    .{ 0x1b, 0x26, 0x38 }, // normal
+    .{ 0x60, 0x6c, 0x80 }, // label
+    .{ 0x2b, 0x4c, 0x7e }, // header name
+    .{ 0x6b, 0x4f, 0xa0 }, // ip
+    .{ 0x1f, 0x6f, 0x6b }, // email
+    .{ 0x2e, 0x7d, 0x4f }, // pass
+    .{ 0xb3, 0x26, 0x1e }, // fail
+    .{ 0xa3, 0x5a, 0x00 }, // warn
+    .{ 0x9a, 0xa1, 0xad }, // subtle
+    .{ 0xb3, 0x26, 0x1e }, // high
+    .{ 0xa3, 0x5a, 0x00 }, // medium
+    .{ 0x7a, 0x6a, 0x1f }, // low
+    .{ 0x3d, 0x5a, 0x80 }, // date
+    .{ 0x13, 0x23, 0x3f }, // title
 };
+
+/// Font table: f0 = the monospaced face passed to `colorize` (headers, analysis), f1 = the
+/// reading face for the subject and the message body.
+const body_face = "Segoe UI";
 
 const Writer = struct {
     a: Allocator,
     out: std.ArrayList(u8) = .empty,
     cur: C = .normal,
     bold: bool = false,
+    /// Base size in half-points.
+    base: u32 = 19,
+
+    /// Switch to the reading face at `base + grow` half-points, or back to the monospaced base.
+    fn face(self: *Writer, reading: bool, grow: u32) void {
+        if (reading)
+            self.out.print(self.a, "\\f1\\fs{d} ", .{self.base + grow}) catch {}
+        else
+            self.out.print(self.a, "\\f0\\fs{d} ", .{self.base}) catch {};
+    }
 
     fn set(self: *Writer, c: C, bold: bool) void {
         if (c != self.cur) self.out.print(self.a, "\\cf{d} ", .{@intFromEnum(c)}) catch {};
@@ -184,7 +198,11 @@ fn headerAreaLine(w: *Writer, line: []const u8) void {
     for (header_labels) |lb| if (std.mem.startsWith(u8, t, lb)) {
         w.text(.label, false, lb);
         const rest = t[lb.len..];
-        if (std.mem.eql(u8, lb, "Subject:")) w.text(.title, true, rest) else tokens(w, rest, .normal);
+        if (std.mem.eql(u8, lb, "Subject:")) {
+            w.face(true, 9);
+            w.text(.title, true, rest);
+            w.face(false, 0);
+        } else tokens(w, rest, .normal);
         return;
     };
     // analysis detail lines like "Auth: SPF=pass ..." / "From: ..." / "Origin IP: ..."
@@ -216,8 +234,8 @@ fn internetHeaderLine(w: *Writer, line: []const u8) void {
 
 /// Convert preview text to RTF with syntax colouring. `font` is the face name, `half_points` the size.
 pub fn colorize(a: Allocator, text: []const u8, font: []const u8, half_points: u32) []const u8 {
-    var w: Writer = .{ .a = a };
-    w.out.print(a, "{{\\rtf1\\ansi\\ansicpg1252\\deff0\\uc1{{\\fonttbl{{\\f0\\fnil {s};}}}}{{\\colortbl ;", .{font}) catch {};
+    var w: Writer = .{ .a = a, .base = half_points };
+    w.out.print(a, "{{\\rtf1\\ansi\\ansicpg1252\\deff0\\uc1{{\\fonttbl{{\\f0\\fnil {s};}}{{\\f1\\fswiss {s};}}}}{{\\colortbl ;", .{ font, body_face }) catch {};
     for (palette) |p| w.out.print(a, "\\red{d}\\green{d}\\blue{d};", .{ p[0], p[1], p[2] }) catch {};
     w.out.print(a, "}}\\f0\\fs{d}\\cf1 ", .{half_points}) catch {};
 
@@ -232,9 +250,11 @@ pub fn colorize(a: Allocator, text: []const u8, font: []const u8, half_points: u
         if (region == .head and std.mem.startsWith(u8, line, "-----")) {
             w.text(.subtle, false, line);
             region = .body;
+            w.face(true, 2); // the message body reads in the proportional face
             continue;
         }
         if (std.mem.indexOf(u8, line, "Internet headers") != null and std.mem.startsWith(u8, line, "-----")) {
+            w.face(false, 0);
             w.text(.subtle, true, line);
             region = .inet;
             continue;

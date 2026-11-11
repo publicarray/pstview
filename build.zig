@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "shell32", "ole32", "gdiplus", "shlwapi" }) |lib| gui_mod.linkSystemLibrary(lib, .{});
+    for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "shell32", "ole32", "gdiplus", "shlwapi", "dwmapi", "uxtheme", "advapi32" }) |lib| gui_mod.linkSystemLibrary(lib, .{});
     gui_mod.addWin32ResourceFile(.{ .file = b.path("src/pstview.rc"), .flags = &rc_flags });
     gui_mod.addOptions("build_options", opts);
     const gui = b.addExecutable(.{ .name = "pstview", .root_module = gui_mod, .win32_manifest = b.path("src/app.manifest") });
