@@ -433,7 +433,7 @@ pub fn dialog(owner: ?w.HWND, inst: ?w.HINSTANCE, spec: DialogSpec) i32 {
     var yy = P + top_block;
     if (spec.body.len > 0) {
         const scroll: u32 = if (body_full > body_max) w.WS_VSCROLL else 0;
-        const eb = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.ES_MULTILINE | w.ES_READONLY | scroll, st.text_x, yy, text_w, body_h, hwnd, null, inst, null);
+        const eb = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.ES_MULTILINE | w.ES_READONLY | scroll, st.text_x, yy, text_w, body_h, hwnd, @ptrFromInt(901), inst, null);
         if (eb) |e| {
             _ = w.SendMessageW(e, w.WM_SETFONT, @intFromPtr(st.text_font), 1);
             _ = w.SendMessageW(e, w.EM_SETMARGINS, w.EC_LEFTMARGIN | w.EC_RIGHTMARGIN, 0);
@@ -525,8 +525,15 @@ fn dialogProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WIN
     const st: *DialogState = @ptrFromInt(@as(usize, @bitCast(raw)));
     switch (msg) {
         w.WM_COMMAND => {
+            // Only a button click ends the dialog: the body text box also sends WM_COMMAND
+            // (EN_SETFOCUS etc.) when clicked. Enter / Esc arrive as IDOK / IDCANCEL clicks.
             const id: i32 = @intCast(wp & 0xFFFF);
-            if (id == 900) return 0;
+            const code: u16 = @truncate(wp >> 16);
+            if (code != w.BN_CLICKED) return 0;
+            const known = for (st.spec.buttons) |b| {
+                if (b.id == id) break true;
+            } else id == w.IDOK or id == w.IDCANCEL;
+            if (!known) return 0;
             st.result = id;
             st.done = true;
             return 0;
