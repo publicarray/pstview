@@ -19,6 +19,7 @@ const store = @import("store.zig");
 const Store = store.Store;
 const hreport = @import("headerreport.zig");
 const mime = @import("mime.zig");
+const build_options = @import("build_options");
 
 fn fmtLocal(buf: []u8, t: ?i64) []const u8 {
     const v = t orelse return "";
@@ -37,7 +38,12 @@ pub fn main(init: std.process.Init) !void {
     const out = &fw.interface;
     defer out.flush() catch {};
 
+    if (args.len == 2 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "version"))) {
+        try out.print("pstx {s}\n", .{build_options.version});
+        return;
+    }
     if (args.len < 3) {
+        try out.print("pstx {s} - read-only PST / OST / MBOX command-line tool\n", .{build_options.version});
         try out.writeAll(
             \\usage:
             \\  pstx tree   <pst|ost>

@@ -14,6 +14,7 @@ const hreport = @import("headerreport.zig");
 const itemview = @import("itemview.zig");
 const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
+const build_options = @import("build_options");
 const L = w.L;
 
 const ID_TREE = 100;
@@ -1823,7 +1824,7 @@ fn onCommand(id: u16, code: u16) void {
             showIntegrityLog(tot);
         },
         CMD_EXIT => _ = w.DestroyWindow(app.hwnd.?),
-        CMD_ABOUT => _ = msgBox("pstview - read-only Outlook PST / OST and MBOX viewer and exporter.\n\nOpens PST, OST and MBOX files (incl. Google Takeout, Thunderbird and Apple Mail folders) without write access; nothing is written next to the source.\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
+        CMD_ABOUT => _ = msgBox("pstview " ++ build_options.version ++ "\nRead-only Outlook PST / OST and MBOX viewer and exporter.\n\nOpens PST, OST and MBOX files (incl. Google Takeout, Thunderbird and Apple Mail folders) without write access; nothing is written next to the source.\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
         ID_SEARCH => if (code == w.EN_CHANGE) applyFilter(),
         else => {},
     }

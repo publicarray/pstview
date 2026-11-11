@@ -1,9 +1,10 @@
 // pstview resources: application icon ("Sealed Signal" mark, see design/)
+// PSTVIEW_VERSION_NUM / PSTVIEW_VERSION_STR are defined by build.zig.
 1 ICON "../design/pstview.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,4,0,0
-PRODUCTVERSION 0,4,0,0
+FILEVERSION PSTVIEW_VERSION_NUM
+PRODUCTVERSION PSTVIEW_VERSION_NUM
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -13,9 +14,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "publicarray"
       VALUE "FileDescription", "pstview - read-only PST viewer and exporter"
-      VALUE "FileVersion", "0.4.0"
+      VALUE "FileVersion", PSTVIEW_VERSION_STR
       VALUE "ProductName", "pstview"
-      VALUE "ProductVersion", "0.4.0"
+      VALUE "ProductVersion", PSTVIEW_VERSION_STR
     END
   END
   BLOCK "VarFileInfo"
