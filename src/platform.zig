@@ -38,9 +38,36 @@ const posix = struct {
     };
     extern "c" fn localtime_r(t: *const i64, out: *Tm) ?*Tm;
     extern "c" fn tzset() void;
-    extern "c" fn iconv_open(to: [*:0]const u8, from: [*:0]const u8) isize;
-    extern "c" fn iconv(cd: isize, in: *?[*]u8, in_left: *usize, out: *?[*]u8, out_left: *usize) usize;
-    extern "c" fn iconv_close(cd: isize) c_int;
+
+    const Iconv = struct {
+        open: *const fn (to: [*:0]const u8, from: [*:0]const u8) callconv(.c) isize,
+        conv: *const fn (cd: isize, in: *?[*]u8, in_left: *usize, out: *?[*]u8, out_left: *usize) callconv(.c) usize,
+        close: *const fn (cd: isize) callconv(.c) c_int,
+    };
+
+    /// glibc and musl have iconv in libc. macOS keeps it in libiconv, which is loaded at run time
+    /// (it is in the system's shared library cache) so that macOS builds need no SDK to link.
+    const darwin = builtin.os.tag.isDarwin();
+    const libc_iconv = if (darwin) struct {} else struct {
+        extern "c" fn iconv_open(to: [*:0]const u8, from: [*:0]const u8) isize;
+        extern "c" fn iconv(cd: isize, in: *?[*]u8, in_left: *usize, out: *?[*]u8, out_left: *usize) usize;
+        extern "c" fn iconv_close(cd: isize) c_int;
+    };
+    var iconv_fns: ?Iconv = null;
+    var iconv_tried = false;
+
+    fn iconvFns() ?Iconv {
+        if (!darwin) return .{ .open = &libc_iconv.iconv_open, .conv = &libc_iconv.iconv, .close = &libc_iconv.iconv_close };
+        if (iconv_tried) return iconv_fns;
+        iconv_tried = true;
+        const lib = std.c.dlopen("/usr/lib/libiconv.2.dylib", .{ .LAZY = true }) orelse return null;
+        iconv_fns = .{
+            .open = @ptrCast(@alignCast(std.c.dlsym(lib, "iconv_open") orelse return null)),
+            .conv = @ptrCast(@alignCast(std.c.dlsym(lib, "iconv") orelse return null)),
+            .close = @ptrCast(@alignCast(std.c.dlsym(lib, "iconv_close") orelse return null)),
+        };
+        return iconv_fns;
+    }
 
     var tz_ready = false;
 
@@ -67,16 +94,17 @@ const posix = struct {
         const name: [:0]const u8 = for (aliases) |al| {
             if (std.ascii.eqlIgnoreCase(charset, al[0])) break al[1];
         } else std.fmt.bufPrintZ(&nb, "{s}", .{charset}) catch return null;
-        const cd = iconv_open("UTF-8", name.ptr);
+        const ic = iconvFns() orelse return null;
+        const cd = ic.open("UTF-8", name.ptr);
         if (cd == -1) return null;
-        defer _ = iconv_close(cd);
+        defer _ = ic.close(cd);
         // UTF-8 needs at most 4 bytes per input byte for every charset iconv decodes here
         const out = a.alloc(u8, bytes.len * 4 + 16) catch return null;
         var in_ptr: ?[*]u8 = @constCast(bytes.ptr);
         var in_left = bytes.len;
         var out_ptr: ?[*]u8 = out.ptr;
         var out_left = out.len;
-        const r = iconv(cd, &in_ptr, &in_left, &out_ptr, &out_left);
+        const r = ic.conv(cd, &in_ptr, &in_left, &out_ptr, &out_left);
         if (r == std.math.maxInt(usize) or in_left != 0) {
             a.free(out);
             return null;

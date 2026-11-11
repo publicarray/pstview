@@ -49,7 +49,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     cli.root_module.addOptions("build_options", opts);
-    if (os.isDarwin()) cli.root_module.linkSystemLibrary("iconv", .{});
     b.installArtifact(cli);
 
     const run_cli = b.addRunArtifact(cli);

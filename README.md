@@ -118,7 +118,7 @@ zig build test           # unit tests
 zig build -Drelease -Dtarget=x86_64-linux-musl   # static pstx for Linux, from any host
 ```
 
-On macOS and Linux `zig build` produces `pstx` only (the GUI is Windows-only). It links libc for the local time zone and `iconv`; macOS builds need the macOS SDK (`libiconv`), so build them on a Mac. CI builds all platforms and checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`).
+On macOS and Linux `zig build` produces `pstx` only (the GUI is Windows-only). It uses libc for the local time zone and `iconv` (macOS: `libiconv`, loaded at run time), so every target can be cross-compiled from any host, e.g. `-Dtarget=aarch64-macos`. CI builds all platforms and checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`).
 
 The version shown in *Help > About* and by `pstx --version` comes from `git describe`; set `release_version` in `build.zig` before tagging a release (a tag that does not match it fails the build).
 
