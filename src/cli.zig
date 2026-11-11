@@ -12,7 +12,7 @@ const std = @import("std");
 const Io = std.Io;
 const pst = @import("pst.zig");
 const exp = @import("export.zig");
-const win = @import("win.zig");
+const platform = @import("platform.zig");
 const search = @import("search.zig");
 const headers = @import("headers.zig");
 const store = @import("store.zig");
@@ -23,7 +23,7 @@ const build_options = @import("build_options");
 
 fn fmtLocal(buf: []u8, t: ?i64) []const u8 {
     const v = t orelse return "";
-    return pst.fmtTime(buf, v, win.localOffset(v));
+    return pst.fmtTime(buf, v, platform.localOffset(v));
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -31,10 +31,11 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    mime.charset_hook = &win.charsetToUtf8;
+    mime.charset_hook = &platform.charsetToUtf8;
 
     var out_buf: [64 * 1024]u8 = undefined;
-    var fw = Io.File.stdout().writer(io, &out_buf);
+    // streaming, not positional: redirected output must append (pstx a >> log; pstx b >> log)
+    var fw = Io.File.stdout().writerStreaming(io, &out_buf);
     const out = &fw.interface;
     defer out.flush() catch {};
 
@@ -88,8 +89,8 @@ pub fn main(init: std.process.Init) !void {
             const rt = m.delivery_time orelse m.submit_time;
             try out.print("{x:0>8}\t{s}\t{s}\t{s}\t{s}\n", .{
                 m.nid,
-                pst.fmtTime(&b1, rt, if (rt) |t| win.localOffset(t) else 0),
-                pst.fmtTime(&b2, m.modified_time, if (m.modified_time) |t| win.localOffset(t) else 0),
+                pst.fmtTime(&b1, rt, if (rt) |t| platform.localOffset(t) else 0),
+                pst.fmtTime(&b2, m.modified_time, if (m.modified_time) |t| platform.localOffset(t) else 0),
                 m.from,
                 m.subject,
             });
@@ -137,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
             const an = ix.analyses[i];
             const rt = m.delivery_time orelse m.submit_time;
             if (!is_search and an.risk == .none) continue;
-            try out.print("{x:0>8}  {s}  {s:<7} | {s} | {s} | {s}\n", .{ m.nid, pst.fmtTime(&b1, rt, if (rt) |t| win.localOffset(t) else 0), an.risk.label(), m.from, m.subject, if (an.risk == .none) "" else an.summary() });
+            try out.print("{x:0>8}  {s}  {s:<7} | {s} | {s} | {s}\n", .{ m.nid, pst.fmtTime(&b1, rt, if (rt) |t| platform.localOffset(t) else 0), an.risk.label(), m.from, m.subject, if (an.risk == .none) "" else an.summary() });
         }
         try out.print("-- {d} of {d} items\n", .{ order.items.len, msgs.len });
     } else if (std.mem.eql(u8, cmd, "headers")) {
@@ -189,11 +190,11 @@ pub fn main(init: std.process.Init) !void {
         try exportCmd(arena, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
         if (args.len < 4) return out.writeAll("usage: pstx show <pst|ost> <nid hex>\n");
-        const nid = try std.fmt.parseInt(u32, args[3], 16);
+        const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try loadAny(arena, f, args[2], nid);
         var b1: [32]u8 = undefined;
         try out.print("Subject: {s}\nFrom: {s} <{s}>\nReceived (UTC): {s}\nClass: {s}\n", .{
-            try m.subject(arena),                                     try m.senderName(arena), try m.senderEmail(arena),
+            try m.subject(arena),                                  try m.senderName(arena),                       try m.senderEmail(arena),
             pst.fmtTime(&b1, m.pc.time(pst.Tag.delivery_time), 0), try m.pc.string(arena, pst.Tag.message_class),
         });
         for (@import("itemview.zig").rows(arena, &m, fmtLocal)) |row| try out.print("{s}: {s}\n", .{ row.label, row.value });
@@ -213,8 +214,8 @@ fn printSummaries(out: *Io.Writer, list: []const pst.MessageSummary) !void {
         const rt = m.delivery_time orelse m.submit_time;
         try out.print("  {x:0>8}  {s}  mod {s}  {s}  | {s} | {s} | {s}\n", .{
             m.nid,
-            pst.fmtTime(&b1, rt, if (rt) |t| win.localOffset(t) else 0),
-            pst.fmtTime(&b2, m.modified_time, if (m.modified_time) |t| win.localOffset(t) else 0),
+            pst.fmtTime(&b1, rt, if (rt) |t| platform.localOffset(t) else 0),
+            pst.fmtTime(&b2, m.modified_time, if (m.modified_time) |t| platform.localOffset(t) else 0),
             m.message_class,
             m.from,
             m.subject,
@@ -363,7 +364,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
     for (msgs) |s| {
         if (modified) |d| {
             const t = s.modified_time orelse continue;
-            const loc = pst.fmtTime(&tb, t, win.localOffset(t));
+            const loc = pst.fmtTime(&tb, t, platform.localOffset(t));
             if (!std.mem.startsWith(u8, loc, d)) continue;
         }
         if (match) |q| if (std.ascii.indexOfIgnoreCase(s.subject, q) == null) continue;
@@ -376,7 +377,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
             continue;
         };
         const t = s.delivery_time orelse s.submit_time orelse s.modified_time;
-        const loc = pst.fmtTime(&tb, t, if (t) |tv| win.localOffset(tv) else 0);
+        const loc = pst.fmtTime(&tb, t, if (t) |tv| platform.localOffset(tv) else 0);
         var pfx_buf: [64]u8 = undefined;
         const pfx = try std.fmt.bufPrint(&pfx_buf, "{d:0>3} {s}", .{ n, if (loc.len >= 16) loc[0..16] else loc });
         for (pfx) |*c| if (c.* == ':') {
@@ -386,7 +387,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
         // .eml from an MBOX is the original message, byte for byte
         const raw: ?[]const u8 = if (is_msg) null else try f.rawMessage(ia, s.nid);
         const data = if (is_msg) try exp.buildMsg(ia, &m) else if (raw) |r| r else try exp.buildEml(ia, &m, 0);
-        try writeOut(io, try std.fmt.allocPrint(ia, "{s}\\{s}", .{ dir, name }), data);
+        try writeOut(io, try std.fs.path.join(ia, &.{ dir, name }), data);
         var al: std.ArrayList(u8) = .empty;
         for (m.attachments, 0..) |att, k| {
             if (k > 0) try al.appendSlice(a, "; ");
@@ -418,11 +419,11 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
         .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
         .generated_utc = now,
         .tz_label = "local time",
-        .tz_offset = win.localOffset(now),
+        .tz_offset = platform.localOffset(now),
         .title = try std.fmt.allocPrint(a, "Export report - {s}", .{args[3]}),
     };
-    try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.csv", .{dir}), try exp.reportCsv(a, rows.items, meta));
-    try writeOut(io, try std.fmt.allocPrint(a, "{s}\\pstview report.html", .{dir}), try exp.reportHtml(a, rows.items, meta));
+    try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.csv" }), try exp.reportCsv(a, rows.items, meta));
+    try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.html" }), try exp.reportHtml(a, rows.items, meta));
     try out.print("-- exported {d} items to {s}\n", .{ rows.items.len, dir });
 }
 

@@ -12,7 +12,23 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # pstview.exe (GUI) + pstx.exe
+          - os: windows-latest
+            platform: windows
+          # pstx, static (musl) so it runs on any distribution
+          - os: ubuntu-latest
+            platform: linux
+          # pstx; built natively for the SDK (libiconv)
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
 
@@ -20,38 +36,81 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build (ReleaseSafe)
-        run: zig build -Drelease
+      - name: Unit tests
+        run: zig build test
 
-      - name: Package
-        shell: pwsh
+      - name: Build (ReleaseSafe)
         run: |
-          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { "pstview-$env:GITHUB_REF_NAME-windows-x64" } else { "pstview-$($env:GITHUB_SHA.Substring(0,7))-windows-x64" }
-          New-Item -ItemType Directory -Force dist/$name | Out-Null
-          Copy-Item zig-out/bin/pstview.exe, zig-out/bin/pstx.exe, README.md dist/$name/
-          Compress-Archive -Path dist/$name/* -DestinationPath dist/$name.zip
-          $files = @(Get-Item dist/$name/pstview.exe, dist/$name/pstx.exe, dist/$name.zip)
-          $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name } |
-            Set-Content -Encoding ascii dist/SHA256SUMS.txt
-          Get-Content dist/SHA256SUMS.txt
-          "PKG_NAME=$name" >> $env:GITHUB_ENV
+          case "${{ matrix.platform }}" in
+            windows) zig build -Drelease ;;
+            linux)   zig build -Drelease -Dtarget=x86_64-linux-musl
+                     zig build -Drelease -Dtarget=aarch64-linux-musl --prefix zig-out-arm64 ;;
+            macos)   zig build -Drelease
+                     zig build -Drelease -Dtarget=x86_64-macos --prefix zig-out-x64 ;;
+          esac
+
+      - name: Same output on every platform (demo mailbox, UTC)
+        run: TZ=UTC bash testdata/smoke.sh zig-out/bin/pstx > smoke-${{ matrix.platform }}.txt
+
+      - name: Local time matches Windows (Australia/Sydney)
+        if: matrix.platform != 'windows'
+        run: TZ=Australia/Sydney bash testdata/smoke.sh zig-out/bin/pstx | diff -u testdata/smoke-sydney.txt -
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PKG_NAME }}
-          path: |
-            dist/${{ env.PKG_NAME }}.zip
-            dist/SHA256SUMS.txt
+          name: smoke-${{ matrix.platform }}
+          path: smoke-${{ matrix.platform }}.txt
+
+      - name: Package
+        run: |
+          ver=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "${GITHUB_SHA:0:7}")
+          mkdir -p dist
+          pack() { # pack <name> <files...>: zip on Windows, tar.gz elsewhere
+            local name="pstview-$ver-$1"; shift
+            mkdir -p "stage/$name" && cp "$@" README.md "stage/$name/"
+            if [ "${{ matrix.platform }}" = windows ]; then
+              (cd stage && 7z a -tzip "../dist/$name.zip" "$name" > /dev/null)
+            else
+              tar -C stage -czf "dist/$name.tar.gz" "$name"
+            fi
+          }
+          case "${{ matrix.platform }}" in
+            windows) pack windows-x64 zig-out/bin/pstview.exe zig-out/bin/pstx.exe ;;
+            linux)   pack linux-x64 zig-out/bin/pstx; pack linux-arm64 zig-out-arm64/bin/pstx ;;
+            macos)   pack macos-arm64 zig-out/bin/pstx; pack macos-x64 zig-out-x64/bin/pstx ;;
+          esac
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pstview-${{ matrix.platform }}
+          path: dist/*
+
+  # pstx must print the same thing on Windows, macOS and Linux
+  compare:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: smoke-*
+          merge-multiple: true
+      - name: Compare
+        run: |
+          diff -u smoke-windows.txt smoke-linux.txt
+          diff -u smoke-windows.txt smoke-macos.txt
+          echo "identical on all platforms ($(wc -l < smoke-windows.txt) lines)"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, compare]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: pstview-*
           path: dist
           merge-multiple: true
 
@@ -59,7 +118,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/SHA256SUMS.txt \
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" *.zip *.tar.gz SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "pstview $GITHUB_REF_NAME" \
             --generate-notes

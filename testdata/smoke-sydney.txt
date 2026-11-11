@@ -1,0 +1,229 @@
+== pstx tree testdata/demo-mailbox
+MBOX folder, 5 files, 0 MB
+demo-mailbox  [count=0 table=0] nid=0
+  Archive  [count=2 table=2] nid=1
+  Drafts  [count=1 table=1] nid=2
+  Inbox  [count=8 table=8] nid=3
+  Junk  [count=2 table=2] nid=4
+  Sent  [count=2 table=2] nid=5
+== pstx list testdata/demo-mailbox Inbox
+00000003	2026-10-21 09:14:05		Liam Chen	Q3 freight schedule - revised
+00000004	2026-10-22 02:41:19		Accounts Payable	URGENT: Invoice INV-20431 overdue - payment details changed
+00000005	2026-10-22 18:05:44		Jonas Weber	Wareneingang bestätigt - Lieferung 4471
+00000006	2026-10-23 11:20:31		Ольга Смирнова	Отчёт о поставках за октябрь
+00000007	2026-10-26 13:02:09		佐藤 健	納品書の送付について
+00000008	2026-10-27 19:47:51		Zofia Kowalska	Dokumenty celne: odprawa w Gdańsku
+00000009	2026-10-28 10:12:40		Noah Patel	Lunch on Friday?
+0000000a	2026-10-29 08:30:12		Mia Rossi	Carrier review - agenda for Monday
+-- 8 items (times local)
+== pstx list testdata/demo-mailbox Sent
+0000000d	2026-10-21 22:02:17		Ava Thompson	Re: Q3 freight schedule - revised
+0000000e	2026-10-28 20:03:55		Ava Thompson	Re: Dokumenty celne: odprawa w Gdansku
+-- 2 items (times local)
+== pstx list testdata/demo-mailbox Drafts
+00000002	2026-10-30 03:45:00		Ava Thompson	Notes for the carrier review
+-- 1 items (times local)
+== pstx list testdata/demo-mailbox Junk
+0000000b	2026-10-24 04:12:33		Prize Centre	Congratulations! You have won a $1,000 gift card
+0000000c	2026-10-27 06:58:02		Northwind IT Support	Your mailbox is almost full - verify your account
+-- 2 items (times local)
+== pstx list testdata/demo-mailbox Archive
+00000000	2025-02-03 19:00:00		Northwind People Team	Welcome to Northwind Imports
+00000001	2025-12-01 21:30:00		Harbourline Rates	Annual freight rates 2026
+-- 2 items (times local)
+== pstx show testdata/demo-mailbox 0x3
+Subject: Q3 freight schedule - revised
+From: Liam Chen <liam.chen@harbourline.example>
+Received (UTC): 2026-10-20 22:14:05
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+Recipient[2]: Operations <ops@northwind.example>
+Attachment: Q3-schedule-rev2.pdf (63 bytes, method 1, data 63)
+
+Hi Ava,
+
+Attached is the revised Q3 schedule. Two changes:
+
+ - Sydney to Auckland moves from Tuesday to Wednesday sailings.
+ - Brisbane consolidation now closes at 14:00 instead of 16:00.
+
+Let me know if the new cut-off causes problems for your warehouse team.
+
+Regards,
+Liam Chen
+Harbourline Freight
+
+== pstx show testdata/demo-mailbox 0x4
+Subject: URGENT: Invoice INV-20431 overdue - payment details changed
+From: Accounts Payable <accounts@harbourline.example>
+Received (UTC): 2026-10-21 15:41:19
+Class: IPM.Note
+Recipient[1]: ava.thompson@northwind.example <ava.thompson@northwind.example>
+
+Dear customer,
+
+Invoice INV-20431 is now 14 days overdue. Our bank details have changed;
+please use the new account below for this and all future payments:
+
+  Account name: Harbourline Freight Payments
+  BSB: 000-000   Account: 00000000
+
+Download the invoice: http://payments-harbourline.example.net/invoice/INV-20431
+
+Payment must be received today to avoid suspension of your account.
+
+Accounts Payable
+
+== pstx show testdata/demo-mailbox 0x5
+Subject: Wareneingang bestätigt - Lieferung 4471
+From: Jonas Weber <j.weber@elbe-lager.example>
+Received (UTC): 2026-10-22 07:05:44
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+
+Guten Tag Frau Thompson,
+
+wir bestätigen den Wareneingang der Lieferung 4471 (12 Paletten).
+Die Prüfung ergab keine Schäden; die Ware ist eingelagert.
+
+Mit freundlichen Grüßen
+Jonas Weber
+Elbe Lager GmbH, Hamburg
+
+== pstx show testdata/demo-mailbox 0x6
+Subject: Отчёт о поставках за октябрь
+From: Ольга Смирнова <o.smirnova@baltic-cargo.example>
+Received (UTC): 2026-10-23 00:20:31
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+
+Здравствуйте, Ава!
+
+Направляем отчёт о поставках за октябрь.
+Все 18 контейнеров доставлены в срок.
+
+С уважением,
+Ольга Смирнова
+Балтик Карго
+== pstx show testdata/demo-mailbox 0x7
+Subject: 納品書の送付について
+From: 佐藤 健 <k.sato@sample-butsuryu.example>
+Received (UTC): 2026-10-26 02:02:09
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+
+トンプソン様
+
+10月分の納品書をお送りいたします。
+ご確認のほどよろしくお願いいたします。
+
+佐藤 健
+サンプル物流株式会社
+== pstx show testdata/demo-mailbox 0x8
+Subject: Dokumenty celne: odprawa w Gdańsku
+From: Zofia Kowalska <z.kowalska@wisla-trans.example>
+Received (UTC): 2026-10-27 08:47:51
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+
+Dzień dobry,
+
+w załączeniu przesyłam dokumenty celne dla odprawy w Gdańsku.
+Proszę o potwierdzenie odbioru.
+
+Pozdrawiam
+Zofia Kowalska
+Wisła Trans
+
+== pstx show testdata/demo-mailbox 0x9
+Subject: Lunch on Friday?
+From: Noah Patel <noah.patel@northwind.example>
+Received (UTC): 2026-10-27 23:12:40
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+
+Hi Ava,
+
+Thai place on George St at 12:30 on Friday? Mia and Liam are in.
+
+Noah
+
+== pstx show testdata/demo-mailbox 0xa
+Subject: Carrier review - agenda for Monday
+From: Mia Rossi <mia.rossi@northwind.example>
+Received (UTC): 2026-10-28 21:30:12
+Class: IPM.Note
+Recipient[1]: Ava Thompson <ava.thompson@northwind.example>
+Recipient[1]: Noah Patel <noah.patel@northwind.example>
+Attachment: invite.ics (248 bytes, method 1, data 248)
+
+Agenda for Monday's carrier review:
+
+ 1. On-time performance by lane (Q3)
+ 2. Damage claims - Elbe Lager and Baltic Cargo
+ 3. Harbourline schedule change and Brisbane cut-off
+ 4. Rate review for 2027
+
+Invite attached.
+Mia
+
+== pstx headers testdata/demo-mailbox 0x4
+================ Header analysis: HIGH ================
+  [Info] Earliest recorded origin: "vps-77.example.net" at IP 192.0.2.77 (accepted by mx1.northwind.example)
+  [HIGH] DMARC failed for harbourline.example - sender not authorised to use this domain
+  [Medium] SPF failed - sending server not permitted by the domain
+  [Info] Envelope sender (Return-Path) domain payments-harbourline.example.net differs from From domain harbourline.example
+  [Medium] Replies go to a different domain: Reply-To ap-desk@payments-harbourline.example.net (From accounts@harbourline.example)
+  From: Accounts Payable <accounts@harbourline.example>   Return-Path: billing@payments-harbourline.example.net   Reply-To: ap-desk@payments-harbourline.example.net
+  Auth: SPF=fail (payments-harbourline.example.net NOT aligned)  DKIM=none (- -)  DMARC=fail  compauth=-
+  Sender device: vps-77.example.net  IP: 192.0.2.77
+  Connecting IP: -  Country: -  Direction: -  Auth-as: -  M365 verdict: SFV=- CAT=- SCL=- BCL=-
+  Mailer: Microsoft Outlook 16.0
+  Delivery path (origin first), total 0 s:
+    1. 2026-10-22 02:41:19  vps-77.example.net -> mx1.northwind.example  [192.0.2.77] ESMTP
+
+== Summary
+  Subject       URGENT: Invoice INV-20431 overdue - payment details changed
+  To            ava.thompson@northwind.example
+  Message-ID    <20261021154002.77@vps-77.example.net>
+  Date          2026-10-22 02:40:02  (2026-10-21 15:40:02 UTC)
+  DMARC (ours)  fail (no aligned SPF or DKIM pass)
+
+== Authentication results (most recent first)
+  Authentication-Results by mx1.northwind.example: spf=fail smtp.mailfrom=payments-harbourline.example.net
+  Authentication-Results by mx1.northwind.example: dkim=none
+  Authentication-Results by mx1.northwind.example: dmarc=fail header.from=harbourline.example
+
+== Received hops (origin first)
+   1.               2026-10-22 02:41:19
+      from vps-77.example.net (vps-77.example.net [192.0.2.77])
+      by   mx1.northwind.example with ESMTP
+
+== Indicators (not looked up)
+  IP address      192.0.2.77   (Received)
+  Host / domain   vps-77.example.net   (Received)
+  Host / domain   mx1.northwind.example   (Received)
+  Host / domain   payments-harbourline.example.net   (Authentication-Results)
+  Host / domain   harbourline.example   (Authentication-Results)
+  E-mail address  accounts@harbourline.example   (From)
+  E-mail address  ap-desk@payments-harbourline.example.net   (Reply-To)
+  E-mail address  billing@payments-harbourline.example.net   (Return-Path)
+  E-mail address  ava.thompson@northwind.example   (To)
+  Host / domain   northwind.example   (To)
+== pstx triage testdata/demo-mailbox Inbox
+Organisation domain detected: northwind.example
+00000004  2026-10-22 02:41:19  HIGH    | Accounts Payable | URGENT: Invoice INV-20431 overdue - payment details changed | DMARC failed for harbourline.example - sender not authorised to use this domain
+-- 8 of 8 items
+== pstx search testdata/demo-mailbox Inbox from:*harbourline*
+00000003  2026-10-21 09:14:05          | Liam Chen | Q3 freight schedule - revised | 
+00000004  2026-10-22 02:41:19  HIGH    | Accounts Payable | URGENT: Invoice INV-20431 overdue - payment details changed | DMARC failed for harbourline.example - sender not authorised to use this domain
+-- 2 of 8 items
+== pstx export testdata/demo-mailbox Inbox <dir> eml
+506a4572c5067cd43752bbda0b147d0952bc857c4cb2c26ab8c02e077a9fa1d8  001 2026-10-21 09-14 Q3 freight schedule - revised.eml
+d7e77f8c5d85915811a34029eb06ff9096e1d83acd4d600104447955e031e37e  002 2026-10-22 02-41 URGENT_ Invoice INV-20431 overdue - payment details changed.eml
+5d711381c9c1cdfbd512fe556c8d6341a79a6caac7b3c4aa5f66ae3e2c03c22d  003 2026-10-22 18-05 Wareneingang bestätigt - Lieferung 4471.eml
+303d5bd572893741198930df4e482ba6bea800255b4643b321a1974a461e603b  004 2026-10-23 11-20 Отчёт о поставках за октябрь.eml
+0bbc1b1f128060f4b528210124ff80f792baa8bd669ac2ec006e69ef79661b08  005 2026-10-26 13-02 納品書の送付について.eml
+b9e3f36a74167e7c102dfefc07fa2c6fab4f4362b4f4a3b99c56ab3fa8ddbb8c  006 2026-10-27 19-47 Dokumenty celne_ odprawa w Gdańsku.eml
+b1effd24756e82c05686fea3e820caaf7475afbfd36889de3905822f01074652  007 2026-10-28 10-12 Lunch on Friday_.eml
+8ecf052e801119444fdbd4a5a6156291da8c630c7760c423c683c3dc0357bef2  008 2026-10-29 08-30 Carrier review - agenda for Monday.eml

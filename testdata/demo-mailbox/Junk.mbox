@@ -1,0 +1,42 @@
+From promo@prize-centre.example.net Sat Oct 24 04:12:33 2026
+Return-Path: <promo@prize-centre.example.net>
+Received: from unknown (HELO bulk3) ([203.0.113.250])
+	by mx1.northwind.example with SMTP id 0Zx9Qa; Sat, 24 Oct 2026 04:12:33 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=softfail smtp.mailfrom=prize-centre.example.net;
+	dkim=none;
+	dmarc=none header.from=prize-centre.example.net
+From: Prize Centre <promo@prize-centre.example.net>
+To: ava.thompson@northwind.example
+Subject: Congratulations! You have won a $1,000 gift card
+Date: Fri, 23 Oct 2026 17:12:30 +0000
+Message-ID: <win-1000@prize-centre.example.net>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><body><h2>You are our lucky winner!</h2>
+<p>Claim your gift card within 24 hours: <a href="http://prize-centre.example.net/claim">claim now</a></p>
+<img src="http://prize-centre.example.net/t.gif?id=4471" width="1" height="1">
+</body></html>
+
+From it-support@northwind-mail.example.net Tue Oct 27 06:58:02 2026
+Return-Path: <bounce@northwind-mail.example.net>
+Received: from mail.northwind-mail.example.net (mail.northwind-mail.example.net [192.0.2.199])
+	by mx1.northwind.example with ESMTP id 4Lk8Ws; Tue, 27 Oct 2026 06:58:02 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=northwind-mail.example.net;
+	dkim=none;
+	dmarc=none header.from=northwind-mail.example.net
+From: "Northwind IT Support" <it-support@northwind-mail.example.net>
+To: ava.thompson@northwind.example
+Subject: Your mailbox is almost full - verify your account
+Date: Mon, 26 Oct 2026 19:57:58 +0000
+Message-ID: <quota-warning@northwind-mail.example.net>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Your mailbox has reached 98% of its quota. Verify your account within 24 hours
+to keep receiving email: http://northwind-mail.example.net/verify
+
+Northwind IT Support
+

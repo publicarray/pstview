@@ -1,0 +1,29 @@
+From people@northwind.example Mon Feb  3 08:00:00 2025
+From: Northwind People Team <people@northwind.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: Welcome to Northwind Imports
+Date: Mon, 3 Feb 2025 08:00:00 +1100
+Message-ID: <welcome-ava@northwind.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Welcome aboard, Ava! Your first week's schedule is on the intranet.
+
+The People Team
+
+From rates@harbourline.example Mon Dec  1 10:30:00 2025
+From: Harbourline Rates <rates@harbourline.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: Annual freight rates 2026
+Date: Mon, 1 Dec 2025 10:30:00 +1100
+Message-ID: <rates-2026@harbourline.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Please find our 2026 rate card below. Rates are valid from 1 January 2026.
+
+  Sydney - Auckland      AUD 1,850 / TEU
+  Brisbane - Noumea      AUD 2,100 / TEU
+
+Harbourline Freight
+

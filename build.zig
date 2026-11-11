@@ -20,18 +20,22 @@ pub fn build(b: *std.Build) void {
         b.fmt("/dPSTVIEW_VERSION_STR=\"{s}\"", .{version}),
     };
 
-    // GUI viewer
-    const gui_mod = b.createModule(.{
-        .root_source_file = b.path("src/gui.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "shell32", "ole32", "gdiplus", "shlwapi", "dwmapi", "uxtheme", "advapi32" }) |lib| gui_mod.linkSystemLibrary(lib, .{});
-    gui_mod.addWin32ResourceFile(.{ .file = b.path("src/pstview.rc"), .flags = &rc_flags });
-    gui_mod.addOptions("build_options", opts);
-    const gui = b.addExecutable(.{ .name = "pstview", .root_module = gui_mod, .win32_manifest = b.path("src/app.manifest") });
-    gui.subsystem = .windows;
-    b.installArtifact(gui);
+    const os = target.result.os.tag;
+
+    // GUI viewer (Windows only; pstx runs everywhere)
+    if (os == .windows) {
+        const gui_mod = b.createModule(.{
+            .root_source_file = b.path("src/gui.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        for ([_][]const u8{ "user32", "gdi32", "comctl32", "comdlg32", "shell32", "ole32", "gdiplus", "shlwapi", "dwmapi", "uxtheme", "advapi32" }) |lib| gui_mod.linkSystemLibrary(lib, .{});
+        gui_mod.addWin32ResourceFile(.{ .file = b.path("src/pstview.rc"), .flags = &rc_flags });
+        gui_mod.addOptions("build_options", opts);
+        const gui = b.addExecutable(.{ .name = "pstview", .root_module = gui_mod, .win32_manifest = b.path("src/app.manifest") });
+        gui.subsystem = .windows;
+        b.installArtifact(gui);
+    }
 
     // Command-line tool
     const cli = b.addExecutable(.{
@@ -40,9 +44,12 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/cli.zig"),
             .target = target,
             .optimize = optimize,
+            // macOS / Linux: local time zone and charsets come from libc (src/platform.zig)
+            .link_libc = os != .windows,
         }),
     });
     cli.root_module.addOptions("build_options", opts);
+    if (os.isDarwin()) cli.root_module.linkSystemLibrary("iconv", .{});
     b.installArtifact(cli);
 
     const run_cli = b.addRunArtifact(cli);

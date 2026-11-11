@@ -1,0 +1,260 @@
+From liam.chen@harbourline.example Wed Oct 21 09:14:05 2026
+Return-Path: <liam.chen@harbourline.example>
+Received: from mail.harbourline.example (mail.harbourline.example [198.51.100.24])
+	by mx1.northwind.example with ESMTPS id 4XK2b8; Wed, 21 Oct 2026 09:14:05 +1100
+Received: from [10.20.0.15] (unknown [203.0.113.40])
+	by mail.harbourline.example with ESMTPSA id 7Hc1Qe; Wed, 21 Oct 2026 09:14:02 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=harbourline.example;
+	dkim=pass header.d=harbourline.example header.s=sel1;
+	dmarc=pass header.from=harbourline.example
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=harbourline.example; s=sel1;
+	h=from:to:subject:date:message-id; bh=ZGVtbyBib2R5IGhhc2g=; b=ZGVtbyBzaWduYXR1cmU=
+From: Liam Chen <liam.chen@harbourline.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Cc: Operations <ops@northwind.example>
+Subject: Q3 freight schedule - revised
+Date: Wed, 21 Oct 2026 09:14:00 +1100
+Message-ID: <q3-schedule-2026@harbourline.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-q3"
+
+--mix-q3
+Content-Type: multipart/alternative; boundary="alt-q3"
+
+--alt-q3
+Content-Type: text/plain; charset=utf-8
+
+Hi Ava,
+
+Attached is the revised Q3 schedule. Two changes:
+
+ - Sydney to Auckland moves from Tuesday to Wednesday sailings.
+ - Brisbane consolidation now closes at 14:00 instead of 16:00.
+
+Let me know if the new cut-off causes problems for your warehouse team.
+
+Regards,
+Liam Chen
+Harbourline Freight
+
+--alt-q3
+Content-Type: text/html; charset=utf-8
+
+<html><body style="font-family:Segoe UI,Arial,sans-serif">
+<p>Hi Ava,</p>
+<p>Attached is the revised Q3 schedule. Two changes:</p>
+<ul><li>Sydney to Auckland moves from Tuesday to Wednesday sailings.</li>
+<li>Brisbane consolidation now closes at <b>14:00</b> instead of 16:00.</li></ul>
+<p>Let me know if the new cut-off causes problems for your warehouse team.</p>
+<p>Regards,<br>Liam Chen<br><span style="color:#606c80">Harbourline Freight</span></p>
+</body></html>
+
+--alt-q3--
+
+--mix-q3
+Content-Type: application/pdf; name="Q3-schedule-rev2.pdf"
+Content-Disposition: attachment; filename="Q3-schedule-rev2.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJSBwc3R2aWV3IGRlbW8gYXR0YWNobWVudCAtIG5vdCBhIHJlYWwgc2NoZWR1bGUK
+JSVFT0YK
+
+--mix-q3--
+
+From billing@payments-harbourline.example.net Thu Oct 22 02:41:19 2026
+Return-Path: <billing@payments-harbourline.example.net>
+Received: from vps-77.example.net (vps-77.example.net [192.0.2.77])
+	by mx1.northwind.example with ESMTP id 9Rt3Lk; Thu, 22 Oct 2026 02:41:19 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=fail smtp.mailfrom=payments-harbourline.example.net;
+	dkim=none;
+	dmarc=fail header.from=harbourline.example
+From: "Accounts Payable" <accounts@harbourline.example>
+Reply-To: <ap-desk@payments-harbourline.example.net>
+To: ava.thompson@northwind.example
+Subject: URGENT: Invoice INV-20431 overdue - payment details changed
+Date: Wed, 21 Oct 2026 15:40:02 +0000
+Message-ID: <20261021154002.77@vps-77.example.net>
+X-Mailer: Microsoft Outlook 16.0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Dear customer,
+
+Invoice INV-20431 is now 14 days overdue. Our bank details have changed;
+please use the new account below for this and all future payments:
+
+  Account name: Harbourline Freight Payments
+  BSB: 000-000   Account: 00000000
+
+Download the invoice: http://payments-harbourline.example.net/invoice/INV-20431
+
+Payment must be received today to avoid suspension of your account.
+
+Accounts Payable
+
+From j.weber@elbe-lager.example Thu Oct 22 18:05:44 2026
+Return-Path: <j.weber@elbe-lager.example>
+Received: from smtp.elbe-lager.example (smtp.elbe-lager.example [198.51.100.150])
+	by mx1.northwind.example with ESMTPS id 2Wq8Zp; Thu, 22 Oct 2026 18:05:44 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=elbe-lager.example;
+	dkim=pass header.d=elbe-lager.example header.s=mail;
+	dmarc=pass header.from=elbe-lager.example
+From: Jonas Weber <j.weber@elbe-lager.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: =?iso-8859-1?B?V2FyZW5laW5nYW5nIGJlc3TkdGlndCAtIExpZWZlcnVuZyA0NDcx?=
+Date: Thu, 22 Oct 2026 09:05:40 +0200
+Message-ID: <4471-wareneingang@elbe-lager.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+Guten Tag Frau Thompson,
+
+wir best=E4tigen den Wareneingang der Lieferung 4471 (12 Paletten).
+Die Pr=FCfung ergab keine Sch=E4den; die Ware ist eingelagert.
+
+Mit freundlichen Gr=FC=DFen
+Jonas Weber
+Elbe Lager GmbH, Hamburg
+
+From o.smirnova@baltic-cargo.example Fri Oct 23 11:20:31 2026
+Return-Path: <o.smirnova@baltic-cargo.example>
+Received: from mx.baltic-cargo.example (mx.baltic-cargo.example [203.0.113.88])
+	by mx1.northwind.example with ESMTPS id 6Hm2Rd; Fri, 23 Oct 2026 11:20:31 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=baltic-cargo.example;
+	dkim=pass header.d=baltic-cargo.example header.s=k1;
+	dmarc=pass header.from=baltic-cargo.example
+From: =?windows-1251?B?zuv84+Ag0ezo8O3u4uA=?= <o.smirnova@baltic-cargo.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: =?windows-1251?B?zvL3uPIg7iDv7vHy4OLq4PUg5+Ag7ury/+Hw/A==?=
+Date: Fri, 23 Oct 2026 03:20:27 +0300
+Message-ID: <oct-report-18@baltic-cargo.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=windows-1251
+Content-Transfer-Encoding: base64
+
+x+Tw4OLx8uLz6fLlLCDA4uAhDQoNCs3g7/Dg4uv/5ewg7vL3uPIg7iDv7vHy4OLq4PUg5+Ag7ury
+/+Hw/C4NCsLx5SAxOCDq7u3y5ent5fDu4iDk7vHy4OLr5e37IOIg8fDu6i4NCg0K0SDz4uDm5e3o
+5ewsDQrO6/zj4CDR7Ojw7e7i4A0KweDr8ujqIMrg8OPu
+
+From k.sato@sample-butsuryu.example Mon Oct 26 13:02:09 2026
+Return-Path: <k.sato@sample-butsuryu.example>
+Received: from mail.sample-butsuryu.example (mail.sample-butsuryu.example [198.51.100.201])
+	by mx1.northwind.example with ESMTPS id 1Kp7Vx; Mon, 26 Oct 2026 13:02:09 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=sample-butsuryu.example;
+	dkim=pass header.d=sample-butsuryu.example header.s=s2026;
+	dmarc=pass header.from=sample-butsuryu.example
+From: =?shift_jis?B?jbKToSCMkg==?= <k.sato@sample-butsuryu.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: =?shift_jis?B?lFuVaY+RgsyRl5V0gsmCwoKigsQ=?=
+Date: Mon, 26 Oct 2026 11:02:05 +0900
+Message-ID: <nouhinsho-10@sample-butsuryu.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=shift_jis
+Content-Transfer-Encoding: base64
+
+g2eDk4N2g1yDk5dsDQoNCjEwjI6VqoLMlFuVaY+RgvCCqJGXguiCooK9grWC3IK3gUINCoKyim2U
+RoLMgtmCx4LmguuCtYKtgqiK6IKigqKCvYK1gtyCt4FCDQoNCo2yk6EgjJINCoNUg5ODdoOLlaiX
+rIqUjq6J747Q
+
+From z.kowalska@wisla-trans.example Tue Oct 27 19:47:51 2026
+Return-Path: <z.kowalska@wisla-trans.example>
+Received: from poczta.wisla-trans.example (poczta.wisla-trans.example [203.0.113.17])
+	by mx1.northwind.example with ESMTPS id 8Fg4Jn; Tue, 27 Oct 2026 19:47:51 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=wisla-trans.example;
+	dkim=pass header.d=wisla-trans.example header.s=default;
+	dmarc=pass header.from=wisla-trans.example
+From: Zofia Kowalska <z.kowalska@wisla-trans.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: =?iso-8859-2?B?RG9rdW1lbnR5IGNlbG5lOiBvZHByYXdhIHcgR2Rh8XNrdQ==?=
+Date: Tue, 27 Oct 2026 09:47:46 +0100
+Message-ID: <odprawa-gdansk@wisla-trans.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-2
+Content-Transfer-Encoding: quoted-printable
+
+Dzie=F1 dobry,
+
+w za=B3=B1czeniu przesy=B3am dokumenty celne dla odprawy w Gda=F1sku.
+Prosz=EA o potwierdzenie odbioru.
+
+Pozdrawiam
+Zofia Kowalska
+Wis=B3a Trans
+
+From noah.patel@northwind.example Wed Oct 28 10:12:40 2026
+Return-Path: <noah.patel@northwind.example>
+Received: from app01.northwind.example (app01.northwind.example [192.0.2.10])
+	by mx1.northwind.example with ESMTPS id 3Bn6Ty; Wed, 28 Oct 2026 10:12:40 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=northwind.example;
+	dkim=pass header.d=northwind.example header.s=nw1;
+	dmarc=pass header.from=northwind.example
+From: Noah Patel <noah.patel@northwind.example>
+To: Ava Thompson <ava.thompson@northwind.example>
+Subject: Lunch on Friday?
+Date: Wed, 28 Oct 2026 10:12:36 +1100
+Message-ID: <lunch-friday@northwind.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hi Ava,
+
+Thai place on George St at 12:30 on Friday? Mia and Liam are in.
+
+Noah
+
+From mia.rossi@northwind.example Thu Oct 29 08:30:12 2026
+Return-Path: <mia.rossi@northwind.example>
+Received: from app01.northwind.example (app01.northwind.example [192.0.2.10])
+	by mx1.northwind.example with ESMTPS id 5Cv1Gh; Thu, 29 Oct 2026 08:30:12 +1100
+Authentication-Results: mx1.northwind.example;
+	spf=pass smtp.mailfrom=northwind.example;
+	dkim=pass header.d=northwind.example header.s=nw1;
+	dmarc=pass header.from=northwind.example
+From: Mia Rossi <mia.rossi@northwind.example>
+To: Ava Thompson <ava.thompson@northwind.example>, Noah Patel <noah.patel@northwind.example>
+Subject: Carrier review - agenda for Monday
+Date: Thu, 29 Oct 2026 08:30:08 +1100
+Message-ID: <carrier-review-agenda@northwind.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-cr"
+
+--mix-cr
+Content-Type: text/plain; charset=utf-8
+
+Agenda for Monday's carrier review:
+
+ 1. On-time performance by lane (Q3)
+ 2. Damage claims - Elbe Lager and Baltic Cargo
+ 3. Harbourline schedule change and Brisbane cut-off
+ 4. Rate review for 2027
+
+Invite attached.
+Mia
+
+--mix-cr
+Content-Type: text/calendar; charset=utf-8; method=REQUEST; name="invite.ics"
+Content-Disposition: attachment; filename="invite.ics"
+
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//pstview demo//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:carrier-review-2026@northwind.example
+DTSTART:20261101T230000Z
+DTEND:20261102T000000Z
+SUMMARY:Carrier review
+LOCATION:Level 4 boardroom
+END:VEVENT
+END:VCALENDAR
+
+--mix-cr--
+
