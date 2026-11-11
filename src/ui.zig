@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const w = @import("win.zig");
+const mime = @import("mime.zig");
 const L = w.L;
 
 // ---- palette (0xRRGGBB; convert with w.rgb)
@@ -53,13 +54,13 @@ pub fn folderGlyph(name: []const u8, class: []const u8) Glyph {
     if (ic(class, "IPF.Journal")) return .journal;
     const eq = std.ascii.eqlIgnoreCase;
     const names = [_]struct { []const u8, Glyph }{
-        .{ "Inbox", .inbox },                .{ "Sent Items", .sent },          .{ "Sent", .sent },
-        .{ "Sent Mail", .sent },             .{ "Outbox", .sent },              .{ "Drafts", .drafts },
-        .{ "Deleted Items", .deleted },      .{ "Trash", .deleted },            .{ "Bin", .deleted },
-        .{ "Junk Email", .junk },            .{ "Junk E-mail", .junk },         .{ "Junk", .junk },
-        .{ "Spam", .junk },                  .{ "Archive", .archive },          .{ "Calendar", .calendar },
-        .{ "Contacts", .contacts },          .{ "Tasks", .tasks },              .{ "Notes", .notes },
-        .{ "Journal", .journal },            .{ "Recoverable Items", .deleted }, .{ "Search Folders", .search },
+        .{ "Inbox", .inbox },           .{ "Sent Items", .sent },           .{ "Sent", .sent },
+        .{ "Sent Mail", .sent },        .{ "Outbox", .sent },               .{ "Drafts", .drafts },
+        .{ "Deleted Items", .deleted }, .{ "Trash", .deleted },             .{ "Bin", .deleted },
+        .{ "Junk Email", .junk },       .{ "Junk E-mail", .junk },          .{ "Junk", .junk },
+        .{ "Spam", .junk },             .{ "Archive", .archive },           .{ "Calendar", .calendar },
+        .{ "Contacts", .contacts },     .{ "Tasks", .tasks },               .{ "Notes", .notes },
+        .{ "Journal", .journal },       .{ "Recoverable Items", .deleted }, .{ "Search Folders", .search },
         .{ "Finder", .search },
     };
     for (names) |n| if (eq(name, n[0])) return n[1];
@@ -315,4 +316,309 @@ fn paintWelcome(hwnd: w.HWND, dc: w.HDC) void {
     const vn = std.unicode.wtf8ToWtf16Le(&vb, welcome.version) catch 0;
     r = .{ .left = x, .top = fy, .right = x + cw, .bottom = fy + welcome.sc(20) };
     drawText(dc, welcome.small_font, muted, vb[0..vn], &r, w.DT_SINGLELINE | 0x2); // DT_RIGHT
+}
+
+// ---- pstview's own dialogs (instead of system message boxes, which chime)
+
+pub const DialogKind = enum { info, warning, err, about };
+
+pub const DialogSpec = struct {
+    kind: DialogKind = .info,
+    /// Bold first line; empty = none.
+    heading: []const u8 = "",
+    /// Selectable body text (so hashes, paths and errors can be copied).
+    body: []const u8 = "",
+    /// About only: version line, and a muted detail line (e.g. installed / portable).
+    version: []const u8 = "",
+    detail: []const u8 = "",
+    link: ?[:0]const u16 = null,
+    link_url: ?[:0]const u16 = null,
+    buttons: []const Button = &.{.{ .id = w.IDOK, .text = L("OK") }},
+};
+
+const DialogState = struct {
+    spec: *const DialogSpec,
+    scale: f32,
+    result: i32 = w.IDCANCEL,
+    done: bool = false,
+    heading_font: ?w.HFONT = null,
+    text_font: ?w.HFONT = null,
+    title_font: ?w.HFONT = null,
+    glyph_font: ?w.HFONT = null,
+    paper_brush: ?w.HBRUSH = null,
+    pane_brush: ?w.HBRUSH = null,
+    hair_brush: ?w.HBRUSH = null,
+    icon: ?w.HICON = null,
+    edit: ?w.HWND = null,
+    footer_top: i32 = 0,
+    text_x: i32 = 0,
+
+    fn sc(self: *const DialogState, v: i32) i32 {
+        return @intFromFloat(@round(@as(f32, @floatFromInt(v)) * self.scale));
+    }
+};
+
+const DIALOG_CLASS = L("pstview.dialog");
+var dialog_registered = false;
+
+/// Show a modal pstview dialog and return the id of the button pressed (IDCANCEL for Esc / close).
+pub fn dialog(owner: ?w.HWND, inst: ?w.HINSTANCE, spec: DialogSpec) i32 {
+    if (!dialog_registered) {
+        const wc: w.WNDCLASSEXW = .{ .lpfnWndProc = dialogProc, .hInstance = inst, .hCursor = w.LoadCursorW(null, w.IDC_ARROW), .lpszClassName = DIALOG_CLASS };
+        _ = w.RegisterClassExW(&wc);
+        dialog_registered = true;
+    }
+    const dpi: u32 = if (owner) |o| w.GetDpiForWindow(o) else w.GetDpiForSystem();
+    var st: DialogState = .{ .spec = &spec, .scale = @as(f32, @floatFromInt(if (dpi == 0) 96 else dpi)) / 96.0 };
+    st.text_font = w.CreateFontW(-st.sc(14), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI"));
+    st.heading_font = w.CreateFontW(-st.sc(17), 0, 0, 0, 600, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI Semibold"));
+    st.title_font = w.CreateFontW(-st.sc(34), 0, 0, 0, 300, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI Light"));
+    st.paper_brush = w.CreateSolidBrush(w.rgb(paper));
+    st.pane_brush = w.CreateSolidBrush(w.rgb(pane));
+    st.hair_brush = w.CreateSolidBrush(w.rgb(hairline));
+    defer {
+        inline for (.{ st.text_font, st.heading_font, st.title_font, st.glyph_font }) |f| if (f) |h| {
+            _ = w.DeleteObject(@ptrCast(h));
+        };
+        inline for (.{ st.paper_brush, st.pane_brush, st.hair_brush }) |b| if (b) |h| {
+            _ = w.DeleteObject(@ptrCast(h));
+        };
+    }
+    const about = spec.kind == .about;
+    const P = st.sc(24);
+    const cw = st.sc(if (about) 520 else 470);
+    st.icon = if (about) @ptrCast(w.LoadImageW(inst, 1, w.IMAGE_ICON, st.sc(64), st.sc(64), 0)) else null;
+    st.text_x = if (about) P else P + st.sc(52);
+
+    // measure the text to size the window
+    const sdc = w.GetDC(null) orelse return w.IDCANCEL;
+    if (!about) st.glyph_font = iconFont(sdc, -st.sc(30));
+    const text_w = cw - st.text_x - P;
+    const heading_h = if (spec.heading.len > 0) measure(sdc, st.heading_font, spec.heading, text_w) + st.sc(8) else 0;
+    const body_full = if (spec.body.len > 0) measure(sdc, st.text_font, spec.body, text_w) else 0;
+    _ = w.ReleaseDC(null, sdc);
+    const body_max = st.sc(380);
+    const body_h = @min(body_full, body_max);
+    const top_block = if (about) st.sc(64 + 22) else heading_h;
+    const link_h: i32 = if (spec.link != null) st.sc(30) else 0;
+    const detail_h: i32 = if (spec.detail.len > 0) st.sc(22) else 0;
+    const content_h = @max(top_block + body_h + link_h + detail_h, if (about) 0 else st.sc(40));
+    st.footer_top = P + content_h + P;
+    const ch = st.footer_top + st.sc(60);
+
+    const style = w.WS_POPUP | w.WS_CAPTION | w.WS_SYSMENU | w.WS_CLIPCHILDREN;
+    const ex = w.WS_EX_DLGMODALFRAME;
+    var wr: w.RECT = .{ .left = 0, .top = 0, .right = cw, .bottom = ch };
+    _ = w.AdjustWindowRectExForDpi(&wr, style, 0, ex, if (dpi == 0) 96 else dpi);
+    const ww = wr.right - wr.left;
+    const wh = wr.bottom - wr.top;
+    var x: i32 = @divTrunc(w.GetSystemMetrics(w.SM_CXSCREEN) - ww, 2);
+    var y: i32 = @divTrunc(w.GetSystemMetrics(w.SM_CYSCREEN) - wh, 2);
+    if (owner) |o| {
+        var orc: w.RECT = undefined;
+        if (w.GetWindowRect(o, &orc) != 0) {
+            x = orc.left + @divTrunc(orc.right - orc.left - ww, 2);
+            y = orc.top + @max(@divTrunc(orc.bottom - orc.top - wh, 3), 0);
+        }
+    }
+    const caption = if (about) L("About pstview") else L("pstview");
+    const hwnd = w.CreateWindowExW(ex, DIALOG_CLASS, caption, style, x, y, ww, wh, owner, null, inst, @ptrCast(&st)) orelse return w.IDCANCEL;
+    const cap = w.rgb(ink);
+    const cap_text = w.rgb(paper);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
+
+    // body: a borderless read-only edit, so the text can be selected and copied
+    var yy = P + top_block;
+    if (spec.body.len > 0) {
+        const scroll: u32 = if (body_full > body_max) w.WS_VSCROLL else 0;
+        const eb = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_VISIBLE | w.ES_MULTILINE | w.ES_READONLY | scroll, st.text_x, yy, text_w, body_h, hwnd, null, inst, null);
+        if (eb) |e| {
+            _ = w.SendMessageW(e, w.WM_SETFONT, @intFromPtr(st.text_font), 1);
+            _ = w.SendMessageW(e, w.EM_SETMARGINS, w.EC_LEFTMARGIN | w.EC_RIGHTMARGIN, 0);
+            var tb: std.ArrayList(u16) = .empty;
+            defer tb.deinit(std.heap.page_allocator);
+            crlfWide(std.heap.page_allocator, &tb, spec.body);
+            _ = w.SetWindowTextW(e, @ptrCast(tb.items.ptr));
+            st.edit = e;
+        }
+        yy += body_h;
+    }
+    if (spec.detail.len > 0) yy += detail_h; // painted
+    if (spec.link) |lt| {
+        const lk = w.CreateWindowExW(0, L("SysLink"), lt, w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP, st.text_x, yy + st.sc(6), text_w, st.sc(22), hwnd, @ptrFromInt(900), inst, null);
+        if (lk) |h| _ = w.SendMessageW(h, w.WM_SETFONT, @intFromPtr(st.text_font), 1);
+    }
+
+    // buttons, right-aligned in the footer; the first is the default
+    const bw = st.sc(104);
+    const bh = st.sc(32);
+    var bx = cw - P - bw * @as(i32, @intCast(spec.buttons.len)) - st.sc(8) * @as(i32, @intCast(spec.buttons.len -| 1));
+    var first: ?w.HWND = null;
+    for (spec.buttons, 0..) |b, i| {
+        const bstyle = w.WS_CHILD | w.WS_VISIBLE | w.WS_TABSTOP | (if (i == 0) w.BS_DEFPUSHBUTTON else 0);
+        const h = w.CreateWindowExW(0, L("BUTTON"), b.text, bstyle, bx, st.footer_top + @divTrunc(st.sc(60) - bh, 2), bw, bh, hwnd, @ptrFromInt(@as(usize, @intCast(b.id))), inst, null);
+        if (h) |bh_| {
+            _ = w.SendMessageW(bh_, w.WM_SETFONT, @intFromPtr(st.text_font), 1);
+            if (i == 0) first = bh_;
+        }
+        bx += bw + st.sc(8);
+    }
+
+    if (owner) |o| _ = w.EnableWindow(o, 0);
+    _ = w.ShowWindow(hwnd, w.SW_SHOW);
+    if (first) |f| _ = w.SetFocus(f);
+    var msg: w.MSG = undefined;
+    var quit = false;
+    while (!st.done) {
+        if (w.GetMessageW(&msg, null, 0, 0) <= 0) {
+            quit = true;
+            break;
+        }
+        if (w.IsDialogMessageW(hwnd, &msg) != 0) continue;
+        _ = w.TranslateMessage(&msg);
+        _ = w.DispatchMessageW(&msg);
+    }
+    // re-enable the owner before the dialog goes, so activation returns to it
+    if (owner) |o| _ = w.EnableWindow(o, 1);
+    _ = w.DestroyWindow(hwnd);
+    if (quit) w.PostQuitMessage(0);
+    return st.result;
+}
+
+fn measure(dc: w.HDC, font: ?w.HFONT, text: []const u8, width: i32) i32 {
+    var tb: std.ArrayList(u16) = .empty;
+    defer tb.deinit(std.heap.page_allocator);
+    crlfWide(std.heap.page_allocator, &tb, text);
+    if (font) |f| _ = w.SelectObject(dc, @ptrCast(f));
+    var r: w.RECT = .{ .left = 0, .top = 0, .right = width, .bottom = 0 };
+    _ = w.DrawTextW(dc, tb.items.ptr, @intCast(tb.items.len -| 1), &r, w.DT_CALCRECT | w.DT_WORDBREAK | w.DT_EDITCONTROL | w.DT_NOPREFIX);
+    return r.bottom - r.top + 4;
+}
+
+/// UTF-8 -> NUL-terminated UTF-16 with CRLF line ends (what the EDIT control needs).
+fn crlfWide(a: std.mem.Allocator, out: *std.ArrayList(u16), text: []const u8) void {
+    const s = mime.repairUtf8(a, text) catch text; // message-derived text may not be valid UTF-8
+    const view = std.unicode.Utf8View.init(s) catch return out.append(a, 0) catch {};
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp == '\r') continue;
+        if (cp == '\n') {
+            out.appendSlice(a, &.{ '\r', '\n' }) catch return;
+        } else if (cp >= 0x10000) {
+            const v = cp - 0x10000;
+            out.appendSlice(a, &.{ @intCast(0xD800 + (v >> 10)), @intCast(0xDC00 + (v & 0x3FF)) }) catch return;
+        } else out.append(a, @intCast(cp)) catch return;
+    }
+    out.append(a, 0) catch {};
+}
+
+fn dialogProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI) w.LRESULT {
+    if (msg == w.WM_CREATE) {
+        const cs: *const ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(lp)));
+        _ = w.SetWindowLongPtrW(hwnd, w.GWLP_USERDATA, @bitCast(@intFromPtr(cs.*.?)));
+        return 0;
+    }
+    const raw = w.GetWindowLongPtrW(hwnd, w.GWLP_USERDATA);
+    if (raw == 0) return w.DefWindowProcW(hwnd, msg, wp, lp);
+    const st: *DialogState = @ptrFromInt(@as(usize, @bitCast(raw)));
+    switch (msg) {
+        w.WM_COMMAND => {
+            const id: i32 = @intCast(wp & 0xFFFF);
+            if (id == 900) return 0;
+            st.result = id;
+            st.done = true;
+            return 0;
+        },
+        w.WM_CLOSE => {
+            st.result = w.IDCANCEL;
+            st.done = true;
+            return 0;
+        },
+        w.WM_NOTIFY => {
+            const nm: *const w.NMHDR = @ptrFromInt(@as(usize, @bitCast(lp)));
+            if (nm.idFrom == 900 and (nm.code == w.NM_CLICK or nm.code == w.NM_RETURN)) {
+                if (st.spec.link_url) |u| _ = w.ShellExecuteW(hwnd, L("open"), u, null, null, w.SW_SHOWNORMAL);
+            }
+            return 0;
+        },
+        w.WM_CTLCOLORSTATIC => {
+            // the read-only body and the link sit on the paper ground
+            const dc: w.HDC = @ptrFromInt(wp);
+            _ = w.SetBkColor(dc, w.rgb(paper));
+            _ = w.SetTextColor(dc, w.rgb(ink));
+            return @bitCast(@intFromPtr(st.paper_brush));
+        },
+        w.WM_CTLCOLORBTN => return @bitCast(@intFromPtr(st.pane_brush)), // buttons sit on the footer band
+        w.WM_ERASEBKGND => return 1,
+        w.WM_PAINT => {
+            var ps: w.PAINTSTRUCT = undefined;
+            const dc = w.BeginPaint(hwnd, &ps) orelse return 0;
+            paintDialog(hwnd, dc, st);
+            _ = w.EndPaint(hwnd, &ps);
+            return 0;
+        },
+        else => {},
+    }
+    return w.DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+fn paintDialog(hwnd: w.HWND, dc: w.HDC, st: *DialogState) void {
+    var rc: w.RECT = undefined;
+    _ = w.GetClientRect(hwnd, &rc);
+    const spec = st.spec;
+    var top: w.RECT = rc;
+    top.bottom = st.footer_top;
+    _ = w.FillRect(dc, &top, st.paper_brush);
+    var foot: w.RECT = rc;
+    foot.top = st.footer_top;
+    _ = w.FillRect(dc, &foot, st.pane_brush);
+    foot.bottom = foot.top + 1;
+    _ = w.FillRect(dc, &foot, st.hair_brush);
+    _ = w.SetBkMode(dc, w.TRANSPARENT);
+    const P = st.sc(24);
+    var buf: [512]u16 = undefined;
+    switch (spec.kind) {
+        .about => {
+            if (st.icon) |ic| _ = w.DrawIconEx(dc, P, P, ic, st.sc(64), st.sc(64), 0, null, w.DI_NORMAL);
+            const tx = P + st.sc(64 + 18);
+            var r: w.RECT = .{ .left = tx, .top = P - st.sc(2), .right = rc.right - P, .bottom = P + st.sc(44) };
+            drawText(dc, st.title_font, ink, L("pstview"), &r, w.DT_SINGLELINE);
+            r = .{ .left = tx, .top = P + st.sc(44), .right = rc.right - P, .bottom = P + st.sc(66) };
+            drawText(dc, st.text_font, muted, wide(&buf, spec.version), &r, w.DT_SINGLELINE | w.DT_END_ELLIPSIS);
+        },
+        else => {
+            if (st.glyph_font) |gf| {
+                const cp: u16, const color: u32 = switch (spec.kind) {
+                    .info => .{ 0xE946, ink },
+                    .warning => .{ 0xE7BA, 0xC98F00 },
+                    else => .{ 0xE783, 0xB3261E },
+                };
+                var gr: w.RECT = .{ .left = P, .top = P - st.sc(2), .right = P + st.sc(40), .bottom = P + st.sc(40) };
+                const g = [1]u16{cp};
+                drawText(dc, gf, color, &g, &gr, w.DT_SINGLELINE);
+            }
+            if (spec.heading.len > 0) {
+                var r: w.RECT = .{ .left = st.text_x, .top = P, .right = rc.right - P, .bottom = st.footer_top };
+                drawText(dc, st.heading_font, ink, wide(&buf, spec.heading), &r, w.DT_WORDBREAK);
+            }
+        },
+    }
+    if (spec.detail.len > 0) {
+        const ey = if (st.edit) |e| blk: {
+            var er: w.RECT = undefined;
+            _ = w.GetWindowRect(e, &er);
+            break :blk er.bottom - er.top;
+        } else 0;
+        const y0 = P + (if (spec.kind == .about) st.sc(64 + 22) else 0) + ey;
+        var r: w.RECT = .{ .left = st.text_x, .top = y0 + st.sc(4), .right = rc.right - P, .bottom = y0 + st.sc(24) };
+        drawText(dc, st.text_font, muted, wide(&buf, spec.detail), &r, w.DT_SINGLELINE | w.DT_END_ELLIPSIS | 0x4000); // DT_PATH_ELLIPSIS
+    }
+}
+
+/// UTF-8 into a fixed UTF-16 buffer (truncated), without terminator.
+fn wide(buf: []u16, s: []const u8) []const u16 {
+    const n = std.unicode.wtf8ToWtf16Le(buf[0..@min(buf.len, s.len)], s[0..@min(buf.len, s.len)]) catch return buf[0..0];
+    return buf[0..n];
 }

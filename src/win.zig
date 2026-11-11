@@ -694,3 +694,23 @@ pub const EC_RIGHTMARGIN: usize = 0x2;
 pub const LVN_GETEMPTYMARKUP: i32 = -187;
 pub const EMF_CENTERED: u32 = 0x1;
 pub const NMLVEMPTYMARKUP = extern struct { hdr: NMHDR, dwFlags: u32, szMarkup: [2084]u16 };
+
+// ---- custom dialogs (ui.dialog)
+pub extern "user32" fn EnableWindow(hwnd: HWND, enable: BOOL) callconv(WINAPI) BOOL;
+pub extern "user32" fn IsDialogMessageW(hwnd: HWND, msg: *MSG) callconv(WINAPI) BOOL;
+pub extern "user32" fn GetActiveWindow() callconv(WINAPI) ?HWND;
+pub extern "user32" fn AdjustWindowRectExForDpi(rc: *RECT, style: u32, menu: BOOL, ex_style: u32, dpi: u32) callconv(WINAPI) BOOL;
+pub extern "user32" fn GetDpiForSystem() callconv(WINAPI) u32;
+pub extern "user32" fn GetSystemMetrics(index: i32) callconv(WINAPI) i32;
+pub const WS_POPUP: u32 = 0x80000000;
+pub const WS_CAPTION: u32 = 0x00C00000;
+pub const WS_SYSMENU: u32 = 0x00080000;
+pub const WS_EX_DLGMODALFRAME: u32 = 0x00000001;
+pub const ICC_LINK_CLASS: u32 = 0x8000;
+pub const NM_CLICK: i32 = -2;
+pub const DT_CALCRECT: u32 = 0x400;
+pub const DT_EDITCONTROL: u32 = 0x2000;
+pub const BS_DEFPUSHBUTTON: u32 = 0x1;
+pub const IDOK: i32 = 1;
+pub const SM_CXSCREEN: i32 = 0;
+pub const SM_CYSCREEN: i32 = 1;

@@ -327,13 +327,13 @@ fn htmlToText(a: Allocator, html: []const u8) ![]u8 {
                         std.fmt.parseInt(u21, ent[1..], 10) catch null;
                 } else {
                     const named = [_]struct { e: []const u8, c: u21 }{
-                        .{ .e = "nbsp", .c = ' ' },    .{ .e = "amp", .c = '&' },     .{ .e = "lt", .c = '<' },
-                        .{ .e = "gt", .c = '>' },      .{ .e = "quot", .c = '"' },    .{ .e = "apos", .c = '\'' },
-                        .{ .e = "rsquo", .c = 0x2019 }, .{ .e = "lsquo", .c = 0x2018 }, .{ .e = "rdquo", .c = 0x201D },
-                        .{ .e = "ldquo", .c = 0x201C }, .{ .e = "ndash", .c = 0x2013 }, .{ .e = "mdash", .c = 0x2014 },
-                        .{ .e = "hellip", .c = 0x2026 }, .{ .e = "copy", .c = 0xA9 },   .{ .e = "reg", .c = 0xAE },
-                        .{ .e = "trade", .c = 0x2122 }, .{ .e = "bull", .c = 0x2022 },  .{ .e = "zwnj", .c = 0x200C },
-                        .{ .e = "zwj", .c = 0x200D },   .{ .e = "shy", .c = 0xAD },
+                        .{ .e = "nbsp", .c = ' ' },      .{ .e = "amp", .c = '&' },      .{ .e = "lt", .c = '<' },
+                        .{ .e = "gt", .c = '>' },        .{ .e = "quot", .c = '"' },     .{ .e = "apos", .c = '\'' },
+                        .{ .e = "rsquo", .c = 0x2019 },  .{ .e = "lsquo", .c = 0x2018 }, .{ .e = "rdquo", .c = 0x201D },
+                        .{ .e = "ldquo", .c = 0x201C },  .{ .e = "ndash", .c = 0x2013 }, .{ .e = "mdash", .c = 0x2014 },
+                        .{ .e = "hellip", .c = 0x2026 }, .{ .e = "copy", .c = 0xA9 },    .{ .e = "reg", .c = 0xAE },
+                        .{ .e = "trade", .c = 0x2122 },  .{ .e = "bull", .c = 0x2022 },  .{ .e = "zwnj", .c = 0x200C },
+                        .{ .e = "zwj", .c = 0x200D },    .{ .e = "shy", .c = 0xAD },
                     };
                     for (named) |n| if (std.mem.eql(u8, ent, n.e)) {
                         cp = n.c;
@@ -390,12 +390,17 @@ fn fmtLocal(buf: []u8, t: ?i64) []const u8 {
     return pst.fmtTime(buf, v, w.localOffset(v));
 }
 
+/// A notice in pstview's own dialog (silent, selectable text) over the active pstview window.
+/// `flags` takes the MB_ICON* value of the message box it replaces.
 fn msgBox(text: []const u8, title: []const u8, flags: u32) i32 {
-    var a = std.heap.ArenaAllocator.init(app.gpa);
-    defer a.deinit();
-    const tw = toWAlloc(a.allocator(), text) catch return 0;
-    const ti = toWAlloc(a.allocator(), title) catch return 0;
-    return w.MessageBoxW(app.hwnd, tw, ti, flags);
+    const kind: ui.DialogKind = switch (flags & 0xF0) {
+        w.MB_ICONERROR => .err,
+        0x30 => .warning,
+        else => .info,
+    };
+    const heading = if (std.mem.eql(u8, title, "pstview")) "" else if (std.mem.startsWith(u8, title, "pstview - ")) title["pstview - ".len..] else title;
+    const owner = w.GetActiveWindow() orelse app.hwnd;
+    return ui.dialog(owner, app.hinst, .{ .kind = kind, .heading = heading, .body = text });
 }
 
 /// Status bar parts: 0 = read-only seal (owner-drawn), 1 = source, 2 = messages.
@@ -2163,6 +2168,29 @@ fn emptyMarkup(m: *w.NMLVEMPTYMARKUP) LRESULT {
     return 1;
 }
 
+/// Help > About: pstview's own window (system message boxes chime).
+fn showAbout() void {
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const detail: []const u8 = blk: {
+        const l = install.defaultLayout(a) catch break :blk "";
+        if (install.runningInstalled(a, l)) break :blk std.fmt.allocPrint(a, "Installed for this user in {s}", .{l.dir}) catch "";
+        const self = install.selfPath(a) catch break :blk "Portable copy";
+        break :blk std.fmt.allocPrint(a, "Portable copy: {s}", .{std.fs.path.dirname(self) orelse self}) catch "";
+    };
+    _ = ui.dialog(app.hwnd, app.hinst, .{
+        .kind = .about,
+        .version = "Version " ++ build_options.version,
+        .body = "Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.\n\n" ++
+            "Opens PST and OST files (including Outlook 2013+ OSTs and multi-part Acronis exports) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.\n\n" ++
+            "Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.",
+        .detail = detail,
+        .link = L("<a>github.com/publicarray/pstview</a>"),
+        .link_url = L("https://github.com/publicarray/pstview"),
+    });
+}
+
 fn onCommand(id: u16, code: u16) void {
     switch (id) {
         CMD_OPEN => openDialog(),
@@ -2220,7 +2248,7 @@ fn onCommand(id: u16, code: u16) void {
             showIntegrityLog(tot);
         },
         CMD_EXIT => _ = w.DestroyWindow(app.hwnd.?),
-        CMD_ABOUT => _ = msgBox("pstview " ++ build_options.version ++ "\nRead-only Outlook PST / OST and MBOX viewer and exporter.\n\nOpens PST, OST and MBOX files (incl. Google Takeout, Thunderbird and Apple Mail folders) without write access; nothing is written next to the source.\nExports .msg / .eml with an HTML + CSV report including the source SHA-256.\n\nTimes are shown in this computer's local time zone (DST-aware) and UTC.", "About pstview", w.MB_ICONINFORMATION),
+        CMD_ABOUT => showAbout(),
         ID_SEARCH => if (code == w.EN_CHANGE) applyFilter(),
         else => {},
     }
@@ -2379,7 +2407,7 @@ pub fn main(init: std.process.Init) !void {
     mime.charset_hook = &w.charsetToUtf8; // decode any charset in headers via Windows code pages
     store.mbox.scan_progress = &mboxProgress;
     _ = w.CoInitializeEx(null, 0x2); // apartment-threaded, needed by the folder picker
-    const icc: w.INITCOMMONCONTROLSEX = .{ .dwICC = w.ICC_LISTVIEW_CLASSES | w.ICC_TREEVIEW_CLASSES | w.ICC_BAR_CLASSES };
+    const icc: w.INITCOMMONCONTROLSEX = .{ .dwICC = w.ICC_LISTVIEW_CLASSES | w.ICC_TREEVIEW_CLASSES | w.ICC_BAR_CLASSES | w.ICC_LINK_CLASS };
     _ = w.InitCommonControlsEx(&icc);
     _ = w.LoadLibraryW(L("Msftedit.dll")); // Rich Edit 4.1+ for coloured previews
     app.hinst = w.GetModuleHandleW(null);
