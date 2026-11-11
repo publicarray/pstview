@@ -37,6 +37,53 @@ pub fn cp1252ToUtf8(a: Allocator, bytes: []const u8) Allocator.Error![]u8 {
     return out.toOwnedSlice(a);
 }
 
+/// Code point of one Windows-1252 byte.
+pub fn cp1252Char(b: u8) u21 {
+    return if (b >= 0x80 and b < 0xA0) cp1252_hi[b - 0x80] else b;
+}
+
+/// `s` itself when it is valid UTF-8; otherwise a copy in which every byte that is not part of a
+/// valid UTF-8 sequence is read as Windows-1252 (legacy code-page text, or a mix of both).
+pub fn repairUtf8(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
+    if (std.unicode.utf8ValidateSlice(s)) return s;
+    var out: std.ArrayList(u8) = .empty;
+    try out.ensureTotalCapacity(a, s.len + s.len / 2);
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] < 0x80) {
+            try out.append(a, s[i]);
+            i += 1;
+            continue;
+        }
+        if (std.unicode.utf8ByteSequenceLength(s[i])) |n| {
+            if (i + n <= s.len and std.unicode.utf8ValidateSlice(s[i..][0..n])) {
+                try out.appendSlice(a, s[i..][0..n]);
+                i += n;
+                continue;
+            }
+        } else |_| {}
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp1252Char(s[i]), &buf) catch unreachable;
+        try out.appendSlice(a, buf[0..n]);
+        i += 1;
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// Bytes in Windows code page `cp` (e.g. PR_INTERNET_CPID) -> UTF-8. Unknown or unset code pages
+/// and invalid input fall back to Windows-1252 (see `toUtf8`).
+pub fn fromCodePage(a: Allocator, cp: u32, bytes: []const u8) []const u8 {
+    var nb: [16]u8 = undefined;
+    const name: []const u8 = switch (cp) {
+        65001 => "utf-8",
+        20127 => "us-ascii",
+        28591 => "iso-8859-1",
+        0, 1252 => "windows-1252",
+        else => std.fmt.bufPrint(&nb, "cp{d}", .{cp}) catch "",
+    };
+    return toUtf8(a, name, bytes);
+}
+
 fn isAscii(bytes: []const u8) bool {
     for (bytes) |b| if (b >= 0x80) return false;
     return true;
@@ -704,6 +751,24 @@ test "encoded words, adjacent-word whitespace, 8-bit fallback" {
     try testing.expectEqualStrings("Re: plain", decodeHeader(a, "Re: plain"));
     try testing.expectEqualStrings("é", decodeHeader(a, "\xe9"));
     try testing.expectEqualStrings("x =?bad", decodeHeader(a, "x =?bad"));
+}
+
+test "repairUtf8 and code-page text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ok = "Caf\u{e9} \u{2019}ok\u{2019} \u{1F600}";
+    try testing.expect((try repairUtf8(a, ok)).ptr == ok.ptr); // valid input is returned as is
+    try testing.expectEqualStrings("You\u{2019}ll \u{2013} \u{201C}x\u{201D}", try repairUtf8(a, "You\x92ll \x96 \x93x\x94"));
+    // valid sequences survive next to stray bytes; truncated, overlong and surrogate sequences do not
+    try testing.expectEqualStrings("\u{e9}\u{e9}", try repairUtf8(a, "\xc3\xa9\xe9"));
+    try testing.expectEqualStrings("\u{e2}\u{20AC}", try repairUtf8(a, "\xe2\x80"));
+    try testing.expectEqualStrings("\u{c0}\u{AF}", try repairUtf8(a, "\xc0\xaf"));
+    try testing.expectEqualStrings("\u{ed}\u{A0}\u{20AC}", try repairUtf8(a, "\xed\xa0\x80"));
+    try testing.expectEqualStrings("\u{201C}hi\u{201D}", fromCodePage(a, 1252, "\x93hi\x94"));
+    try testing.expectEqualStrings("\u{201C}hi\u{201D}", fromCodePage(a, 0, "\x93hi\x94"));
+    try testing.expectEqualStrings("\u{e9}", fromCodePage(a, 65001, "\xc3\xa9"));
+    try testing.expectEqualStrings("\u{20AC}", fromCodePage(a, 65001, "\x80")); // invalid UTF-8 falls back to 1252
 }
 
 test "parameters: quoted, RFC 2231 extended and continued" {

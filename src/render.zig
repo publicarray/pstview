@@ -296,21 +296,15 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
     return out.toOwnedSlice(a);
 }
 
-/// Convert Windows-1252/Latin-1 bytes to UTF-8 when the HTML is not already UTF-8.
-fn ensureUtf8(a: Allocator, html: []const u8) ![]const u8 {
-    if (std.unicode.utf8ValidateSlice(html)) return html;
-    return pst.latin1ToUtf8(a, html);
-}
-
 pub const TimeFmt = *const fn (buf: []u8, t: ?i64) []const u8;
 
 /// Full standalone HTML document: header block, attachment gallery, sanitised body.
 pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) ![]u8 {
     var st: SanitizeStats = .{};
-    const html_raw = try m.bodyHtml(a);
+    const html_utf8 = try m.bodyHtmlUtf8(a);
     var body_html: []const u8 = "";
-    if (html_raw.len > 0) {
-        body_html = try sanitize(a, try ensureUtf8(a, html_raw), m, &st);
+    if (html_utf8.len > 0) {
+        body_html = try sanitize(a, html_utf8, m, &st);
     } else {
         var tmp: List = .empty;
         try tmp.appendSlice(a, "<pre class=\"plain\">");

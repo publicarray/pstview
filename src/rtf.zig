@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mime = @import("mime.zig");
 
 pub const C = enum(u8) {
     normal = 1,
@@ -58,7 +59,10 @@ const Writer = struct {
     fn text(self: *Writer, c: C, bold: bool, s: []const u8) void {
         if (s.len == 0) return;
         self.set(c, bold);
-        var view = std.unicode.Utf8View.init(s) catch std.unicode.Utf8View.initUnchecked(s);
+        // Message text is not always valid UTF-8 (bodies in a legacy code page); iterating it
+        // unchecked panics, so repair it first.
+        const valid = mime.repairUtf8(self.a, s) catch return;
+        var view = std.unicode.Utf8View.init(valid) catch return;
         var it = view.iterator();
         while (it.nextCodepoint()) |cp| {
             switch (cp) {
@@ -243,4 +247,20 @@ pub fn colorize(a: Allocator, text: []const u8, font: []const u8, half_points: u
     }
     w.out.appendSlice(a, "}") catch {};
     return w.out.items;
+}
+
+// ================================================================ tests
+
+const testing = std.testing;
+
+test "colorize: text that is not valid UTF-8 (legacy code-page bodies) does not panic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = colorize(a, "Subject:   You\x92ll see\n-----\nbody \x93q\x94 cut \xe2\x80\nok \u{2019}", "Consolas", 19);
+    // RTF \uN? escapes: 0x92 -> U+2019, 0x93/0x94 -> U+201C/U+201D, stray E2 80 -> U+00E2 U+20AC
+    try testing.expect(std.mem.indexOf(u8, doc, "You\\u8217?ll see") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\\u8220?q\\u8221?") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "cut \\u226?\\u8364?") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "ok \\u8217?") != null);
 }

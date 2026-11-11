@@ -243,6 +243,8 @@ pub const BIF_NEWDIALOGSTYLE: u32 = 0x40;
 
 pub const MB_OK: u32 = 0x0;
 pub const MB_ICONERROR: u32 = 0x10;
+pub const MB_TASKMODAL: u32 = 0x2000;
+pub const MB_SETFOREGROUND: u32 = 0x10000;
 pub const MB_ICONINFORMATION: u32 = 0x40;
 pub const MB_YESNO: u32 = 0x4;
 pub const IDYES: i32 = 6;

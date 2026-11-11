@@ -111,6 +111,33 @@ const App = struct {
 
 var app: App = undefined;
 
+// ================================================================ panic handler
+
+/// A panic (a bug: ReleaseSafe safety check) would otherwise end the GUI process without a word,
+/// because a windows-subsystem program has no console for the panic message. Show it first.
+pub const panic = std.debug.FullPanic(guiPanic);
+
+/// Message being read when a panic hits (0 = none) - named in the crash dialog so it can be reported.
+var reading_nid: u32 = 0;
+var panicking = std.atomic.Value(bool).init(false);
+
+fn guiPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    if (!panicking.swap(true, .seq_cst)) {
+        var tb: [1024]u8 = undefined;
+        var nb: [64]u8 = undefined;
+        const short = msg[0..@min(msg.len, 700)];
+        const item = if (reading_nid != 0) std.fmt.bufPrint(&nb, " while reading message 0x{x:0>8}", .{reading_nid}) catch "" else "";
+        const text = std.fmt.bufPrint(&tb, "pstview hit an internal error{s} and has to close. The source file was not changed.\n\n{s}\n\nPlease report this, with the details above, at https://github.com/publicarray/pstview/issues", .{ item, short }) catch short;
+        var wb: [1200]u16 = undefined; // text is at most 1024 bytes, so at most 1024 UTF-16 units
+        const n = std.unicode.wtf8ToWtf16Le(&wb, text) catch 0;
+        wb[n] = 0;
+        const wtext: [*:0]const u16 = if (n > 0) wb[0..n :0].ptr else toW(&wb, text);
+        _ = w.MessageBoxW(null, wtext, L("pstview - internal error"), w.MB_ICONERROR | w.MB_TASKMODAL | w.MB_SETFOREGROUND);
+    }
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
 // ================================================================ text helpers
 
 /// UTF-8 -> UTF-16 into a fixed buffer (truncating), NUL-terminated.
@@ -119,7 +146,7 @@ fn toW(buf: []u16, s: []const u8) [*:0]u16 {
     var view = std.unicode.Utf8View.init(s) catch {
         for (s) |c| {
             if (n + 1 >= buf.len) break;
-            buf[n] = c;
+            buf[n] = @intCast(mime.cp1252Char(c));
             n += 1;
         }
         buf[n] = 0;
@@ -149,7 +176,8 @@ fn toW(buf: []u16, s: []const u8) [*:0]u16 {
     return buf[0..n :0].ptr;
 }
 
-fn toWAlloc(a: Allocator, s: []const u8) ![:0]u16 {
+fn toWAlloc(a: Allocator, raw: []const u8) ![:0]u16 {
+    const s = mime.repairUtf8(a, raw) catch raw;
     return std.unicode.wtf8ToWtf16LeAllocZ(a, s) catch {
         const buf = try a.alloc(u16, s.len + 1);
         const p = toW(buf, s);
@@ -734,6 +762,8 @@ fn focusedRow() ?u32 {
 
 fn showPreview() void {
     const mi = focusedRow() orelse return;
+    reading_nid = app.msgs[mi].nid;
+    defer reading_nid = 0;
     _ = app.preview_arena.reset(.retain_capacity);
     const a = app.preview_arena.allocator();
     const text = buildPreview(a, app.msgs[mi].nid) catch |e| std.fmt.allocPrint(a, "Error reading message: {s}", .{@errorName(e)}) catch "error";
@@ -799,7 +829,7 @@ fn buildPreview(a: Allocator, nid: u32) ![]u8 {
     try out.appendSlice(a, "\n----------------------------------------------------------------------\n\n");
     var body = try m.bodyText(a);
     if (body.len == 0) {
-        const html = try m.bodyHtml(a);
+        const html = try m.bodyHtmlUtf8(a);
         if (html.len > 0) body = try htmlToText(a, html);
     }
     try out.appendSlice(a, body);
@@ -1136,6 +1166,8 @@ fn tempDir(a: Allocator) ![]u8 {
 /// Render the message as a sanitised, self-contained HTML page (scripts and network blocked by CSP)
 /// and open it in the default browser.
 fn viewSafeHtml(nid: u32) void {
+    reading_nid = nid;
+    defer reading_nid = 0;
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1186,6 +1218,8 @@ fn openHeaderReport(a: Allocator, an: hdrs.Analysis, source: []const u8, tag: []
 
 /// Every MAPI property of the item (message, recipients, attachments) as an HTML page.
 fn showAllProperties(nid: u32) void {
+    reading_nid = nid;
+    defer reading_nid = 0;
     if (app.file == null) return;
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
@@ -1212,6 +1246,8 @@ fn showAllProperties(nid: u32) void {
 }
 
 fn headerReportForMessage(nid: u32) void {
+    reading_nid = nid;
+    defer reading_nid = 0;
     if (app.file == null) return;
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
@@ -1309,6 +1345,8 @@ fn mwFromHwnd(hwnd: w.HWND) ?*MsgWin {
 }
 
 fn openMessageWindow(nid: u32) void {
+    reading_nid = nid;
+    defer reading_nid = 0;
     if (app.file == null) return;
     const st = app.gpa.create(MsgWin) catch return;
     st.* = .{ .arena = std.heap.ArenaAllocator.init(app.gpa), .msg = undefined, .nid = nid };
@@ -1398,7 +1436,7 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
     setRich(a, st.header.?, head_txt);
     var body = st.msg.bodyText(a) catch "";
     if (body.len == 0) {
-        const html = st.msg.bodyHtml(a) catch "";
+        const html = st.msg.bodyHtmlUtf8(a) catch "";
         if (html.len > 0) body = htmlToText(a, html) catch "";
     }
     st.body_text_w = toWAlloc(a, crlf(a, body) catch body) catch L("");

@@ -19,6 +19,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const rtfcp = @import("rtfcp.zig");
 const namemap = @import("namemap.zig");
+const mime = @import("mime.zig");
 
 pub const Error = error{ NotPst, UnsupportedFormat, Corrupt, NotFound };
 
@@ -971,7 +972,7 @@ pub fn latin1ToUtf8(a: Allocator, d: []const u8) ![]u8 {
     for (d) |c| {
         if (c == 0) break;
         var buf: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(c, &buf) catch 0;
+        const n = std.unicode.utf8Encode(mime.cp1252Char(c), &buf) catch 0;
         try out.appendSlice(a, buf[0..n]);
     }
     return out.toOwnedSlice(a);
@@ -1370,6 +1371,14 @@ pub const Message = struct {
         if (self.pc.bytes(Tag.body)) |b| if (b.len > 0) return h;
         const r = self.rtfBody(a) orelse return h;
         return if (r.kind == .html) r.data else "";
+    }
+    /// HTML body converted to UTF-8 for display. PR_HTML is stored as bytes in the message's
+    /// code page (PR_INTERNET_CPID, typically Windows-1252); `bodyHtml` returns those bytes as stored.
+    pub fn bodyHtmlUtf8(self: *const Message, a: Allocator) ![]const u8 {
+        const h = try self.bodyHtml(a);
+        if (std.unicode.utf8ValidateSlice(h)) return h;
+        const cp = self.pc.int(Tag.internet_cpid) orelse 0;
+        return mime.repairUtf8(a, mime.fromCodePage(a, std.math.cast(u32, cp) orelse 0, h));
     }
     fn hasHtml(self: *const Message) bool {
         const b = self.pc.bytes(Tag.body_html) orelse return false;
