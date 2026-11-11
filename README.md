@@ -26,9 +26,21 @@ pstx headers backup.pst 00200044 --html hdr.html  # full header analysis of one 
 pstx analyse suspicious.eml --html hdr.html       # headers of a saved message or pasted text, no mailbox needed
 pstx tree    "D:\Case\Acronis export"             # folder of PST parts: merged into one mailbox
 pstx list    "part1.pst;part2.pst" "Sent Items"   # or name the parts, separated by ';'
+pstx props   backup.pst 00200044 --html props.html  # every MAPI property of one item, named properties resolved
 ```
 
 `export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date.
+
+## Calendar, contacts, tasks, notes and journal
+
+Item fields are shown in the preview, the message window, the HTML view and `pstx show`. Most of them are named properties (IDs 0x8000+); pstview reads each PST's name-to-ID map (NID 0x61) to find them:
+
+* **Appointments / meetings:** start, end, all-day, duration, location, recurrence pattern, time zone, show-as, meeting state (organised, received, cancelled), response, organiser and required / optional / resource attendees.
+* **Contacts:** full name, file-as, name parts, nickname, company, title, department, office, manager, assistant, up to three e-mail addresses, all phone numbers, business / home / other addresses, web pages, IM, birthday, anniversary, partner. **Distribution lists:** members.
+* **Tasks:** status, % complete, start, due, completed, owner, assigned by. **Sticky notes:** colour. **Journal:** type, start, end, duration.
+* **All items:** categories, importance, sensitivity, follow-up flag, reminder.
+
+*Message > All properties* (`pstx props`) lists every MAPI property of the item, its recipients and attachments: tag, name (named properties as property set and dispid or name), type and decoded value - the raw view for anything the summary does not show.
 
 ## Multi-file PST sets (Acronis exports in parts)
 
@@ -82,6 +94,7 @@ zig build                # Debug build
 * `src/pst.zig`: PST/OST reader (NDB B-trees and blocks incl. the 4K OST variant, heap-on-node, property and table contexts, folders, messages, recipients, attachments).
 * `src/rtfcp.zig`: compressed RTF bodies: decompression, HTML de-encapsulation, RTF to text.
 * `src/headers.zig`, `src/headerreport.zig`: header analysis (triage and detailed) and its HTML / text reports.
+* `src/namemap.zig`: PST named-property map; `src/itemview.zig`: calendar / contact / task / note / journal fields; `src/propview.zig`: all-properties view.
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
 * `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.

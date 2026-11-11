@@ -370,6 +370,13 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
     inline for (.{ .{ pst.Tag.delivery_time, "Received" }, .{ pst.Tag.client_submit_time, "Sent" }, .{ pst.Tag.last_modified, "Modified" } }) |kv| {
         if (m.pc.time(kv[0])) |t| try out.print(a, "<tr><td>{s}</td><td>{s}</td></tr>", .{ kv[1], fmt_time(&tb, t) });
     }
+    for (@import("itemview.zig").rows(a, m, fmt_time)) |row| {
+        try out.appendSlice(a, "<tr><td>");
+        try escText(a, &out, row.label);
+        try out.appendSlice(a, "</td><td>");
+        try escText(a, &out, row.value);
+        try out.appendSlice(a, "</td></tr>");
+    }
     try out.print(a, "<tr><td>PST NID</td><td>0x{x:0>8}</td></tr></table>", .{m.nid});
     if (st.blocked_remote > 0 or st.removed_active > 0) {
         try out.print(a, "<div class=\"note\">Safe view: {d} remote resource(s) blocked (no tracking pixels loaded), {d} active element(s) removed. Scripts and network access are disabled for this page.</div>", .{ st.blocked_remote, st.removed_active });

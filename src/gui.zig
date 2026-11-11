@@ -11,6 +11,7 @@ const search = @import("search.zig");
 const hdrs = @import("headers.zig");
 const store = @import("store.zig");
 const hreport = @import("headerreport.zig");
+const itemview = @import("itemview.zig");
 const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
 const L = w.L;
@@ -39,6 +40,7 @@ const CMD_HDR_REPORT = 15;
 const CMD_HDR_CLIP = 16;
 const CMD_HDR_FILE = 17;
 const CMD_OPEN_FOLDER = 18;
+const CMD_PROPS = 19;
 
 // message-window commands
 const MW_HTML = 201;
@@ -48,6 +50,7 @@ const MW_SAVE_ATT = 204;
 const MW_SAVE_ALL = 205;
 const MW_CLOSE = 206;
 const MW_HDR = 207;
+const MW_PROPS = 208;
 const ID_MW_HEADER = 301;
 const ID_MW_ATTS = 302;
 const ID_MW_BODY = 303;
@@ -768,6 +771,10 @@ fn buildPreview(a: Allocator, nid: u32) ![]u8 {
         if (m.pc.time(kv[0])) |t| try out.print(a, "{s}{s} local  ({s} UTC)\n", .{ kv[1], fmtLocal(&tb, t), pst.fmtTime(&tb2, t, 0) });
     }
     try out.print(a, "Class:     {s}\n", .{try m.pc.string(a, pst.Tag.message_class)});
+    for (itemview.rows(a, &m, fmtLocalLong)) |row| {
+        const label = try std.fmt.allocPrint(a, "{s}:", .{row.label});
+        try out.print(a, "{s: <10} {s}\n", .{ label, row.value });
+    }
     const mid = try m.pc.string(a, pst.Tag.internet_message_id);
     if (mid.len > 0) try out.print(a, "Msg-ID:    {s}\n", .{mid});
     try out.print(a, "PST NID:   0x{x:0>8}\n", .{m.nid});
@@ -1045,6 +1052,7 @@ fn createChildren(hwnd: w.HWND) void {
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_OPEN_MSG, L("&Open message\tEnter / double-click"));
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SAFE_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report (in browser)\tCtrl+I"));
+    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_PROPS, L("All &properties (MAPI, incl. named)"));
     _ = w.AppendMenuW(edit, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SELECT_ALL, L("Select &all\tCtrl+A"));
     const tools = w.CreatePopupMenu().?;
@@ -1084,6 +1092,7 @@ fn listContextMenu() void {
         .{ .id = CMD_OPEN_MSG, .text = L("&Open message") },
         .{ .id = CMD_SAFE_HTML, .text = L("View &HTML (safe, in browser)") },
         .{ .id = CMD_HDR_REPORT, .text = L("Header analysis &report") },
+        .{ .id = CMD_PROPS, .text = L("All &properties (MAPI)") },
         .{ .id = 0, .text = L("") },
         .{ .id = CMD_EXPORT_MSG, .text = if (n_sel > 1) L("Export selected as .&msg...") else L("Export as .&msg...") },
         .{ .id = CMD_EXPORT_EML, .text = if (n_sel > 1) L("Export selected as .&eml...") else L("Export as .&eml...") },
@@ -1163,6 +1172,33 @@ fn openHeaderReport(a: Allocator, an: hdrs.Analysis, source: []const u8, tag: []
     const fw = toWAlloc(a, full) catch return;
     _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
     setStatus("Header analysis: {s}. Report opened in the browser (made offline; temp file is deleted when pstview closes).", .{an.summary()});
+}
+
+/// Every MAPI property of the item (message, recipients, attachments) as an HTML page.
+fn showAllProperties(nid: u32) void {
+    if (app.file == null) return;
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    waitCursor(true);
+    defer waitCursor(false);
+    const m = app.file.?.loadMessage(a, nid) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot read message", w.MB_ICONERROR);
+        return;
+    };
+    const doc = @import("propview.zig").html(a, &m, app.file_path, fmtLocalLong);
+    const dir = tempDir(a) catch return;
+    var pb: [24]u8 = undefined;
+    const name = exp.safeName(a, std.fmt.bufPrint(&pb, "props-{x:0>8}", .{nid}) catch "props", m.subject(a) catch "item", "html") catch return;
+    writeFile(a, dir, name, doc) catch |e| {
+        _ = msgBox(@errorName(e), "Cannot write temp file", w.MB_ICONERROR);
+        return;
+    };
+    const full = std.fmt.allocPrint(app.gpa, "{s}\\{s}", .{ dir, name }) catch return;
+    app.temp_files.append(app.gpa, full) catch {};
+    const fw = toWAlloc(a, full) catch return;
+    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
+    setStatus("All properties of item 0x{x:0>8} opened in the browser (temp file deleted when pstview closes).", .{nid});
 }
 
 fn headerReportForMessage(nid: u32) void {
@@ -1298,6 +1334,7 @@ fn mwBuildHeader(st: *MsgWin, a: Allocator) []const u8 {
     if (m.pc.time(pst.Tag.client_submit_time)) |t| out.print(a, "Sent:     {s}\n", .{fmtLocalLong(&tb, t)}) catch {};
     if (m.pc.time(pst.Tag.last_modified)) |t| out.print(a, "Modified: {s}\n", .{fmtLocalLong(&tb, t)}) catch {};
     out.print(a, "Class:    {s}    PST NID: 0x{x:0>8}", .{ m.pc.string(a, pst.Tag.message_class) catch "", m.nid }) catch {};
+    for (itemview.rows(a, m, fmtLocalLong)) |row| out.print(a, "\n{s}: {s}", .{ row.label, row.value }) catch {};
     return crlf(a, out.items) catch out.items;
 }
 
@@ -1361,6 +1398,7 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
     const mm = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_HDR, L("Header analysis &report (in browser)\tCtrl+I"));
+    _ = w.AppendMenuW(mm, w.MF_STRING, MW_PROPS, L("All &properties (MAPI, incl. named)"));
     _ = w.AppendMenuW(mm, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_EXPORT_MSG, L("Export as .&msg..."));
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_EXPORT_EML, L("Export as .&eml..."));
@@ -1465,6 +1503,7 @@ fn mwCommand(st: *MsgWin, id: u16) void {
     switch (id) {
         MW_HTML => viewSafeHtml(st.nid),
         MW_HDR => headerReportForMessage(st.nid),
+        MW_PROPS => showAllProperties(st.nid),
         MW_CLOSE => _ = w.DestroyWindow(st.hwnd.?),
         MW_EXPORT_MSG, MW_EXPORT_EML => {
             const is_msg = id == MW_EXPORT_MSG;
@@ -1667,6 +1706,9 @@ fn onCommand(id: u16, code: u16) void {
         CMD_SAFE_HTML => if (focusedRow()) |mi| viewSafeHtml(app.msgs[mi].nid),
         CMD_ANALYSE => analyseFolder(),
         CMD_HDR_REPORT => if (focusedRow()) |mi| headerReportForMessage(app.msgs[mi].nid) else {
+            _ = msgBox("Select a message first.", "pstview", w.MB_ICONINFORMATION);
+        },
+        CMD_PROPS => if (focusedRow()) |mi| showAllProperties(app.msgs[mi].nid) else {
             _ = msgBox("Select a message first.", "pstview", w.MB_ICONINFORMATION);
         },
         CMD_HDR_CLIP => analyseClipboard(),

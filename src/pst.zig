@@ -18,6 +18,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const rtfcp = @import("rtfcp.zig");
+const namemap = @import("namemap.zig");
 
 pub const Error = error{ NotPst, UnsupportedFormat, Corrupt, NotFound };
 
@@ -288,6 +289,16 @@ pub const Pst = struct {
     /// Verify page/block checksums while reading.
     verify: bool = true,
     all_nodes: ?[]NbtEntry = null,
+    /// Named-property map (NID 0x61), loaded on first use.
+    names: ?namemap.NameMap = null,
+    names_arena: ?std.heap.ArenaAllocator = null,
+
+    pub fn nameMap(self: *Pst) namemap.NameMap {
+        if (self.names) |n| return n;
+        self.names_arena = std.heap.ArenaAllocator.init(self.gpa);
+        self.names = namemap.NameMap.load((&self.names_arena.?).allocator(), self);
+        return self.names.?;
+    }
 
     pub fn note(self: *Pst, kind: Issue.Kind, id: u64, detail: u64) void {
         const key = (@as(u128, @intFromEnum(kind)) << 64) | id;
@@ -360,6 +371,7 @@ pub const Pst = struct {
         self.issues.deinit(self.gpa);
         self.issue_keys.deinit(self.gpa);
         if (self.all_nodes) |n| self.gpa.free(n);
+        if (self.names_arena) |*ar| ar.deinit();
         self.file.close(self.io);
         self.gpa.destroy(self);
     }

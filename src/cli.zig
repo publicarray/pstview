@@ -50,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
             \\  pstx search <pst|ost> <folder|0xNID> "<query>"   e.g. "from:*@gmail.com subject:invoice"
             \\  pstx triage <pst|ost> <folder|0xNID>             header analysis, risky items first
             \\  pstx headers <pst|ost> <message nid> [--html out.html]      full header analysis of one message
+            \\  pstx props   <pst|ost> <message nid> [--html out.html]      every MAPI property (incl. named) of one item
             \\  pstx analyse <message.eml | headers.txt> [--html out.html]  analyse headers without a mailbox
             \\
         );
@@ -133,6 +134,16 @@ pub fn main(init: std.process.Init) !void {
             try writeOut(io, path, try hreport.html(arena, an, args[2], fmtLocal));
             try out.print("\nHTML report written to {s}\n", .{path});
         }
+    } else if (std.mem.eql(u8, cmd, "props")) {
+        if (args.len < 4) return out.writeAll("usage: pstx props <source> <message nid hex> [--html out.html]\n");
+        const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
+        const m = try f.loadMessage(arena, nid);
+        const propview = @import("propview.zig");
+        try out.writeAll(propview.text(arena, &m, fmtLocal));
+        if (htmlArg(args)) |path| {
+            try writeOut(io, path, propview.html(arena, &m, args[2], fmtLocal));
+            try out.print("\nHTML written to {s}\n", .{path});
+        }
     } else if (std.mem.eql(u8, cmd, "locate")) {
         if (args.len < 4) return out.writeAll("usage: pstx locate <pst|ost> <nid hex>\n");
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
@@ -169,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
             try m.subject(arena),                                     try m.senderName(arena), try m.senderEmail(arena),
             pst.fmtTime(&b1, m.pc.time(pst.Tag.delivery_time), 0), try m.pc.string(arena, pst.Tag.message_class),
         });
+        for (@import("itemview.zig").rows(arena, &m, fmtLocal)) |row| try out.print("{s}: {s}\n", .{ row.label, row.value });
         for (m.recipients) |r| try out.print("Recipient[{d}]: {s} <{s}>\n", .{ r.kind, r.name, r.email });
         for (m.attachments) |at| try out.print("Attachment: {s} ({d} bytes, method {d}, data {d})\n", .{ at.filename, at.size, at.method, at.data().len });
         const body = try m.bodyText(arena);
