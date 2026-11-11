@@ -109,7 +109,7 @@ A message-header analyser in the spirit of Microsoft's Message Header Analyzer, 
 
 ## Build
 
-Requires Zig 0.16.
+Requires Zig 0.17 (0.17.1 or newer).
 
 ```
 zig build -Drelease      # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)

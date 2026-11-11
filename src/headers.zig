@@ -358,7 +358,7 @@ fn lastWith(hs: []const Header, name: []const u8, needle: []const u8) []const u8
     var i = hs.len;
     while (i > 0) : (i -= 1) {
         const h = hs[i - 1];
-        if (std.ascii.eqlIgnoreCase(h.name, name) and std.ascii.indexOfIgnoreCase(h.value, needle) != null) return h.value;
+        if (std.ascii.eqlIgnoreCase(h.name, name) and std.ascii.findIgnoreCase(h.value, needle) != null) return h.value;
     }
     return "";
 }
@@ -455,22 +455,22 @@ fn findIp(s: []const u8) []const u8 {
 
 /// TLS details of a Received line ("version=TLS1_2 cipher=..." / "using TLSv1.3 with cipher ...").
 fn findTls(a: Allocator, raw: []const u8, with: []const u8) []const u8 {
-    if (std.ascii.indexOfIgnoreCase(raw, "version=TLS")) |p| {
+    if (std.ascii.findIgnoreCase(raw, "version=TLS")) |p| {
         const ve = std.mem.indexOfAnyPos(u8, raw, p, " ,;)") orelse raw.len;
         const ver = raw[p + 8 .. ve];
         var cipher: []const u8 = "";
-        if (std.ascii.indexOfIgnoreCasePos(raw, p, "cipher=")) |c| {
+        if (std.ascii.findIgnoreCasePos(raw, p, "cipher=")) |c| {
             const ce = std.mem.indexOfAnyPos(u8, raw, c, " ,;)") orelse raw.len;
             cipher = raw[c + 7 .. ce];
         }
         return std.fmt.allocPrint(a, "{s}{s}{s}", .{ ver, if (cipher.len > 0) " " else "", cipher }) catch ver;
     }
-    if (std.ascii.indexOfIgnoreCase(raw, "using TLS")) |p| {
+    if (std.ascii.findIgnoreCase(raw, "using TLS")) |p| {
         const e = std.mem.indexOfScalarPos(u8, raw, p, ')') orelse raw.len;
         return std.mem.trim(u8, raw[p + 6 .. e], " (");
     }
-    if (std.ascii.endsWithIgnoreCase(with, "S") or std.ascii.endsWithIgnoreCase(with, "SA") or std.ascii.indexOfIgnoreCase(with, "HTTPS") != null) {
-        if (std.ascii.startsWithIgnoreCase(with, "ESMTP") or std.ascii.startsWithIgnoreCase(with, "LMTP") or std.ascii.startsWithIgnoreCase(with, "SMTP") or std.ascii.indexOfIgnoreCase(with, "HTTPS") != null) return "TLS";
+    if (std.ascii.endsWithIgnoreCase(with, "S") or std.ascii.endsWithIgnoreCase(with, "SA") or std.ascii.findIgnoreCase(with, "HTTPS") != null) {
+        if (std.ascii.startsWithIgnoreCase(with, "ESMTP") or std.ascii.startsWithIgnoreCase(with, "LMTP") or std.ascii.startsWithIgnoreCase(with, "SMTP") or std.ascii.findIgnoreCase(with, "HTTPS") != null) return "TLS";
     }
     return "";
 }
@@ -539,7 +539,7 @@ pub fn parseReceived(a: Allocator, name: []const u8, v: []const u8) Hop {
     if (hop.ip.len == 0 and looksLikeIp(std.mem.trim(u8, hop.from, "[]"))) hop.ip = std.mem.trim(u8, hop.from, "[]");
     if (hop.ip.len == 0 and hop.from.len > 0) {
         // fall back to an IP literal before " by "
-        const by_pos = std.ascii.indexOfIgnoreCase(body, " by ") orelse body.len;
+        const by_pos = std.ascii.findIgnoreCase(body, " by ") orelse body.len;
         hop.ip = findIp(body[0..by_pos]);
     }
     hop.tls = findTls(a, v, hop.with);
@@ -548,7 +548,7 @@ pub fn parseReceived(a: Allocator, name: []const u8, v: []const u8) Hop {
 
 fn kv(list: []const u8, key: []const u8, sep: u8, term: []const u8) []const u8 {
     var i: usize = 0;
-    while (std.ascii.indexOfIgnoreCasePos(list, i, key)) |p| {
+    while (std.ascii.findIgnoreCasePos(list, i, key)) |p| {
         const e = p + key.len;
         if (e < list.len and list[e] == sep and (p == 0 or !std.ascii.isAlphanumeric(list[p - 1]))) {
             const vs = e + 1;
@@ -915,7 +915,7 @@ fn decodeFields(a: Allocator, hs: []const Header, out: *std.ArrayList(Field)) vo
             std.ascii.eqlIgnoreCase(n, "X-MS-TrafficTypeDiagnostic") or std.ascii.eqlIgnoreCase(n, "X-MS-PublicTrafficType") or
             std.ascii.eqlIgnoreCase(n, "X-Originating-IP"))
         {
-            if (std.ascii.endsWithIgnoreCase(n, "-Message-Info") or std.ascii.indexOfIgnoreCase(n, "AntiSpam-MessageData") != null) continue; // opaque blobs
+            if (std.ascii.endsWithIgnoreCase(n, "-Message-Info") or std.ascii.findIgnoreCase(n, "AntiSpam-MessageData") != null) continue; // opaque blobs
             out.append(a, .{ .group = "Microsoft 365 / Exchange", .key = n, .value = h.value, .meaning = msMeaning(n, h.value) }) catch {};
         } else if (std.ascii.eqlIgnoreCase(n, "X-Spam-Status")) {
             // SpamAssassin: "Yes, score=7.2 required=5.0 tests=A,B autolearn=no"
@@ -925,7 +925,7 @@ fn decodeFields(a: Allocator, hs: []const Header, out: *std.ArrayList(Field)) vo
                 var v = kv(h.value, key, '=', " \t");
                 if (std.mem.eql(u8, key, "tests") and v.len > 0) {
                     // a folded test list continues until the next "name=" token
-                    const p = std.ascii.indexOfIgnoreCase(h.value, "tests=").? + 6;
+                    const p = std.ascii.findIgnoreCase(h.value, "tests=").? + 6;
                     var joined: std.ArrayList(u8) = .empty;
                     var it = std.mem.tokenizeAny(u8, h.value[p..], " \t");
                     while (it.next()) |tok| {
@@ -940,7 +940,7 @@ fn decodeFields(a: Allocator, hs: []const Header, out: *std.ArrayList(Field)) vo
             for (vendor_prefixes) |vp| {
                 if (std.ascii.eqlIgnoreCase(vp.vendor, "Microsoft 365")) continue;
                 if (std.ascii.startsWithIgnoreCase(n, vp.p)) {
-                    if (std.ascii.indexOfIgnoreCase(n, "DKIM-Signature") != null) break;
+                    if (std.ascii.findIgnoreCase(n, "DKIM-Signature") != null) break;
                     out.append(a, .{ .group = vp.vendor, .key = n, .value = h.value }) catch {};
                     break;
                 }
@@ -981,7 +981,7 @@ const IocSet = struct {
 
     fn addUrls(self: *IocSet, v: []const u8, source: []const u8) void {
         var i: usize = 0;
-        while (std.ascii.indexOfIgnoreCasePos(v, i, "http")) |p| {
+        while (std.ascii.findIgnoreCasePos(v, i, "http")) |p| {
             i = p + 4;
             if (!(std.ascii.startsWithIgnoreCase(v[p..], "http://") or std.ascii.startsWithIgnoreCase(v[p..], "https://"))) continue;
             const e = std.mem.indexOfAnyPos(u8, v, p, " \t<>\",;") orelse v.len;
@@ -989,7 +989,7 @@ const IocSet = struct {
             i = e;
         }
         var j: usize = 0;
-        while (std.ascii.indexOfIgnoreCasePos(v, j, "mailto:")) |p| {
+        while (std.ascii.findIgnoreCasePos(v, j, "mailto:")) |p| {
             const e = std.mem.indexOfAnyPos(u8, v, p, " \t<>\",;?") orelse v.len;
             self.add(.email, v[p + 7 .. e], source);
             j = e;
@@ -1015,11 +1015,11 @@ fn collectIocs(a: Allocator, an: *const Analysis, hs: []const Header, auth: []co
     for (auth) |r| {
         const src = r.header;
         s.add(.ip, prop(r.props, "client-ip"), src);
-        if (std.ascii.indexOfIgnoreCase(r.detail, "sender IP is ")) |p| {
+        if (std.ascii.findIgnoreCase(r.detail, "sender IP is ")) |p| {
             const e = std.mem.indexOfAnyPos(u8, r.detail, p + 13, " ;)") orelse r.detail.len;
             s.add(.ip, r.detail[p + 13 .. e], src);
         }
-        if (std.ascii.indexOfIgnoreCase(r.detail, "designates ")) |p| {
+        if (std.ascii.findIgnoreCase(r.detail, "designates ")) |p| {
             const e = std.mem.indexOfAnyPos(u8, r.detail, p + 11, " ;)") orelse r.detail.len;
             s.add(.ip, r.detail[p + 11 .. e], src);
         }
@@ -1041,7 +1041,7 @@ fn collectIocs(a: Allocator, an: *const Analysis, hs: []const Header, auth: []co
             while (it.next()) |id| s.add(.host, domainOf(id), h.name);
         }
         if (std.ascii.eqlIgnoreCase(h.name, "X-Sender-IP") or std.ascii.eqlIgnoreCase(h.name, "X-Originating-IP") or std.ascii.eqlIgnoreCase(h.name, "X-Source-IP")) s.add(.ip, h.value, h.name);
-        if (std.ascii.startsWithIgnoreCase(h.name, "DKIM-") or std.ascii.startsWithIgnoreCase(h.name, "ARC-") or std.ascii.indexOfIgnoreCase(h.name, "Signature") != null) continue;
+        if (std.ascii.startsWithIgnoreCase(h.name, "DKIM-") or std.ascii.startsWithIgnoreCase(h.name, "ARC-") or std.ascii.findIgnoreCase(h.name, "Signature") != null) continue;
         s.addUrls(h.value, h.name);
     }
     return s.list.items;
@@ -1176,7 +1176,7 @@ fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
         if (count(hs, "Authentication-Results") > 1 or count(hs, "X-Forefront-Antispam-Report") > 1) {
             var gw: []const u8 = "";
             for (hs) |h| if (std.ascii.eqlIgnoreCase(h.name, "Received")) for (gateways) |g| {
-                if (gw.len == 0 and std.ascii.indexOfIgnoreCase(h.value, g) != null) gw = g;
+                if (gw.len == 0 and std.ascii.findIgnoreCase(h.value, g) != null) gw = g;
             };
             add(a, &findings, .info, "Message passed through the mail system more than once{s}{s}; using the first-arrival authentication result", .{ if (gw.len > 0) " via filtering service " else "", gw });
         }
@@ -1276,10 +1276,10 @@ fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
     // --- impersonation (works with or without internet headers)
     if (an.from_name.len > 0 and std.mem.indexOfScalar(u8, an.from_name, '@') != null) {
         const inner = std.mem.trim(u8, an.from_name, " \"'<>");
-        if (!std.ascii.eqlIgnoreCase(inner, an.from_addr) and std.ascii.indexOfIgnoreCase(an.from_name, an.from_addr) == null)
+        if (!std.ascii.eqlIgnoreCase(inner, an.from_addr) and std.ascii.findIgnoreCase(an.from_name, an.from_addr) == null)
             add(a, &findings, .high, "Display name contains a different e-mail address (\"{s}\" sent from {s})", .{ an.from_name, an.from_addr });
     }
-    const via_platform = isNotificationPlatform(an.from_domain) or std.ascii.indexOfIgnoreCase(an.from_name, " via ") != null;
+    const via_platform = isNotificationPlatform(an.from_domain) or std.ascii.findIgnoreCase(an.from_name, " via ") != null;
     if (!from_is_internal and an.from_domain.len > 0 and !via_platform) {
         if (ctx.internal_names) |names| {
             const nn = normaliseName(a, an.from_name);

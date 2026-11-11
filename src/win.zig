@@ -83,7 +83,7 @@ pub const TVITEMW = extern struct {
     cChildren: i32 = 0,
     lParam: LPARAM = 0,
 };
-pub const TVINSERTSTRUCTW = extern struct { hParent: ?HTREEITEM, hInsertAfter: ?HTREEITEM, item: TVITEMW, _pad: [16]u8 = [_]u8{0} ** 16 };
+pub const TVINSERTSTRUCTW = extern struct { hParent: ?HTREEITEM, hInsertAfter: ?HTREEITEM, item: TVITEMW, _pad: [16]u8 = @splat(0) };
 pub const NMTREEVIEWW = extern struct { hdr: NMHDR, action: u32, itemOld: TVITEMW, itemNew: TVITEMW, ptDrag: POINT };
 
 pub const INITCOMMONCONTROLSEX = extern struct { dwSize: u32 = 8, dwICC: u32 };

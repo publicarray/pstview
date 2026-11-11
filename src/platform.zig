@@ -93,7 +93,7 @@ const posix = struct {
         var nb: [64]u8 = undefined;
         const name: [:0]const u8 = for (aliases) |al| {
             if (std.ascii.eqlIgnoreCase(charset, al[0])) break al[1];
-        } else std.fmt.bufPrintZ(&nb, "{s}", .{charset}) catch return null;
+        } else std.fmt.bufPrintSentinel(&nb, "{s}", .{charset}, 0) catch return null;
         const ic = iconvFns() orelse return null;
         const cd = ic.open("UTF-8", name.ptr);
         if (cd == -1) return null;

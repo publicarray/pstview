@@ -90,7 +90,7 @@ fn filterTransportHeaders(a: Allocator, out: *List, hdrs: []const u8) !void {
 
 fn htmlCharset(html: []const u8) []const u8 {
     const lim = html[0..@min(html.len, 4096)];
-    if (std.ascii.indexOfIgnoreCase(lim, "charset=")) |i| {
+    if (std.ascii.findIgnoreCase(lim, "charset=")) |i| {
         var j = i + 8;
         if (j < lim.len and (lim[j] == '"' or lim[j] == '\'')) j += 1;
         const s = j;
@@ -203,7 +203,7 @@ const CfbEntry = struct {
     kind: u8, // 1 storage, 2 stream, 5 root
     data: []const u8 = &.{},
     children: std.ArrayList(u32) = .empty,
-    clsid: [16]u8 = [_]u8{0} ** 16,
+    clsid: [16]u8 = @splat(0),
     // computed
     left: u32 = NOSTREAM,
     right: u32 = NOSTREAM,
@@ -441,7 +441,7 @@ const PropSink = struct {
         if ((p.ptype & pst.PT.mv_flag) != 0) return;
         if (p.ptype == pst.PT.object) return;
         const tag: u32 = (@as(u32, p.id) << 16) | p.ptype;
-        var ent: [16]u8 = [_]u8{0} ** 16;
+        var ent: [16]u8 = @splat(0);
         std.mem.writeInt(u32, ent[0..4], tag, .little);
         std.mem.writeInt(u32, ent[4..8], 0x6, .little);
         if (pst.fixedSize(p.ptype)) |sz| {
@@ -488,7 +488,7 @@ fn addMessageToCfb(a: Allocator, cfb: *Cfb, storage: u32, m: *pst.Message, embed
         std.mem.writeInt(u32, &row_id, @intCast(i), .little);
         try rs.add(.{ .id = 0x3000, .ptype = pst.PT.int32, .data = &row_id });
         for (r.props) |p| if (p.id != 0x3000) try rs.add(p);
-        var hdr = [_]u8{0} ** 8;
+        var hdr: [8]u8 = @splat(0);
         const pdata = try std.mem.concat(a, u8, &.{ &hdr, rs.table.items });
         _ = &hdr;
         try cfb.addStream(st, "__properties_version1.0", pdata);
@@ -504,19 +504,19 @@ fn addMessageToCfb(a: Allocator, cfb: *Cfb, storage: u32, m: *pst.Message, embed
                 var inner = inner_c;
                 const inner_st = try cfb.addStorage(st, "__substg1.0_3701000D");
                 try addMessageToCfb(a, cfb, inner_st, &inner, true, depth + 1);
-                var ent: [16]u8 = [_]u8{0} ** 16;
+                var ent: [16]u8 = @splat(0);
                 std.mem.writeInt(u32, ent[0..4], (0x3701 << 16) | 0x000D, .little);
                 std.mem.writeInt(u32, ent[4..8], 0x6, .little);
                 std.mem.writeInt(u32, ent[8..12], 0xFFFFFFFF, .little);
                 try as.table.appendSlice(a, &ent);
             }
         }
-        const hdr = [_]u8{0} ** 8;
+        const hdr: [8]u8 = @splat(0);
         try cfb.addStream(st, "__properties_version1.0", try std.mem.concat(a, u8, &.{ &hdr, as.table.items }));
     }
 
     // property stream header
-    var h: [32]u8 = [_]u8{0} ** 32;
+    var h: [32]u8 = @splat(0);
     const nr: u32 = @intCast(m.recipients.len);
     const na: u32 = @intCast(m.attachments.len);
     std.mem.writeInt(u32, h[8..12], nr, .little);

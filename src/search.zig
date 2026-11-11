@@ -134,7 +134,7 @@ fn has(hay: []const u8, t: []const u8) bool {
             if (std.mem.indexOfScalar(u8, tok, '@')) |at| if (headers.domainIs(tok[at + 1 ..], dom)) return true;
         }
         // plain term without @ also matches anywhere as text (e.g. a domain in a display name)
-        if (t[0] != '@' and t[0] != '*') return std.ascii.indexOfIgnoreCase(hay, t) != null;
+        if (t[0] != '@' and t[0] != '*') return std.ascii.findIgnoreCase(hay, t) != null;
         return false;
     }
     if (std.mem.indexOfAny(u8, t, "*?") != null) {
@@ -142,7 +142,7 @@ fn has(hay: []const u8, t: []const u8) bool {
         while (it.next()) |tok| if (glob(t, tok)) return true;
         return glob(t, hay);
     }
-    return std.ascii.indexOfIgnoreCase(hay, t) != null;
+    return std.ascii.findIgnoreCase(hay, t) != null;
 }
 
 pub fn matches(f: Fields, terms: []const Term) bool {

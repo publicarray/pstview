@@ -5,7 +5,10 @@ const release_version = "0.3.0";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
+    // -Drelease (or --release) builds ReleaseSafe, as the published binaries are; -Doptimize=<mode>
+    // picks any mode; neither gives a Debug build.
+    const release = b.option(bool, "release", "Build for end users (ReleaseSafe)") orelse (b.graph.release_mode != .off);
+    const optimize: std.builtin.Optimize = if (release) .ReleaseSafe else b.standardOptimizeOption(.{});
 
     // Version shown in Help > About and by `pstx --version`, from `git describe`: "0.2.0" for a
     // tagged build, "0.2.0-3-g98aac75" for commits after the tag ("-dirty" with local changes).
@@ -52,7 +55,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli);
 
     const run_cli = b.addRunArtifact(cli);
-    if (b.args) |args| run_cli.addArgs(args);
+    run_cli.addPassthruArgs(); // zig build run -- <args>
     b.step("run", "Run pstx").dependOn(&run_cli.step);
 
     // Unit tests (portable modules)
@@ -73,7 +76,7 @@ pub fn build(b: *std.Build) void {
 /// reachable (shallow CI clones of a branch), or just the release version without git.
 fn gitVersion(b: *std.Build) []const u8 {
     var code: u8 = 0;
-    const out = b.runAllowFail(&.{ "git", "-C", b.build_root.path orelse ".", "describe", "--tags", "--match", "v*", "--always", "--dirty" }, &code, .ignore) catch return release_version;
+    const out = b.runAllowFail(&.{ "git", "-C", b.root.toString(b.allocator) catch ".", "describe", "--tags", "--match", "v*", "--always", "--dirty" }, &code, .ignore) catch return release_version;
     const d = std.mem.trim(u8, out, " \r\n");
     if (d.len == 0) return release_version;
     if (d[0] != 'v') return b.fmt("{s}+{s}", .{ release_version, d });

@@ -208,7 +208,7 @@ fn inflate(a: Allocator, src: []const u8, len: usize) ![]u8 {
 }
 
 /// PST checksum: CRC-32 (reflected 0xEDB88320 table) with initial value 0 and no final XOR ([MS-PST] 5.3).
-pub const PstCrc = std.hash.crc.Crc(u32, .{
+pub const PstCrc = std.hash.crc.Generic(u32, .{
     .polynomial = 0x04c11db7,
     .initial = 0x00000000,
     .reflect_input = true,

@@ -79,9 +79,9 @@ pub const NameMap = struct {
                 1 => PS_MAPI,
                 2 => PS_PUBLIC_STRINGS,
                 else => blk: {
-                    if (gi < 3) break :blk [_]u8{0} ** 16;
+                    if (gi < 3) break :blk @as([16]u8, @splat(0));
                     const o = (@as(usize, gi) - 3) * 16;
-                    if (o + 16 > guids.len) break :blk [_]u8{0} ** 16;
+                    if (o + 16 > guids.len) break :blk @as([16]u8, @splat(0));
                     break :blk guids[o..][0..16].*;
                 },
             };

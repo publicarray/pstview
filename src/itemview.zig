@@ -119,7 +119,7 @@ fn appointment(r: *Rows, cls: []const u8) void {
         r.add("Meeting", if (st & 4 != 0) "cancelled" else if (st & 2 != 0) "received (attendee copy)" else "organised by the mailbox owner");
     };
     r.pick("Response", r.named(A, 0x8218), &.{ "None", "Organiser", "Tentative", "Accepted", "Declined", "Not responded" });
-    if (std.ascii.indexOfIgnoreCase(cls, "Meeting") != null or r.m.recipients.len > 0) {
+    if (std.ascii.findIgnoreCase(cls, "Meeting") != null or r.m.recipients.len > 0) {
         const org = r.m.senderName(r.a) catch "";
         r.add("Organiser", org);
         r.recipients("Required", 1);

@@ -316,7 +316,7 @@ pub const Mbox = struct {
         defer f.close(self.io);
         const n = f.readPositionalAll(self.io, &buf, 0) catch return false;
         const head = mime.splitMessage(buf[0..n]).head;
-        return std.ascii.indexOfIgnoreCase(head, "\nX-Gmail-Labels:") != null;
+        return std.ascii.findIgnoreCase(head, "\nX-Gmail-Labels:") != null;
     }
 
     /// Find all messages of a source and build their list entries (once).

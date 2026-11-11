@@ -367,7 +367,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
             const loc = pst.fmtTime(&tb, t, platform.localOffset(t));
             if (!std.mem.startsWith(u8, loc, d)) continue;
         }
-        if (match) |q| if (std.ascii.indexOfIgnoreCase(s.subject, q) == null) continue;
+        if (match) |q| if (std.ascii.findIgnoreCase(s.subject, q) == null) continue;
         n += 1;
         var ia_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer ia_state.deinit();

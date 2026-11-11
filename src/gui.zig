@@ -462,14 +462,14 @@ fn pickFolder(a: Allocator, title: []const u8) ?[]u8 {
     var bi: w.BROWSEINFOW = .{ .hwndOwner = app.hwnd, .pszDisplayName = &name, .lpszTitle = tw, .ulFlags = w.BIF_RETURNONLYFSDIRS | w.BIF_NEWDIALOGSTYLE | w.BIF_EDITBOX };
     const pidl = w.SHBrowseForFolderW(&bi) orelse return null;
     defer w.CoTaskMemFree(pidl);
-    var path: [1024]u16 = [_]u16{0} ** 1024;
+    var path: [1024]u16 = @splat(0);
     if (w.SHGetPathFromIDListW(pidl, &path) == 0) return null;
     const len = std.mem.indexOfScalar(u16, &path, 0) orelse 0;
     return std.unicode.utf16LeToUtf8Alloc(a, path[0..len]) catch null;
 }
 
 fn openDialog() void {
-    var file: [32768]u16 = [_]u16{0} ** 32768;
+    var file: [32768]u16 = @splat(0);
     const filter = L("Mail files (*.pst;*.ost;*.mbox;*.mbx)\x00*.pst;*.ost;*.mbox;*.mbx\x00Outlook data files (*.pst;*.ost)\x00*.pst;*.ost\x00MBOX files (*.mbox;*.mbx)\x00*.mbox;*.mbx\x00All files - e.g. Thunderbird mailboxes (*.*)\x00*.*\x00");
     var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY | w.OFN_ALLOWMULTISELECT, .lpstrTitle = L("Open PST / OST / MBOX - select several PST parts to merge them (read-only)") };
     if (w.GetOpenFileNameW(&ofn) == 0) return;
@@ -757,7 +757,7 @@ fn analyseFolder() void {
         app.index = null; // rebuild with mailbox-wide knowledge
     }
     const ix = ensureIndex();
-    var counts = [_]usize{0} ** 5;
+    var counts: [5]usize = @splat(0);
     for (ix.analyses) |an| counts[@intFromEnum(an.risk)] += 1;
     app.sort_col = 7;
     app.sort_desc = true;
@@ -900,7 +900,7 @@ fn showPreview() void {
 /// Put syntax-coloured text into a Rich Edit control.
 fn setRich(a: Allocator, h: w.HWND, text: []const u8) void {
     const doc = rtf.colorize(a, text, "Consolas", 19);
-    const z = a.dupeZ(u8, doc) catch return;
+    const z = a.dupeSentinel(u8, doc, 0) catch return;
     var st: w.SETTEXTEX = .{};
     _ = w.SendMessageW(h, w.EM_SETTEXTEX, @intFromPtr(&st), @intCast(@intFromPtr(z.ptr)));
 }
@@ -1566,7 +1566,7 @@ fn analyseClipboard() void {
 }
 
 fn analyseHeaderFile() void {
-    var file: [1024]u16 = [_]u16{0} ** 1024;
+    var file: [1024]u16 = @splat(0);
     const filter = L("Messages and header text (*.eml;*.txt)\x00*.eml;*.txt\x00All files (*.*)\x00*.*\x00");
     var ofn: w.OPENFILENAMEW = .{ .hwndOwner = app.hwnd, .lpstrFilter = filter.ptr, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_FILEMUSTEXIST | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrTitle = L("Analyse headers from file (read-only)") };
     if (w.GetOpenFileNameW(&ofn) == 0) return;
@@ -1800,7 +1800,7 @@ fn mwShowPart(st: *MsgWin) void {
 }
 
 fn saveDialog(a: Allocator, owner: w.HWND, default_name: []const u8) ?[]u8 {
-    var file: [1024]u16 = [_]u16{0} ** 1024;
+    var file: [1024]u16 = @splat(0);
     const dn = toW(&file, default_name);
     _ = dn;
     var ofn: w.OPENFILENAMEW = .{ .hwndOwner = owner, .lpstrFile = &file, .nMaxFile = file.len, .Flags = w.OFN_OVERWRITEPROMPT | w.OFN_PATHMUSTEXIST | w.OFN_EXPLORER | w.OFN_HIDEREADONLY, .lpstrFilter = L("All files (*.*)\x00*.*\x00").ptr };
@@ -2379,7 +2379,7 @@ fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
             var paths: std.ArrayList([]const u8) = .empty;
             const count = w.DragQueryFileW(hdrop, 0xFFFFFFFF, null, 0);
             for (0..count) |k| {
-                var buf: [1024]u16 = [_]u16{0} ** 1024;
+                var buf: [1024]u16 = @splat(0);
                 const n = w.DragQueryFileW(hdrop, @intCast(k), &buf, buf.len);
                 if (n > 0) paths.append(arena.allocator(), std.unicode.utf16LeToUtf8Alloc(arena.allocator(), buf[0..n]) catch continue) catch {};
             }

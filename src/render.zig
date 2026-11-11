@@ -192,7 +192,7 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
                 // skip to matching close tag
                 var close_buf: [24]u8 = undefined;
                 const close = std.fmt.bufPrint(&close_buf, "</{s}", .{name}) catch "";
-                if (std.ascii.indexOfIgnoreCasePos(html, next, close)) |ce| {
+                if (std.ascii.findIgnoreCasePos(html, next, close)) |ce| {
                     i = (std.mem.indexOfScalarPos(u8, html, ce, '>') orelse html.len - 1) + 1;
                     continue;
                 }
@@ -206,7 +206,7 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
         }
         if (std.ascii.eqlIgnoreCase(name, "style") and !closing) {
             // keep inline <style> blocks but clean their CSS
-            const ce = std.ascii.indexOfIgnoreCasePos(html, next, "</style") orelse html.len;
+            const ce = std.ascii.findIgnoreCasePos(html, next, "</style") orelse html.len;
             try out.appendSlice(a, "<style>");
             try cleanCss(a, &out, html[next..ce], st);
             try out.appendSlice(a, "</style>");
