@@ -25,7 +25,10 @@ pub fn build(b: *std.Build) void {
 
     const os = target.result.os.tag;
 
-    // GUI viewer (Windows only; pstx runs everywhere)
+    // GUI viewer. Windows: Win32 (gui.zig). macOS and Linux: a native window around the system
+    // web view (gui_posix.zig); Cocoa / WebKit and GTK / WebKitGTK are loaded at run time, so
+    // nothing but libc is linked and every target cross-compiles. A static (musl) Linux build
+    // cannot load them and gets pstx only.
     if (os == .windows) {
         const gui_mod = b.createModule(.{
             .root_source_file = b.path("src/gui.zig"),
@@ -37,6 +40,18 @@ pub fn build(b: *std.Build) void {
         gui_mod.addOptions("build_options", opts);
         const gui = b.addExecutable(.{ .name = "pstview", .root_module = gui_mod, .win32_manifest = b.path("src/app.manifest") });
         gui.subsystem = .windows;
+        b.installArtifact(gui);
+    } else if (os.isDarwin() or (os == .linux and target.result.abi.isGnu())) {
+        const gui = b.addExecutable(.{
+            .name = "pstview",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/gui_posix.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        gui.root_module.addOptions("build_options", opts);
         b.installArtifact(gui);
     }
 

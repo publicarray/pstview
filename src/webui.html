@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-src about:">
+<title>pstview</title>
+<style>
+/* Visual style after design/design-philosophy.md ("Sealed Signal"): ink ground, paper content,
+   one amber accent where something needs attention. Flat colour, hairlines, generous spacing. */
+:root{
+  --ink:#13233F; --ink-soft:#606C80; --paper:#F6F4EE; --amber:#F5B700; --pane:#F9F8F5;
+  --hairline:#E3E1DA; --muted:#7C8595; --white:#fff; --select:#E4E9F2; --hover:#EFEEE9;
+  --left:290px; --listh:45%;
+  --ui:system-ui,-apple-system,"Segoe UI","Cantarell","Noto Sans",sans-serif;
+  --mono:ui-monospace,Menlo,"DejaVu Sans Mono","Liberation Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:13px/1.4 var(--ui);color:var(--ink);background:var(--white);overflow:hidden;
+  -webkit-user-select:none;user-select:none;cursor:default;display:flex;flex-direction:column}
+button{font:inherit;color:inherit}
+svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+
+/* menu bar */
+#bar{flex:none;height:38px;background:var(--ink);color:var(--paper);display:flex;align-items:center;padding:0 10px 0 16px;gap:2px}
+#bar .mark{font-weight:600;letter-spacing:.14em;font-size:12px;margin-right:18px;display:flex;align-items:center;gap:9px}
+#bar .mark i{width:8px;height:8px;border-radius:50%;background:var(--amber);display:block}
+.menu{position:relative}
+.menu>button{background:none;border:0;padding:6px 11px;border-radius:5px;color:var(--paper)}
+.menu>button:hover,.menu.open>button{background:#ffffff1c}
+.drop{display:none;position:absolute;top:32px;left:0;min-width:300px;background:var(--white);color:var(--ink);
+  border:1px solid var(--hairline);border-radius:8px;padding:5px;z-index:50;box-shadow:0 8px 28px #13233f2e}
+.menu.open .drop,.drop.ctx{display:block}
+.drop.ctx{position:fixed;top:0;left:0}
+.drop button{display:flex;width:100%;text-align:left;background:none;border:0;padding:6px 12px;border-radius:5px;gap:24px;justify-content:space-between;white-space:nowrap}
+.drop button:hover:not(:disabled){background:var(--select)}
+.drop button:disabled{color:#b3b8c2}
+.drop button kbd{font:inherit;color:var(--muted)}
+.drop hr{border:0;border-top:1px solid var(--hairline);margin:5px 6px}
+
+/* mailbox view */
+#main{flex:1;min-height:0;display:flex}
+#left{flex:none;width:var(--left);background:var(--pane);border-right:1px solid var(--hairline);display:flex;flex-direction:column;min-width:0}
+#source{flex:none;padding:14px 18px 12px}
+#source b{display:block;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#source span{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
+#tree{flex:1;overflow:auto;padding:0 6px 10px}
+.node{display:flex;align-items:center;height:30px;border-radius:6px;white-space:nowrap;gap:7px;padding-right:10px;color:var(--ink)}
+.node:hover{background:var(--hover)}
+.node.cur{background:var(--select)}
+.node svg{color:var(--ink-soft)}
+.node.recovered svg{color:#C98F00}
+.node.mailbox svg{color:var(--ink)}
+.node .tw{width:16px;height:30px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:9px}
+.node.label{color:var(--ink-soft)}
+#vsplit{flex:none;width:5px;margin-left:-3px;cursor:col-resize;z-index:5}
+#right{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--white)}
+#searchbar{flex:none;padding:10px 14px 10px 10px}
+#pill{display:flex;align-items:center;gap:10px;height:32px;background:var(--pane);border:1px solid var(--hairline);border-radius:8px;padding:0 12px;color:var(--muted)}
+#search{flex:1;border:0;outline:0;background:none;font:inherit;color:var(--ink);-webkit-user-select:text;user-select:text;min-width:0}
+#search::placeholder{color:var(--muted)}
+#listwrap{flex:none;height:var(--listh);min-height:90px;display:flex;flex-direction:column;border-bottom:1px solid var(--hairline);position:relative}
+#head{flex:none;height:28px;overflow:hidden;border-bottom:1px solid var(--hairline);color:var(--ink-soft)}
+#headrow{display:flex;height:28px}
+.hc{flex:none;position:relative;padding:0 10px;line-height:28px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hc:hover{background:var(--hover)}
+.hc i{position:absolute;right:0;top:0;width:7px;height:100%;cursor:col-resize}
+.hc i:after{content:"";position:absolute;right:3px;top:7px;bottom:7px;border-right:1px solid var(--hairline)}
+#rows{flex:1;overflow:auto;position:relative;outline:0}
+#spacer{position:relative}
+.row{position:absolute;left:0;display:flex;height:28px;line-height:28px}
+.row:hover{background:var(--hover)}
+.row.sel{background:var(--select)}
+.c{flex:none;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.c.r{text-align:right}
+.risk4,.risk3{font-weight:600}
+.risk4:before,.risk3:before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);margin-right:7px}
+#empty{position:absolute;left:0;right:0;top:48%;text-align:center;color:var(--muted);pointer-events:none}
+#hsplit{flex:none;height:5px;margin-top:-3px;cursor:row-resize;z-index:5}
+#reader{flex:1;min-height:0;display:flex;flex-direction:column}
+#tabs{flex:none;display:flex;gap:2px;padding:6px 10px 0;border-bottom:1px solid var(--hairline);align-items:flex-end}
+#tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:6px 12px 7px;color:var(--ink-soft)}
+#tabs button.on{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
+#tabs button.alert:after{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);margin-left:7px}
+#tabs .fill{flex:1}
+#tabs .act{border:1px solid var(--hairline);border-radius:6px;padding:3px 10px;margin:0 0 5px 6px}
+#tabs .act:hover{background:var(--hover)}
+.tab{flex:1;min-height:0;display:none;overflow:auto}
+.tab.on{display:block}
+iframe{border:0;width:100%;height:100%;display:block;background:var(--white)}
+pre.txt{margin:0;padding:14px 24px;font:12.5px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;cursor:text}
+#hint{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted)}
+table.atts{border-collapse:collapse;margin:10px 24px;-webkit-user-select:text;user-select:text}
+table.atts td{padding:6px 18px 6px 0;border-bottom:1px solid var(--hairline)}
+table.atts td:nth-child(2),table.atts td:nth-child(3){color:var(--muted)}
+.btn{border:1px solid var(--hairline);background:var(--white);border-radius:6px;padding:4px 12px}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.btn.pri:hover{background:#1d3257}
+.attbar{padding:12px 24px 0}
+
+/* welcome */
+#welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--paper);gap:8px}
+#welcome h1{font-size:30px;font-weight:300;letter-spacing:.2em;margin:0;display:flex;align-items:center;gap:16px}
+#welcome h1 i{width:13px;height:13px;border-radius:50%;background:var(--amber);display:block}
+#welcome p{color:var(--ink-soft);margin:6px 0 22px;max-width:520px;text-align:center}
+#welcome .btn{padding:9px 22px;min-width:300px;font-size:14px}
+#welcome small{color:var(--muted);margin-top:22px}
+
+/* status bar */
+#status{flex:none;height:26px;border-top:1px solid var(--hairline);background:var(--pane);display:flex;align-items:center;padding:0 12px;gap:8px;color:var(--ink-soft);white-space:nowrap}
+#status i{width:8px;height:8px;border-radius:50%;background:var(--amber);display:block;flex:none}
+#status b{font-weight:400;color:var(--ink);margin-right:14px}
+#status span{overflow:hidden;text-overflow:ellipsis}
+
+/* overlays */
+#viewer{position:fixed;inset:0;background:var(--white);z-index:60;display:none;flex-direction:column}
+#viewer.on{display:flex}
+/* scrollbars of the list would otherwise show through the report */
+body.viewing #main{visibility:hidden}
+#viewer header{flex:none;height:38px;background:var(--ink);color:var(--paper);display:flex;align-items:center;padding:0 10px 0 16px;gap:8px}
+#viewer header span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#viewer header button{background:none;border:1px solid #ffffff40;border-radius:6px;padding:3px 12px;color:var(--paper)}
+#viewer header button:hover{background:#ffffff1c}
+#viewer iframe{flex:1;min-height:0}
+#shade{position:fixed;inset:0;background:#13233f47;z-index:70;display:none;align-items:center;justify-content:center}
+#shade.on{display:flex}
+#dialog{background:var(--white);border-radius:10px;padding:22px 24px 18px;min-width:380px;max-width:min(680px,90vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px #13233f4d}
+#dialog h2{margin:0 0 10px;font-size:16px;font-weight:600}
+#dialog .body{white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;cursor:text}
+#dialog textarea{width:560px;max-width:80vw;height:300px;font:12px/1.4 var(--mono);border:1px solid var(--hairline);border-radius:6px;padding:8px;outline:0;resize:none;-webkit-user-select:text;user-select:text}
+#dialog .buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+#dialog a{color:var(--ink)}
+#busy{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;cursor:progress}
+#busy.on{display:flex}
+#busy div{background:var(--ink);color:var(--paper);padding:10px 20px;border-radius:8px;display:flex;align-items:center;gap:12px}
+#busy i{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:pulse 1s ease-in-out infinite alternate}
+@keyframes pulse{from{opacity:.25}to{opacity:1}}
+#dragshield{position:fixed;inset:0;z-index:80;display:none}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="bar">
+  <div class="mark"><i></i>PSTVIEW</div>
+  <div id="menus" style="display:flex"></div>
+</div>
+
+<div id="welcome">
+  <h1><i></i>PSTVIEW</h1>
+  <p>Read-only viewer and exporter for Outlook PST / OST files and MBOX mailboxes. Sources are never written to, and nothing is created next to them.</p>
+  <button class="btn pri" data-act="open">Open PST / OST / MBOX file&hellip;</button>
+  <button class="btn" data-act="openfolder">Open a folder of mailboxes or PST parts&hellip;</button>
+  <small id="ver"></small>
+</div>
+
+<div id="main" class="hidden">
+  <div id="left">
+    <div id="source"><b></b><span></span></div>
+    <div id="tree"></div>
+  </div>
+  <div id="vsplit"></div>
+  <div id="right">
+    <div id="searchbar"><div id="pill">
+      <svg class="g" viewBox="0 0 16 16"><path d="M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 0 0 0-9z M10.3 10.3l3.2 3.2"/></svg>
+      <input id="search" spellcheck="false" autocomplete="off" placeholder="Search    from:   to:   subject:   risk:high    * ? wildcards, &quot;phrases&quot;">
+    </div></div>
+    <div id="listwrap">
+      <div id="head"><div id="headrow"></div></div>
+      <div id="rows" tabindex="0"><div id="spacer"></div></div>
+      <div id="empty"></div>
+    </div>
+    <div id="hsplit"></div>
+    <div id="reader">
+      <div id="hint">Select a message to read it.</div>
+      <div id="tabs" class="hidden">
+        <button data-tab="mail" class="on">Message</button>
+        <button data-tab="analysis">Header analysis</button>
+        <button data-tab="headers">Internet headers</button>
+        <button data-tab="atts">Attachments</button>
+        <span class="fill"></span>
+        <button class="act" data-act="hdrreport">Header report</button>
+        <button class="act" data-act="expand" id="expand">Enlarge</button>
+      </div>
+      <div class="tab on" id="tab-mail"><iframe id="mailframe" sandbox="" title="Message"></iframe></div>
+      <div class="tab" id="tab-analysis"><pre class="txt"></pre></div>
+      <div class="tab" id="tab-headers"><pre class="txt"></pre></div>
+      <div class="tab" id="tab-atts"></div>
+    </div>
+  </div>
+</div>
+
+<div id="status"><i></i><b>Read-only</b><span id="stext"></span></div>
+
+<div id="viewer">
+  <header><span id="vtitle"></span><button id="vsave">Save as&hellip;</button><button id="vclose">Close</button></header>
+  <iframe id="vframe" sandbox="" title="Report"></iframe>
+</div>
+<div id="shade"><div id="dialog"></div></div>
+<div id="dragshield"></div>
+<div id="busy"><div><i></i>Working&hellip;</div></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const mac = /Mac/.test(navigator.platform);
+const modKey = e => mac ? e.metaKey : e.ctrlKey;
+const MOD = mac ? '⌘' : 'Ctrl+';
+
+// ---------------------------------------------------------------- bridge to the model (webapp.zig)
+const pv = {
+  seq: 0, pending: new Map(), busyTimer: 0,
+  call(cmd, ...args) {
+    return new Promise(resolve => {
+      const id = ++pv.seq;
+      pv.pending.set(id, resolve);
+      if (!pv.busyTimer) pv.busyTimer = setTimeout(() => $('#busy').classList.add('on'), 250);
+      window.webkit.messageHandlers.pstview.postMessage([id, cmd, ...args].join('\x1f'));
+    });
+  },
+  reply(id, data) {
+    const resolve = pv.pending.get(id);
+    pv.pending.delete(id);
+    if (pv.pending.size === 0) { clearTimeout(pv.busyTimer); pv.busyTimer = 0; $('#busy').classList.remove('on'); }
+    if (resolve) resolve(data);
+  },
+  opened(mb) { showMailbox(mb); },
+};
+window.pv = pv;
+
+// ---------------------------------------------------------------- state
+const COLS = [['Received',140],['Modified',140],['From',180],['To',180],['Subject',380],['Size',80,1],['Class',120],['Risk (header analysis)',320],['Note',260]];
+const ROW = 28, CHUNK = 200;
+const st = { mb: null, folder: -1, count: 0, total: 0, col: 0, desc: true, gen: 0, cache: new Map(), asked: new Set(),
+  sel: new Set(), all: false, focus: -1, anchor: -1, msg: null, msgRow: -1, tab: 'mail', version: '', url: '' };
+
+const GLYPH = {
+  folder:'M1.5 4.5h4.2l1.5 1.5h7.3v7.5h-13z', mailbox:'M2 3h12v10H2z M2 9h3.5l1 2h3l1-2H14',
+  inbox:'M2 9l2-6h8l2 6v4H2z M2 9h3.5l1 2h3l1-2H14', sent:'M2 8l12-5-5 12-2-5z', drafts:'M3 13l1-3.5 7-7 2.5 2.5-7 7z',
+  deleted:'M3 4.5h10 M6 4.5V3h4v1.5 M4.5 4.5l.7 8.5h5.6l.7-8.5', junk:'M8 2a6 6 0 1 0 0 12a6 6 0 0 0 0-12z M3.8 3.8l8.4 8.4',
+  archive:'M2 3h12v3H2z M3 6v7h10V6 M6.5 8.5h3', calendar:'M2.5 3.5h11v10h-11z M2.5 6.5h11 M5.5 2v3 M10.5 2v3',
+  contacts:'M8 8a2.5 2.5 0 1 0 0-5a2.5 2.5 0 0 0 0 5z M3 13.5c.5-3 2.5-4 5-4s4.5 1 5 4', tasks:'M2.5 2.5h11v11h-11z M5 8l2 2 4-4',
+  notes:'M3 2.5h10v8l-3 3H3z M10 13.5v-3h3', journal:'M4 2.5h8.5v11H4z M6.5 5.5h4 M6.5 8h4',
+  search:'M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 0 0 0-9z M10.3 10.3l3.2 3.2',
+  hidden:'M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z M3 13L13 3',
+  recovered:'M3 8a5 5 0 1 0 1.5-3.5 M3 2.5v3h3', document:'M4 2h5.5l3 3v9H4z M9.5 2v3h3',
+};
+const glyph = g => `<svg class="g" viewBox="0 0 16 16"><path d="${GLYPH[g] || GLYPH.folder}"/></svg>`;
+
+function status(text) { $('#stext').textContent = text || ''; }
+
+// ---------------------------------------------------------------- dialogs
+function dialog(heading, body, buttons) {
+  return new Promise(resolve => {
+    const d = $('#dialog');
+    d.innerHTML = `<h2>${esc(heading)}</h2><div class="body">${body}</div><div class="buttons"></div>`;
+    (buttons || [['OK', true]]).forEach(([label, value], i) => {
+      const b = document.createElement('button');
+      b.className = 'btn' + (i === 0 ? ' pri' : '');
+      b.textContent = label;
+      b.onclick = () => { $('#shade').classList.remove('on'); resolve(value); };
+      d.lastChild.appendChild(b);
+    });
+    $('#shade').classList.add('on');
+    const first = d.querySelector('textarea') || d.querySelector('.buttons button');
+    if (first) first.focus();
+  });
+}
+const notice = (text, heading) => dialog(heading || 'pstview', esc(text));
+
+/** Show what a request answered: an error or a message in a dialog. Returns false when it failed or was cancelled. */
+async function shown(r) {
+  if (!r || r.cancelled) return false;
+  if (r.error) { await notice(r.error, 'pstview could not do that'); return false; }
+  if (r.status) status(r.status);
+  if (r.message) await notice(r.message);
+  return true;
+}
+
+function viewer(title, html, savable) {
+  $('#vtitle').textContent = title;
+  $('#vframe').srcdoc = html;
+  $('#vsave').classList.toggle('hidden', !savable);
+  $('#viewer').classList.add('on');
+  document.body.classList.add('viewing');
+}
+const textDoc = text => `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><pre style="margin:0;padding:18px 24px;font:12.5px/1.5 ui-monospace,Menlo,'DejaVu Sans Mono',monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:#13233F">${esc(text)}</pre>`;
+$('#vclose').onclick = () => { $('#viewer').classList.remove('on'); document.body.classList.remove('viewing'); $('#vframe').srcdoc = ''; };
+$('#vsave').onclick = async () => shown(await pv.call('savedoc'));
+
+// ---------------------------------------------------------------- mailbox and folder tree
+async function showMailbox(mb) {
+  if (!mb || mb.cancelled) return;
+  if (mb.error) { closeView(); await notice(mb.error, 'Cannot open'); return; }
+  st.mb = mb;
+  st.folder = -1;
+  $('#welcome').classList.add('hidden');
+  $('#main').classList.remove('hidden');
+  $('#source b').textContent = mb.name;
+  $('#source span').textContent = mb.desc;
+  $('#search').value = '';
+  status(mb.status);
+  resetList({count: 0, total: 0, col: 0, desc: true, folder: -1});
+  renderTree();
+  if (mb.start >= 0) await selectFolder(mb.start);
+}
+
+function closeView() {
+  st.mb = null;
+  $('#main').classList.add('hidden');
+  $('#welcome').classList.remove('hidden');
+  status('');
+}
+
+function renderTree() {
+  const f = st.mb.folders, kids = f.map(() => []), roots = [];
+  f.forEach((x, i) => (x.p >= 0 ? kids[x.p] : roots).push(i));
+  let html = '';
+  const walk = (i, depth) => {
+    const x = f[i], has = kids[i].length > 0;
+    html += `<div class="node ${x.g}${x.sel ? '' : ' label'}${i === st.folder ? ' cur' : ''}" data-i="${i}" style="padding-left:${6 + depth * 16}px">` +
+      `<span class="tw">${has ? (x.open ? '▾' : '▸') : ''}</span>${glyph(x.g)}<span>${esc(x.label)}</span></div>`;
+    if (has && x.open) kids[i].forEach(k => walk(k, depth + 1));
+  };
+  roots.forEach(i => walk(i, 0));
+  $('#tree').innerHTML = html;
+}
+
+$('#tree').onclick = e => {
+  const n = e.target.closest('.node');
+  if (!n) return;
+  const i = +n.dataset.i, x = st.mb.folders[i];
+  if (e.target.classList.contains('tw') || !x.sel) { x.open = !x.open; renderTree(); return; }
+  selectFolder(i);
+};
+$('#tree').ondblclick = e => {
+  const n = e.target.closest('.node');
+  if (!n || e.target.classList.contains('tw')) return;
+  const x = st.mb.folders[+n.dataset.i];
+  if (x.sel) { x.open = !x.open; renderTree(); }
+};
+
+async function selectFolder(i) {
+  st.folder = i;
+  renderTree();
+  resetList(await pv.call('folder', i));
+}
+
+// ---------------------------------------------------------------- message list (virtual: rows are fetched as they scroll into view)
+function resetList(r) {
+  if (!r || r.error) { if (r) notice(r.error); return; }
+  st.gen++;
+  st.cache.clear(); st.asked.clear();
+  st.count = r.count; st.total = r.total; st.col = r.col; st.desc = r.desc;
+  st.sel.clear(); st.all = false; st.focus = -1; st.anchor = -1;
+  if (r.status) status(r.status);
+  clearReader();
+  renderHead();
+  $('#spacer').style.height = st.count * ROW + 'px';
+  $('#spacer').style.width = rowWidth() + 'px';
+  $('#rows').scrollTop = 0;
+  $('#empty').textContent = st.count ? '' : st.folder < 0 ? 'Select a folder.' : st.total > 0 ? 'No messages match the search.' : 'This folder is empty.';
+  renderRows();
+}
+
+const rowWidth = () => COLS.reduce((w, c) => w + c[1], 0);
+
+function renderHead() {
+  $('#headrow').innerHTML = COLS.map((c, i) =>
+    `<div class="hc" data-c="${i}" style="width:${c[1]}px">${esc(c[0])}${i === st.col ? (st.desc ? ' ▾' : ' ▴') : ''}<i data-c="${i}"></i></div>`).join('');
+  $('#headrow').style.width = rowWidth() + 40 + 'px';
+}
+
+function renderRows() {
+  const box = $('#rows'), first = Math.max(0, Math.floor(box.scrollTop / ROW) - 8);
+  const last = Math.min(st.count, first + Math.ceil(box.clientHeight / ROW) + 16);
+  let html = '';
+  for (let r = first; r < last; r++) {
+    const chunk = Math.floor(r / CHUNK), rows = st.cache.get(chunk);
+    if (!rows) { fetchChunk(chunk); continue; }
+    const d = rows[r - chunk * CHUNK];
+    if (!d) continue;
+    let cells = '';
+    for (let c = 0; c < COLS.length; c++)
+      cells += `<span class="c${COLS[c][2] ? ' r' : ''}${c === 7 ? ' risk' + d[9] : ''}" style="width:${COLS[c][1]}px">${esc(d[c])}</span>`;
+    html += `<div class="row${st.all || st.sel.has(r) ? ' sel' : ''}" data-r="${r}" style="top:${r * ROW}px">${cells}</div>`;
+  }
+  $('#spacer').innerHTML = html;
+  $('#head').scrollLeft = box.scrollLeft;
+}
+
+async function fetchChunk(chunk) {
+  if (st.asked.has(chunk)) return;
+  st.asked.add(chunk);
+  const gen = st.gen, r = await pv.call('rows', chunk * CHUNK, CHUNK);
+  if (gen !== st.gen || !r || r.error) return;
+  st.cache.set(chunk, r.rows);
+  renderRows();
+}
+/** Row data, fetching its chunk when needed. */
+async function rowData(r) {
+  const chunk = Math.floor(r / CHUNK);
+  while (!st.cache.has(chunk)) { const gen = st.gen; await fetchChunk(chunk); await new Promise(f => setTimeout(f, 10)); if (gen !== st.gen) return null; }
+  return st.cache.get(chunk)[r - chunk * CHUNK];
+}
+
+$('#rows').onscroll = () => renderRows();
+new ResizeObserver(() => { if (st.mb) renderRows(); }).observe($('#rows'));
+
+function focusRow(r, e) {
+  if (r < 0 || r >= st.count) return;
+  const extend = e && e.shiftKey && st.anchor >= 0, toggle = e && modKey(e) && e.type !== 'keydown';
+  if (extend) {
+    st.all = false; st.sel.clear();
+    for (let i = Math.min(st.anchor, r); i <= Math.max(st.anchor, r); i++) st.sel.add(i);
+  } else if (toggle) {
+    if (st.all) { st.all = false; for (let i = 0; i < st.count; i++) st.sel.add(i); }
+    st.sel.has(r) ? st.sel.delete(r) : st.sel.add(r);
+    st.anchor = r;
+  } else { st.all = false; st.sel.clear(); st.sel.add(r); st.anchor = r; }
+  st.focus = r;
+  const box = $('#rows');
+  if (r * ROW < box.scrollTop) box.scrollTop = r * ROW;
+  else if ((r + 1) * ROW > box.scrollTop + box.clientHeight) box.scrollTop = (r + 1) * ROW - box.clientHeight;
+  renderRows();
+  clearTimeout(focusRow.timer);
+  focusRow.timer = setTimeout(() => loadMessage(r), 60);
+}
+
+$('#rows').onmousedown = e => {
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const r = +row.dataset.r;
+  if (e.button === 2 && (st.all || st.sel.has(r))) return; // right-click inside the selection keeps it
+  focusRow(r, e);
+};
+$('#rows').ondblclick = e => { if (e.target.closest('.row')) act('expand'); };
+$('#rows').oncontextmenu = e => {
+  e.preventDefault();
+  if (e.target.closest('.row')) popup(e.clientX, e.clientY, CONTEXT);
+};
+
+$('#headrow').onclick = async e => {
+  const h = e.target.closest('.hc');
+  if (!h || e.target.tagName === 'I') return;
+  resetList(await pv.call('sort', h.dataset.c));
+};
+$('#headrow').onmousedown = e => {
+  if (e.target.tagName !== 'I') return;
+  const c = +e.target.dataset.c, x0 = e.clientX, w0 = COLS[c][1];
+  drag(ev => { COLS[c][1] = Math.max(40, w0 + ev.clientX - x0); renderHead(); $('#spacer').style.width = rowWidth() + 'px'; renderRows(); }, 'col-resize');
+  e.preventDefault();
+};
+
+let searchTimer = 0;
+$('#search').oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => resetList(await pv.call('filter', $('#search').value)), 220);
+};
+
+/** The selection as the model expects it: "all" or view rows "3,4,9". */
+const selection = () => st.all ? 'all' : [...st.sel].sort((a, b) => a - b).join(',');
+const selCount = () => st.all ? st.count : st.sel.size;
+
+// ---------------------------------------------------------------- reading pane
+function clearReader() {
+  st.msg = null; st.msgRow = -1;
+  $('#tabs').classList.add('hidden');
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  $('#hint').classList.remove('hidden');
+  $('#hint').textContent = st.count ? 'Select a message to read it.' : '';
+  $('#mailframe').srcdoc = '';
+}
+
+function showTab(name) {
+  st.tab = name;
+  document.querySelectorAll('#tabs [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.id === 'tab-' + name));
+}
+$('#tabs').onclick = e => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); };
+
+async function loadMessage(r) {
+  const gen = st.gen, m = await pv.call('msg', r);
+  if (gen !== st.gen || r !== st.focus) return;
+  $('#hint').classList.add('hidden');
+  $('#tabs').classList.remove('hidden');
+  if (m.error) { st.msg = null; $('#mailframe').srcdoc = textDoc(m.error); showTab('mail'); return; }
+  st.msg = m; st.msgRow = r;
+  $('#mailframe').srcdoc = m.html;
+  $('#tab-analysis pre').textContent = m.analysis;
+  $('#tab-headers pre').textContent = m.headers || 'This item has no internet headers (internal or sent item).';
+  document.querySelector('#tabs [data-tab=analysis]').classList.toggle('alert', m.risk >= 3);
+  document.querySelector('#tabs [data-tab=atts]').textContent = m.atts.length ? `Attachments (${m.atts.length})` : 'Attachments';
+  $('#tab-atts').innerHTML = m.atts.length
+    ? `<div class="attbar"><button class="btn" data-att="all">Save all attachments&hellip;</button></div><table class="atts">` +
+      m.atts.map((a, i) => `<tr><td>${esc(a.name)}</td><td>${esc(a.size)}</td><td>${esc(a.type)}</td><td><button class="btn" data-att="${i}">Save&hellip;</button>${a.text !== undefined ? ` <button class="btn" data-view="${i}">View text</button>` : ''}</td></tr>`).join('') +
+      `</table><pre class="txt" id="atttext"></pre>`
+    : `<pre class="txt">This message has no attachments.</pre>`;
+  showTab(st.tab);
+}
+
+$('#tab-atts').onclick = async e => {
+  const t = e.target;
+  if (t.dataset.view !== undefined) { $('#atttext').textContent = st.msg.atts[+t.dataset.view].text; return; }
+  if (t.dataset.att === undefined || st.msgRow < 0) return;
+  shown(await (t.dataset.att === 'all' ? pv.call('saveatts', st.msgRow) : pv.call('saveatts', st.msgRow, t.dataset.att)));
+};
+
+// ---------------------------------------------------------------- splitters
+function drag(move, cursor) {
+  const shield = $('#dragshield');
+  shield.style.display = 'block'; shield.style.cursor = cursor;
+  const up = () => { shield.style.display = 'none'; removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
+  addEventListener('mousemove', move); addEventListener('mouseup', up);
+}
+$('#vsplit').onmousedown = e => { drag(ev => document.documentElement.style.setProperty('--left', Math.min(Math.max(ev.clientX, 180), innerWidth - 360) + 'px'), 'col-resize'); e.preventDefault(); };
+$('#hsplit').onmousedown = e => {
+  const right = $('#right').getBoundingClientRect(), top = $('#listwrap').getBoundingClientRect().top;
+  drag(ev => { document.documentElement.style.setProperty('--listh', Math.min(Math.max(ev.clientY - top, 90), right.bottom - top - 120) + 'px'); renderRows(); }, 'row-resize');
+  e.preventDefault();
+};
+
+// ---------------------------------------------------------------- commands
+const need = () => st.mb ? true : false;
+const needRow = () => st.mb && st.focus >= 0;
+
+async function act(name) {
+  closeMenus();
+  switch (name) {
+    case 'open': case 'openfolder': return showMailbox(await pv.call(name));
+    case 'close': await pv.call('close'); return closeView();
+    case 'msg': case 'eml': case 'none': return shown(await pv.call('export', name, selection()));
+    case 'saveatts': return shown(await pv.call('saveatts', st.focus));
+    case 'hash': return shown(await pv.call('hash'));
+    case 'selectall': if (st.count) { st.all = true; st.sel.clear(); renderRows(); } return;
+    case 'expand': {
+      if (!st.msg) return;
+      const big = $('#listwrap').classList.toggle('hidden');
+      $('#searchbar').classList.toggle('hidden', big); $('#hsplit').classList.toggle('hidden', big);
+      $('#expand').textContent = big ? 'Back to list' : 'Enlarge';
+      if (!big) renderRows();
+      return;
+    }
+    case 'hdrreport': case 'props': {
+      const r = await pv.call('doc', name === 'props' ? 'props' : 'hdr', st.focus);
+      if (r.error) return notice(r.error);
+      return viewer(r.title, r.html, true);
+    }
+    case 'analyse': return resetList(await pv.call('analyse'));
+    case 'paste': {
+      const ok = await dialog('Analyse headers', '<div style="margin-bottom:10px">Paste the internet headers of a message (or a whole message) below.</div><textarea id="pasted" spellcheck="false"></textarea>', [['Analyse', true], ['Cancel', false]]);
+      const text = $('#pasted').value;
+      if (!ok || !text.trim()) return;
+      const r = await pv.call('hdrtext', text);
+      if (r.error) return notice(r.error, 'Analyse headers');
+      return viewer(r.title, r.html, true);
+    }
+    case 'hdrfile': {
+      const r = await pv.call('hdrfile');
+      if (r.cancelled) return;
+      if (r.error) return notice(r.error, 'Analyse headers');
+      return viewer(r.title, r.html, true);
+    }
+    case 'recover': {
+      const r = await pv.call('recover');
+      if (r.mailbox) { const open = st.mb.folders.map(f => f.open); st.mb = r.mailbox; st.mb.folders.forEach((f, i) => { if (i < open.length) f.open = open[i]; }); renderTree(); status(r.mailbox.status); }
+      return shown(r.mailbox ? {message: r.message} : r);
+    }
+    case 'integrity': case 'verify': {
+      const r = await pv.call(name);
+      if (r.text === undefined) return shown(r);
+      status(r.status);
+      return viewer(r.title, textDoc(r.text), false);
+    }
+    case 'about':
+      return dialog('pstview', `Version ${esc(st.version)}<br><br>Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.<br><br>` +
+        `Opens PST and OST files (including Outlook 2013+ OSTs and multi-part Acronis exports) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.<br><br>` +
+        `Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.<br><br>` +
+        `Messages are shown by the system web view with scripts and all network access blocked.<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
+  }
+}
+
+const MENUS = [
+  ['File', [
+    ['Open PST / OST / MBOX file…', 'open', null, MOD + 'O'],
+    ['Open folder (Thunderbird / Apple Mail / PST parts)…', 'openfolder'],
+    ['Close mailbox', 'close', need],
+    null,
+    ['Export selected as .msg…', 'msg', need],
+    ['Export selected as .eml…', 'eml', need],
+    ['Save attachments of message…', 'saveatts', needRow],
+    null,
+    ['Report (HTML + CSV) of selection / folder…', 'none', need],
+    ['Show SHA-256 of source file', 'hash', need],
+  ]],
+  ['Message', [
+    ['Enlarge reading pane / back to list', 'expand', needRow, 'Enter'],
+    ['Header analysis report', 'hdrreport', needRow, MOD + 'I'],
+    ['All properties (MAPI, incl. named)', 'props', needRow],
+    null,
+    ['Select all', 'selectall', need, MOD + 'A'],
+  ]],
+  ['Tools', [
+    ['Analyse headers in this folder (risk, spoofing)', 'analyse', need, MOD + 'R'],
+    ['Header analysis report for selected message', 'hdrreport', needRow, MOD + 'I'],
+    ['Analyse pasted headers…', 'paste'],
+    ['Analyse headers from .eml / .txt file…', 'hdrfile'],
+    null,
+    ['Recover deleted items (scan the whole file)…', 'recover', need],
+    null,
+    ['Integrity log', 'integrity', need],
+    ['Verify every block (checksums)…', 'verify', need],
+  ]],
+  ['Help', [['About pstview', 'about']]],
+];
+const CONTEXT = [
+  ['Enlarge reading pane', 'expand', needRow],
+  ['Header analysis report', 'hdrreport', needRow],
+  ['All properties (MAPI)', 'props', needRow],
+  null,
+  ['Export selected as .msg…', 'msg', need],
+  ['Export selected as .eml…', 'eml', need],
+  ['Save attachments…', 'saveatts', needRow],
+  null,
+  ['Report (HTML + CSV) of selection…', 'none', need],
+  ['Select all', 'selectall', need],
+];
+const itemsHtml = items => items.map(it => it === null ? '<hr>' :
+  `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${esc(it[0])}</span>${it[3] ? `<kbd>${esc(it[3])}</kbd>` : ''}</button>`).join('');
+
+$('#menus').innerHTML = MENUS.map((m, i) => `<div class="menu" data-m="${i}"><button>${m[0]}</button><div class="drop"></div></div>`).join('');
+function closeMenus() {
+  document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open'));
+  const c = $('.drop.ctx'); if (c) c.remove();
+}
+function openMenu(m) {
+  closeMenus();
+  m.querySelector('.drop').innerHTML = itemsHtml(MENUS[+m.dataset.m][1]);
+  m.classList.add('open');
+}
+$('#menus').addEventListener('mousedown', e => {
+  const m = e.target.closest('.menu');
+  if (!m || e.target.closest('.drop')) return;
+  m.classList.contains('open') ? closeMenus() : openMenu(m);
+  e.stopPropagation();
+});
+$('#menus').addEventListener('mouseover', e => {
+  const m = e.target.closest('.menu');
+  if (m && !m.classList.contains('open') && $('.menu.open')) openMenu(m);
+});
+function popup(x, y, items) {
+  closeMenus();
+  const d = document.createElement('div');
+  d.className = 'drop ctx';
+  d.innerHTML = itemsHtml(items);
+  document.body.appendChild(d);
+  d.style.left = Math.min(x, innerWidth - d.offsetWidth - 6) + 'px';
+  d.style.top = Math.min(y, innerHeight - d.offsetHeight - 6) + 'px';
+}
+document.addEventListener('mousedown', e => { if (!e.target.closest('.drop')) closeMenus(); });
+document.addEventListener('click', e => {
+  if (e.target.id === 'site') { e.preventDefault(); pv.call('site'); return; }
+  const b = e.target.closest('[data-act]');
+  if (b && !b.disabled) act(b.dataset.act);
+});
+document.addEventListener('contextmenu', e => { if (!e.target.closest('input,textarea,pre,.body')) e.preventDefault(); });
+['dragover', 'drop'].forEach(n => document.addEventListener(n, e => e.preventDefault()));
+
+document.addEventListener('keydown', e => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
+  if (e.key === 'Escape') {
+    if ($('.menu.open') || $('.drop.ctx')) return closeMenus();
+    if ($('#shade').classList.contains('on')) return;
+    if ($('#viewer').classList.contains('on')) return $('#vclose').click();
+    if ($('#listwrap').classList.contains('hidden')) return act('expand');
+    if (typing) { e.target.blur(); $('#rows').focus(); }
+    return;
+  }
+  if (e.key === 'F5') return e.preventDefault();
+  if ($('#shade').classList.contains('on') || $('#viewer').classList.contains('on')) {
+    if (modKey(e) && /^[rR]$/.test(e.key)) e.preventDefault();
+    return;
+  }
+  if (modKey(e)) {
+    const k = e.key.toLowerCase();
+    if (k === 'r') { e.preventDefault(); if (st.mb) act('analyse'); return; }
+    if (k === 'o') { e.preventDefault(); return act('open'); }
+    if (k === 'i') { e.preventDefault(); if (needRow()) act('hdrreport'); return; }
+    if (k === 'f') { e.preventDefault(); if (st.mb) $('#search').focus(); return; }
+    if (k === 'a' && !typing) { e.preventDefault(); return act('selectall'); }
+    return;
+  }
+  if (typing || !st.mb) return;
+  const page = Math.max(1, Math.floor($('#rows').clientHeight / ROW) - 1), f = st.focus;
+  const go = r => { e.preventDefault(); focusRow(Math.min(Math.max(r, 0), st.count - 1), e); };
+  switch (e.key) {
+    case 'ArrowDown': return go(f + 1);
+    case 'ArrowUp': return go(f < 0 ? 0 : f - 1);
+    case 'PageDown': return go(f + page);
+    case 'PageUp': return go(f - page);
+    case 'Home': return go(0);
+    case 'End': return go(st.count - 1);
+    case 'Enter': e.preventDefault(); return act('expand');
+  }
+});
+
+// ---------------------------------------------------------------- start
+/** --selftest: open the source given on the command line, list a folder, render one message, report. */
+async function selftest(r) {
+  const fail = why => pv.call('selftest', 'fail', String(why));
+  const timer = setTimeout(() => fail('timed out'), 30000);
+  try {
+    if (!r.opened) throw 'no source given';
+    if (r.opened.error) throw r.opened.error;
+    if (!st.mb || !st.mb.folders.length) throw 'no folders';
+    if (!st.count) throw 'the start folder lists no messages';
+    const first = await rowData(0);
+    if (!first || first.length !== 10) throw 'bad row data';
+    if (!document.querySelector('.row')) throw 'no rows rendered';
+    focusRow(0);
+    const frame = $('#mailframe');
+    await new Promise((ok, no) => {
+      const t0 = Date.now(), poll = setInterval(() => {
+        if (st.msg && frame.srcdoc === st.msg.html) { clearInterval(poll); ok(); }
+        else if (Date.now() - t0 > 15000) { clearInterval(poll); no('message did not load'); }
+      }, 50);
+    });
+    if (!/Content-Security-Policy/.test(st.msg.html)) throw 'message document has no CSP';
+    await new Promise(ok => setTimeout(ok, 400));
+    let scripted = true;
+    try { scripted = !!frame.contentWindow.eval; } catch (e) { scripted = false; }
+    if (scripted) throw 'message frame is not sandboxed';
+    const sorted = await pv.call('sort', 4);
+    if (sorted.count !== st.count) throw 'sort changed the row count';
+    const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
+    if (!found.count) throw 'search did not find the first message';
+    clearTimeout(timer);
+    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), search and sort answered`);
+  } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
+}
+
+(async () => {
+  const r = await pv.call('ready');
+  st.version = r.version; st.url = r.url;
+  $('#ver').textContent = 'v' + r.version;
+  if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);
+  if (r.opened) await showMailbox(r.opened);
+  if (r.selftest) selftest(r);
+})();
+</script>
+</body>
+</html>

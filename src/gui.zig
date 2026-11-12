@@ -16,6 +16,7 @@ const mime = @import("mime.zig");
 const rtf = @import("rtf.zig");
 const ui = @import("ui.zig");
 const install = @import("install.zig");
+const webview2 = @import("webview2.zig");
 const build_options = @import("build_options");
 const L = w.L;
 
@@ -1349,8 +1350,8 @@ fn createChildren(hwnd: w.HWND) void {
     _ = w.AppendMenuW(file, w.MF_STRING, CMD_EXIT, L("E&xit"));
     const edit = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_OPEN_MSG, L("&Open message\tEnter / double-click"));
-    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SAFE_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
-    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report (in browser)\tCtrl+I"));
+    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SAFE_HTML, L("View &HTML (safe)\tCtrl+H"));
+    _ = w.AppendMenuW(edit, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report\tCtrl+I"));
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_PROPS, L("All &properties (MAPI, incl. named)"));
     _ = w.AppendMenuW(edit, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SELECT_ALL, L("Select &all\tCtrl+A"));
@@ -1399,7 +1400,7 @@ fn listContextMenu() void {
     const n_sel = w.SendMessageW(app.list.?, w.LVM_GETSELECTEDCOUNT, 0, 0);
     const cmd = popupAt(app.hwnd.?, &.{
         .{ .id = CMD_OPEN_MSG, .text = L("&Open message") },
-        .{ .id = CMD_SAFE_HTML, .text = L("View &HTML (safe, in browser)") },
+        .{ .id = CMD_SAFE_HTML, .text = L("View &HTML (safe)") },
         .{ .id = CMD_HDR_REPORT, .text = L("Header analysis &report") },
         .{ .id = CMD_PROPS, .text = L("All &properties (MAPI)") },
         .{ .id = 0, .text = L("") },
@@ -1432,8 +1433,23 @@ fn tempDir(a: Allocator) ![]u8 {
     return dir;
 }
 
+/// Show the HTML file `full` in pstview's own viewer window (WebView2, part of Windows). Without
+/// a WebView2 runtime the page opens in the default browser. Returns true for the in-app viewer.
+fn openHtml(a: Allocator, full: []const u8, title: []const u8) bool {
+    const fw = toWAlloc(a, full) catch return false;
+    in_app: {
+        const dir = tempDir(a) catch break :in_app;
+        const data = toWAlloc(a, std.fmt.allocPrint(a, "{s}\\webview", .{dir}) catch break :in_app) catch break :in_app;
+        const tw = toWAlloc(a, std.fmt.allocPrint(a, "{s} - pstview", .{if (title.len > 0) title else "(no subject)"}) catch break :in_app) catch break :in_app;
+        webview2.setCaptionColors(w.rgb(ui.ink), w.rgb(ui.paper));
+        if (webview2.show(app.gpa, app.hinst, tw, full, data, sc(1100), sc(820))) return true;
+    }
+    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
+    return false;
+}
+
 /// Render the message as a sanitised, self-contained HTML page (scripts and network blocked by CSP)
-/// and open it in the default browser.
+/// and show it in the viewer window.
 fn viewSafeHtml(nid: u32) void {
     reading_nid = nid;
     defer reading_nid = 0;
@@ -1459,8 +1475,7 @@ fn viewSafeHtml(nid: u32) void {
     };
     const full = std.fmt.allocPrint(app.gpa, "{s}\\{s}", .{ dir, name }) catch return;
     app.temp_files.append(app.gpa, full) catch {};
-    const fw = toWAlloc(a, full) catch return;
-    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
+    _ = openHtml(a, full, m.subject(a) catch "");
     setStatus("Safe HTML view opened (scripts and remote content blocked). Temp file is deleted when pstview closes.", .{});
 }
 
@@ -1480,9 +1495,8 @@ fn openHeaderReport(a: Allocator, an: hdrs.Analysis, source: []const u8, tag: []
     };
     const full = std.fmt.allocPrint(app.gpa, "{s}\\{s}", .{ dir, name }) catch return;
     app.temp_files.append(app.gpa, full) catch {};
-    const fw = toWAlloc(a, full) catch return;
-    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
-    setStatus("Header analysis: {s}. Report opened in the browser (made offline; temp file is deleted when pstview closes).", .{an.summary()});
+    _ = openHtml(a, full, "Header analysis");
+    setStatus("Header analysis: {s}. Report made offline; temp file is deleted when pstview closes.", .{an.summary()});
 }
 
 /// Every MAPI property of the item (message, recipients, attachments) as an HTML page.
@@ -1509,9 +1523,8 @@ fn showAllProperties(nid: u32) void {
     };
     const full = std.fmt.allocPrint(app.gpa, "{s}\\{s}", .{ dir, name }) catch return;
     app.temp_files.append(app.gpa, full) catch {};
-    const fw = toWAlloc(a, full) catch return;
-    _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
-    setStatus("All properties of item 0x{x:0>8} opened in the browser (temp file deleted when pstview closes).", .{nid});
+    _ = openHtml(a, full, "All properties");
+    setStatus("All properties of item 0x{x:0>8} opened (temp file deleted when pstview closes).", .{nid});
 }
 
 fn headerReportForMessage(nid: u32) void {
@@ -1588,6 +1601,13 @@ fn cleanupTempFiles() void {
         app.gpa.free(p);
     }
     app.temp_files.deinit(app.gpa);
+    // the viewer's browser profile (best effort: the browser processes may still be closing)
+    if (webview2.used()) {
+        var arena = std.heap.ArenaAllocator.init(app.gpa);
+        defer arena.deinit();
+        const dir = tempDir(arena.allocator()) catch return;
+        Io.Dir.cwd().deleteTree(app.io, std.fmt.allocPrint(arena.allocator(), "{s}\\webview", .{dir}) catch return) catch {};
+    }
 }
 
 // ================================================================ message window
@@ -1720,8 +1740,8 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
 
     const menu = w.CreateMenu().?;
     const mm = w.CreatePopupMenu().?;
-    _ = w.AppendMenuW(mm, w.MF_STRING, MW_HTML, L("View &HTML (safe, in browser)\tCtrl+H"));
-    _ = w.AppendMenuW(mm, w.MF_STRING, MW_HDR, L("Header analysis &report (in browser)\tCtrl+I"));
+    _ = w.AppendMenuW(mm, w.MF_STRING, MW_HTML, L("View &HTML (safe)\tCtrl+H"));
+    _ = w.AppendMenuW(mm, w.MF_STRING, MW_HDR, L("Header analysis &report\tCtrl+I"));
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_PROPS, L("All &properties (MAPI, incl. named)"));
     _ = w.AppendMenuW(mm, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(mm, w.MF_STRING, MW_EXPORT_MSG, L("Export as .&msg..."));

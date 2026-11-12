@@ -5,6 +5,7 @@
 const std = @import("std");
 const w = @import("win.zig");
 const mime = @import("mime.zig");
+const glyph = @import("glyph.zig");
 const L = w.L;
 
 // ---- palette (0xRRGGBB; convert with w.rgb)
@@ -21,7 +22,8 @@ pub const white: u32 = 0xFFFFFF;
 
 // ---- folder glyphs (Segoe Fluent Icons / Segoe MDL2 Assets, both ship with Windows)
 
-pub const Glyph = enum(u8) { folder, mailbox, inbox, sent, drafts, deleted, junk, archive, calendar, contacts, tasks, notes, journal, search, hidden, recovered, document };
+pub const Glyph = glyph.Glyph;
+pub const folderGlyph = glyph.folderGlyph;
 
 const glyph_cp = std.enums.directEnumArray(Glyph, struct { u16, u32 }, 0, .{
     .folder = .{ 0xE8B7, ink_soft },
@@ -43,29 +45,6 @@ const glyph_cp = std.enums.directEnumArray(Glyph, struct { u16, u32 }, 0, .{
     .recovered = .{ 0xE777, 0xC98F00 },
     .document = .{ 0xE8A5, ink_soft },
 });
-
-/// Glyph for a mailbox folder, from its container class and well-known names.
-pub fn folderGlyph(name: []const u8, class: []const u8) Glyph {
-    const ic = std.ascii.startsWithIgnoreCase;
-    if (ic(class, "IPF.Appointment")) return .calendar;
-    if (ic(class, "IPF.Contact")) return .contacts;
-    if (ic(class, "IPF.Task")) return .tasks;
-    if (ic(class, "IPF.StickyNote")) return .notes;
-    if (ic(class, "IPF.Journal")) return .journal;
-    const eq = std.ascii.eqlIgnoreCase;
-    const names = [_]struct { []const u8, Glyph }{
-        .{ "Inbox", .inbox },           .{ "Sent Items", .sent },           .{ "Sent", .sent },
-        .{ "Sent Mail", .sent },        .{ "Outbox", .sent },               .{ "Drafts", .drafts },
-        .{ "Deleted Items", .deleted }, .{ "Trash", .deleted },             .{ "Bin", .deleted },
-        .{ "Junk Email", .junk },       .{ "Junk E-mail", .junk },          .{ "Junk", .junk },
-        .{ "Spam", .junk },             .{ "Archive", .archive },           .{ "Calendar", .calendar },
-        .{ "Contacts", .contacts },     .{ "Tasks", .tasks },               .{ "Notes", .notes },
-        .{ "Journal", .journal },       .{ "Recoverable Items", .deleted }, .{ "Search Folders", .search },
-        .{ "Finder", .search },
-    };
-    for (names) |n| if (eq(name, n[0])) return n[1];
-    return .folder;
-}
 
 /// Image list with every `Glyph`, `px` pixels square, drawn in its palette colour with alpha.
 pub fn glyphList(px: i32) ?w.HIMAGELIST {

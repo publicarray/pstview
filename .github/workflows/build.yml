@@ -16,13 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # pstview.exe (GUI) + pstx.exe
+          # pstview.exe (Win32 GUI) + pstx.exe
           - os: windows-latest
             platform: windows
-          # pstx, static (musl) so it runs on any distribution
+          # pstx static (musl), so it runs on any distribution; pstview (GTK + WebKitGTK, loaded
+          # at run time) against glibc
           - os: ubuntu-latest
             platform: linux
-          # pstx; built natively for the SDK (libiconv)
+          # pstview.app (Cocoa + WKWebView) + pstx, arm64 and x64
           - os: macos-latest
             platform: macos
     runs-on: ${{ matrix.os }}
@@ -44,7 +45,9 @@ jobs:
           case "${{ matrix.platform }}" in
             windows) zig build -Drelease ;;
             linux)   zig build -Drelease -Dtarget=x86_64-linux-musl
-                     zig build -Drelease -Dtarget=aarch64-linux-musl --prefix zig-out-arm64 ;;
+                     zig build -Drelease -Dtarget=aarch64-linux-musl --prefix zig-out-arm64
+                     zig build -Drelease -Dtarget=x86_64-linux-gnu --prefix zig-out-gui
+                     zig build -Drelease -Dtarget=aarch64-linux-gnu --prefix zig-out-gui-arm64 ;;
             macos)   zig build -Drelease
                      zig build -Drelease -Dtarget=x86_64-macos --prefix zig-out-x64 ;;
           esac
@@ -55,6 +58,22 @@ jobs:
       - name: Local time matches Windows (Australia/Sydney)
         if: matrix.platform != 'windows'
         run: TZ=Australia/Sydney bash testdata/smoke.sh zig-out/bin/pstx | diff -u testdata/smoke-sydney.txt -
+
+      # The GUI opens the demo mailbox, lists a folder, renders a message in the system web view
+      # (sandboxed frame), searches and sorts, then exits 0.
+      - name: GUI self-test (Linux, GTK + WebKitGTK under Xvfb)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 xvfb xauth
+          # WebKit starts its web process in a bubblewrap sandbox, which needs unprivileged user
+          # namespaces; Ubuntu 24.04 runners restrict them by default
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/demo-mailbox
+
+      - name: GUI self-test (macOS, Cocoa + WKWebView)
+        if: matrix.platform == 'macos'
+        run: perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,17 +86,24 @@ jobs:
           mkdir -p dist
           pack() { # pack <name> <files...>: zip on Windows, tar.gz elsewhere
             local name="pstview-$ver-$1"; shift
-            mkdir -p "stage/$name" && cp "$@" README.md "stage/$name/"
+            mkdir -p "stage/$name" && cp -R "$@" README.md "stage/$name/"
             if [ "${{ matrix.platform }}" = windows ]; then
               (cd stage && 7z a -tzip "../dist/$name.zip" "$name" > /dev/null)
             else
               tar -C stage -czf "dist/$name.tar.gz" "$name"
             fi
           }
+          linux_files="packaging/linux/pstview.desktop packaging/linux/install.sh"
+          cp design/icon-256.png pstview.png
           case "${{ matrix.platform }}" in
             windows) pack windows-x64 zig-out/bin/pstview.exe zig-out/bin/pstx.exe ;;
-            linux)   pack linux-x64 zig-out/bin/pstx; pack linux-arm64 zig-out-arm64/bin/pstx ;;
-            macos)   pack macos-arm64 zig-out/bin/pstx; pack macos-x64 zig-out-x64/bin/pstx ;;
+            linux)   pack linux-x64 zig-out-gui/bin/pstview zig-out/bin/pstx pstview.png $linux_files
+                     pack linux-arm64 zig-out-gui-arm64/bin/pstview zig-out-arm64/bin/pstx pstview.png $linux_files ;;
+            macos)   plain=${ver#v}
+                     sh packaging/macos/make-app.sh zig-out/bin "$plain" app-arm64
+                     sh packaging/macos/make-app.sh zig-out-x64/bin "$plain" app-x64
+                     pack macos-arm64 app-arm64/pstview.app zig-out/bin/pstx
+                     pack macos-x64 app-x64/pstview.app zig-out-x64/bin/pstx ;;
           esac
           ls -l dist
 

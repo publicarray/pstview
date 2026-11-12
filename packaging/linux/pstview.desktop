@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=pstview
+GenericName=Mailbox viewer
+Comment=Read-only viewer and exporter for Outlook PST / OST files and MBOX mailboxes
+Exec=pstview %F
+Icon=pstview
+Terminal=false
+Categories=Office;Email;Utility;
+MimeType=application/vnd.ms-outlook-pst;application/mbox;

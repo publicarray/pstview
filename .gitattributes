@@ -1,2 +1,7 @@
 # Test data must stay byte-exact on every platform: no CRLF conversion on Windows checkouts.
 testdata/** -text
+
+# Shell scripts and packaging files run on macOS / Linux: always LF.
+*.sh text eol=lf
+packaging/** text eol=lf
+src/webui.html text eol=lf

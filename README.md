@@ -1,6 +1,6 @@
 # pstview
 
-A small, native viewer and exporter for Outlook `.pst` and `.ost` files (including Acronis M365 mailbox backups and Outlook 2013+ cached-mode OSTs) and MBOX mailboxes (Google Takeout, Thunderbird, Apple Mail), written in Zig with no third-party dependencies. The GUI runs on Windows; the command-line tool runs on Windows, macOS and Linux.
+A small, native viewer and exporter for Outlook `.pst` and `.ost` files (including Acronis M365 mailbox backups and Outlook 2013+ cached-mode OSTs) and MBOX mailboxes (Google Takeout, Thunderbird, Apple Mail), written in Zig with no third-party dependencies. The GUI and the command-line tool run on Windows, macOS and Linux.
 
 Built for evidence work: sources are opened **read-only** and never written to, and nothing (no index or cache file) is created next to them. Outlook, by contrast, modifies a data file as soon as it opens one. Outlook also locks its OSTs while running: close Outlook or work on a copy.
 
@@ -12,12 +12,22 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 
 | File | Platforms | What it is |
 |---|---|---|
-| `pstview.exe` | Windows | GUI. Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST, OST, MBOX file or mail folder onto the window, use *File > Open*, or pass it on the command line. |
+| `pstview.exe` | Windows | GUI (Win32). Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST, OST, MBOX file or mail folder onto the window, use *File > Open*, or pass it on the command line. |
+| `pstview.app` / `pstview` | macOS, Linux | GUI with the same functions: a native window (Cocoa / GTK) with native open and save dialogs, its content shown by the system web view (WKWebView / WebKitGTK). Use *File > Open*, pass files on the command line, or (macOS) *Open With*. |
 | `pstx` / `pstx.exe` | Windows, macOS, Linux | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. Takes a `.pst`, `.ost`, MBOX file or folder of MBOX mailboxes (`hidden`, `verify` and `recover` are PST/OST only; `analyse` takes a `.eml` or a text file of headers). |
 
-Release downloads: `pstview-<version>-windows-x64.zip` (both programs), and `pstx` as `linux-x64`, `linux-arm64` (static, any distribution), `macos-arm64` and `macos-x64` archives. The macOS binary is not notarised: after unpacking, run `xattr -d com.apple.quarantine pstx` (or allow it in *System Settings > Privacy & Security*).
+Release downloads, each with both programs: `pstview-<version>-windows-x64.zip`, and `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64` archives.
 
-## Portable or installed
+* **macOS:** `pstview.app` and `pstx`. They are ad-hoc signed, not notarised: after unpacking, run `xattr -dr com.apple.quarantine pstview.app pstx` (or allow them in *System Settings > Privacy & Security*). Needs macOS 11 or later; nothing else to install.
+* **Linux:** `pstview` needs GTK 3 and WebKitGTK, which most desktops already have (`sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0`, `sudo dnf install gtk3 webkit2gtk4.1`, `sudo pacman -S gtk3 webkit2gtk-4.1`); it says so when they are missing. `pstx` is static and runs on any distribution. `./install.sh` copies both to `~/.local/bin` and adds a menu entry (`./install.sh --uninstall` removes them); running them from the unpacked folder works too.
+
+## HTML mail and reports
+
+HTML messages, the header analysis report and the property list are shown inside pstview by the web view that is part of the operating system - no bundled browser engine: **WebView2** on Windows (included in Windows 11; *Message > View HTML*, Ctrl+H), **WKWebView** on macOS and **WebKitGTK** on Linux (the reading pane). Without a WebView2 runtime, Windows falls back to the default browser.
+
+What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The web view itself runs the page with scripts disabled (a sandboxed frame on macOS / Linux), refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
+
+## Portable or installed (Windows)
 
 pstview runs straight from the release zip; portable use writes nothing to the PC. On start it offers to install for the current user, and *Help > Install pstview for this user* does the same at any time. Ticking *Don't offer this again* keeps it portable and stores only that choice (`HKCU\Software\pstview`, value `NoInstallPrompt`). Installing:
 
@@ -116,9 +126,13 @@ zig build -Drelease      # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
 zig build                # Debug build
 zig build test           # unit tests
 zig build -Drelease -Dtarget=x86_64-linux-musl   # static pstx for Linux, from any host
+zig build -Drelease -Dtarget=x86_64-linux-gnu    # pstview + pstx for Linux (glibc), from any host
+zig build -Drelease -Dtarget=aarch64-macos       # pstview + pstx for macOS, from any host
 ```
 
-On macOS and Linux `zig build` produces `pstx` only (the GUI is Windows-only). It uses libc for the local time zone and `iconv` (macOS: `libiconv`, loaded at run time), so every target can be cross-compiled from any host, e.g. `-Dtarget=aarch64-macos`. CI builds all platforms and checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`).
+On macOS and Linux `pstx` uses libc for the local time zone and `iconv` (macOS: `libiconv`, loaded at run time). The GUI there loads its platform libraries at run time as well (the Objective-C runtime, AppKit and WebKit on macOS; GTK 3 and WebKitGTK on Linux), so nothing but libc is linked, no SDK or development package is needed, and every target can be cross-compiled from any host. A static musl build cannot load shared libraries and therefore produces `pstx` only. `packaging/macos/make-app.sh` wraps the macOS binaries in `pstview.app`.
+
+CI builds all platforms, checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`), and runs the GUI self-test on macOS and Linux: `pstview --selftest <source>` opens the source, lists a folder, renders a message in the web view, searches and sorts, then exits 0 or 1.
 
 The version shown in *Help > About* and by `pstx --version` comes from `git describe`; set `release_version` in `build.zig` before tagging a release (a tag that does not match it fails the build).
 
@@ -132,14 +146,15 @@ The version shown in *Help > About* and by `pstx --version` comes from `git desc
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
 * `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
-* `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings.
-* `src/ui.zig`: visual style (palette from `design/`, folder glyphs, welcome screen, task dialogs); `src/install.zig`: per-user install / uninstall.
+* `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings; `src/webview2.zig`: the in-app HTML viewer (WebView2).
+* `src/gui_posix.zig`, `src/webapp.zig`, `src/webui.html`: macOS / Linux GUI - entry point, the model that answers the page's requests, and the page; `src/gui_mac.zig` (Cocoa, WKWebView) and `src/gui_gtk.zig` (GTK 3, WebKitGTK): window, web view and dialogs.
+* `src/ui.zig`: Windows visual style (palette from `design/`, folder glyphs, welcome screen, task dialogs); `src/glyph.zig`: folder-to-glyph mapping shared by the GUIs; `src/install.zig`: per-user install / uninstall (Windows); `packaging/`: macOS app bundle, Linux desktop entry and installer.
 * `src/cli.zig`: command line; `src/platform.zig`: local time zone and charset conversion per OS (Win32 or libc).
 * `testdata/`: the fictional demo mailbox, its generator and the cross-platform smoke test.
 
 ## Releases
 
-GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on Windows and uploads the zip as a workflow artifact. Pushing a `v*` tag also publishes a GitHub release with `pstview-<tag>-windows-x64.zip` and `SHA256SUMS.txt`:
+GitHub Actions (`.github/workflows/build.yml`) builds every push and pull request on Windows, macOS and Linux and uploads the archives as workflow artifacts. Pushing a `v*` tag also publishes a GitHub release with the archives for every platform and `SHA256SUMS.txt`:
 
 ```
 git tag v0.1.0
