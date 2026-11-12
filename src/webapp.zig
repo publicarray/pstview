@@ -10,7 +10,8 @@
 //!
 //! Message HTML is shown by the page in a sandboxed frame (no scripts) from the sanitised,
 //! CSP-locked document of render.zig; the shells also refuse every navigation, so nothing in a
-//! message can reach the network.
+//! message can reach the network. The page is light or dark (the system's theme, or the View
+//! menu's); the documents are rendered to match, with HTML mail bodies always on white.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -90,6 +91,8 @@ const App = struct {
     start_paths: []const []const u8 = &.{},
     page_ready: bool = false,
     selftest: bool = false,
+    /// The page's theme (it follows the system or the View menu); documents are rendered to match.
+    dark: bool = false,
 };
 
 var app: App = undefined;
@@ -251,6 +254,10 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
     if (eq(u8, cmd, "close")) {
         closeSource();
         app.shell.setTitle("pstview");
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "theme")) {
+        app.dark = eq(u8, argAt(rest, 0), "dark");
         return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "site")) {
@@ -655,7 +662,7 @@ fn preview(a: Allocator, out: *List, nid: u32) Error!void {
         analysis = try std.fmt.allocPrint(a, "{s}\n(Tools > Analyse headers in this folder adds internal-name impersonation checks.)\n", .{analysis});
     try out.print(a, "{{\"nid\":\"0x{x:0>8}\",\"risk\":{d}", .{ nid, @intFromEnum(an.risk) });
     try kv(a, out, false, "subject", m.subject(a) catch "");
-    try kv(a, out, false, "html", lightOnly(a, doc));
+    try kv(a, out, false, "html", themed(a, doc));
     try kv(a, out, false, "analysis", analysis);
     try kv(a, out, false, "headers", m.pc.string(a, pst.Tag.transport_headers) catch "");
     try out.appendSlice(a, ",\"atts\":[");
@@ -675,9 +682,12 @@ fn preview(a: Allocator, out: *List, nid: u32) Error!void {
     try out.appendSlice(a, "]}");
 }
 
-/// The page is light (paper and ink): keep documents shown inside it light as well.
-fn lightOnly(a: Allocator, doc: []const u8) []const u8 {
-    return std.mem.replaceOwned(u8, a, doc, "color-scheme:light dark", "color-scheme:light") catch doc;
+/// The documents follow the system theme on their own (`color-scheme:light dark`, or a
+/// `prefers-color-scheme` media query in the reports). Inside the page they must follow the
+/// page's theme instead, which the View menu can set against the system: pin them to it.
+fn themed(a: Allocator, doc: []const u8) []const u8 {
+    const scheme = std.mem.replaceOwned(u8, a, doc, "color-scheme:light dark", if (app.dark) "color-scheme:dark" else "color-scheme:light") catch return doc;
+    return std.mem.replaceOwned(u8, a, scheme, "@media (prefers-color-scheme:dark)", if (app.dark) "@media all" else "@media not all") catch scheme;
 }
 
 /// A report for the viewer; remembered so that "Save as" can write it.
@@ -688,7 +698,7 @@ fn showDoc(a: Allocator, out: *List, title: []const u8, file_name: []const u8, d
     app.last_doc_name = app.gpa.dupe(u8, file_name) catch &.{};
     try out.append(a, '{');
     try kv(a, out, true, "title", title);
-    try kv(a, out, false, "html", lightOnly(a, doc));
+    try kv(a, out, false, "html", themed(a, doc));
     try out.append(a, '}');
 }
 

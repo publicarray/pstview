@@ -25,6 +25,8 @@ Release downloads, each with both programs: `pstview-<version>-windows-x64.zip`,
 
 HTML messages, the header analysis report and the property list are shown inside pstview by the web view that is part of the operating system - no bundled browser engine: **WebView2** on Windows (included in Windows 11; *Message > View HTML*, Ctrl+H), **WKWebView** on macOS and **WebKitGTK** on Linux (the reading pane). Without a WebView2 runtime, Windows falls back to the default browser.
 
+**Light and dark.** pstview follows the system's light or dark setting on every platform, and *View > Theme* switches it for the session (the choice is not stored: pstview writes no settings). HTML mail is always laid out on white inside the themed window - mail is written for a white page and often sets only its text colour, which would leave black text on a dark ground; plain-text mail and the reports follow the theme.
+
 What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The web view itself runs the page with scripts disabled (a sandboxed frame on macOS / Linux), refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
 
 ## Portable or installed (Windows)

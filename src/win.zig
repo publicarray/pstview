@@ -593,6 +593,40 @@ pub extern "dwmapi" fn DwmSetWindowAttribute(hwnd: HWND, attr: u32, value: *cons
 pub const DWMWA_BORDER_COLOR: u32 = 34;
 pub const DWMWA_CAPTION_COLOR: u32 = 35;
 pub const DWMWA_TEXT_COLOR: u32 = 36;
+pub extern "kernel32" fn GetProcAddress(module: ?*anyopaque, name: [*:0]const u8) callconv(WINAPI) ?*const anyopaque;
+pub extern "user32" fn GetMenuBarInfo(hwnd: HWND, object: i32, item: i32, info: *MENUBARINFO) callconv(WINAPI) BOOL;
+pub extern "user32" fn GetMenuItemInfoW(menu: HMENU, item: u32, by_position: BOOL, info: *MENUITEMINFOW) callconv(WINAPI) BOOL;
+pub extern "user32" fn CheckMenuRadioItem(menu: HMENU, first: u32, last: u32, check: u32, flags: u32) callconv(WINAPI) BOOL;
+pub extern "user32" fn DrawMenuBar(hwnd: HWND) callconv(WINAPI) BOOL;
+pub extern "user32" fn RedrawWindow(hwnd: HWND, rc: ?*const RECT, rgn: ?*anyopaque, flags: u32) callconv(WINAPI) BOOL;
+pub extern "user32" fn GetWindowDC(hwnd: ?HWND) callconv(WINAPI) ?HDC;
+pub extern "user32" fn MapWindowPoints(from: ?HWND, to: ?HWND, points: *RECT, count: u32) callconv(WINAPI) i32;
+pub extern "comctl32" fn SetWindowSubclass(hwnd: HWND, proc: *const fn (HWND, u32, WPARAM, LPARAM, usize, usize) callconv(WINAPI) LRESULT, id: usize, ref: usize) callconv(WINAPI) BOOL;
+pub extern "comctl32" fn DefSubclassProc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESULT;
+pub const MENUBARINFO = extern struct { cbSize: u32 = @sizeOf(MENUBARINFO), rcBar: RECT = undefined, hMenu: ?HMENU = null, hwndMenu: ?HWND = null, flags: i32 = 0 };
+pub const MENUITEMINFOW = extern struct {
+    cbSize: u32 = @sizeOf(MENUITEMINFOW),
+    fMask: u32 = 0,
+    fType: u32 = 0,
+    fState: u32 = 0,
+    wID: u32 = 0,
+    hSubMenu: ?HMENU = null,
+    hbmpChecked: ?*anyopaque = null,
+    hbmpUnchecked: ?*anyopaque = null,
+    dwItemData: usize = 0,
+    dwTypeData: ?[*]u16 = null,
+    cch: u32 = 0,
+    hbmpItem: ?*anyopaque = null,
+};
+/// NMCUSTOMDRAW up to the device context (the rest is not used).
+pub const NMCUSTOMDRAW = extern struct { hdr: NMHDR, dwDrawStage: u32, hdc: ?HDC };
+pub const NM_CUSTOMDRAW: i32 = -12;
+pub const WM_SETTINGCHANGE: u32 = 0x001A;
+pub const WM_NCPAINT: u32 = 0x0085;
+pub const WM_NCACTIVATE: u32 = 0x0086;
+pub const SB_SETBKCOLOR: u32 = 0x2001;
+pub const SBT_NOBORDERS: usize = 0x100;
+pub const LVM_GETHEADER = LVM_FIRST + 31;
 pub extern "uxtheme" fn SetWindowTheme(hwnd: HWND, app_name: ?[*:0]const u16, id_list: ?[*:0]const u16) callconv(WINAPI) i32;
 
 pub const HBITMAP = *opaque {};

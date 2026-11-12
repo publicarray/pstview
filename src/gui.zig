@@ -50,6 +50,9 @@ const CMD_INSTALL = 21;
 const CMD_UNINSTALL = 22;
 const CMD_DEFAULT_APPS = 23;
 const CMD_CLOSE = 24;
+const CMD_THEME_SYSTEM = 30;
+const CMD_THEME_LIGHT = 31;
+const CMD_THEME_DARK = 32;
 
 /// Posted after the main window is shown: offer to install (first run of the portable exe).
 const WM_APP_FIRST_RUN = w.WM_APP + 1;
@@ -111,6 +114,12 @@ const App = struct {
     /// No message selected: the preview is hidden and a hint painted in its place.
     preview_empty: bool = true,
     help_menu: ?w.HMENU = null,
+    view_menu: ?w.HMENU = null,
+    /// View > Theme: follow Windows (the default; not stored - pstview writes no settings), or fixed.
+    theme: enum { system, light, dark } = .system,
+    /// Text of the status bar parts (the parts are owner-drawn in the theme's colours).
+    status_text: [3][512]u8 = undefined,
+    status_len: [3]usize = .{ 0, 0, 0 },
 
     file: ?store.Store = null,
     file_path: []u8 = &.{},
@@ -416,8 +425,13 @@ fn setStatus(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn setStatusPart(part: usize, s: []const u8) void {
-    var wb: [512]u16 = undefined;
-    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, part, @intCast(@intFromPtr(toW(&wb, s))));
+    const n = @min(s.len, app.status_text[part].len);
+    @memcpy(app.status_text[part][0..n], s[0..n]);
+    app.status_len[part] = n;
+    const st = app.status.?;
+    _ = w.SendMessageW(st, w.SB_SETTEXTW, part | w.SBT_OWNERDRAW | w.SBT_NOBORDERS, 0);
+    _ = w.InvalidateRect(st, null, 1);
+    _ = w.UpdateWindow(st); // progress texts are set while the window is busy
 }
 
 fn statusParts() void {
@@ -426,13 +440,21 @@ fn statusParts() void {
     const seal = sc(118);
     const parts = [3]i32{ seal, @max(seal + sc(200), @min(seal + sc(460), rc.right - sc(260))), -1 };
     _ = w.SendMessageW(app.status.?, w.SB_SETPARTS, parts.len, @intCast(@intFromPtr(&parts)));
-    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, SB_PART_SEAL | w.SBT_OWNERDRAW, 0);
+    _ = w.SendMessageW(app.status.?, w.SB_SETTEXTW, SB_PART_SEAL | w.SBT_OWNERDRAW | w.SBT_NOBORDERS, 0);
 }
 
-/// The status bar's first part: an amber dot and "Read-only" - the one amber mark in the window.
+/// A status bar part. The first is an amber dot and "Read-only" - the one amber mark in the
+/// window; the others are text.
 fn drawSeal(di: *const w.DRAWITEMSTRUCT) void {
     const dc = di.hDC orelse return;
     const r = di.rcItem;
+    _ = w.FillRect(dc, &r, app.pane_brush);
+    if (di.itemID != SB_PART_SEAL and di.itemID < app.status_text.len) {
+        _ = w.SetBkMode(dc, w.TRANSPARENT);
+        if (app.font) |f| _ = w.SelectObject(dc, @ptrCast(f));
+        paintText(dc, null, ui.ink_soft, app.status_text[di.itemID][0..app.status_len[di.itemID]], .{ .left = r.left + sc(8), .top = r.top, .right = r.right - sc(4), .bottom = r.bottom }, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_END_ELLIPSIS);
+        return;
+    }
     const d = sc(8);
     const cy = @divTrunc(r.top + r.bottom, 2);
     const x = r.left + sc(8);
@@ -1298,18 +1320,14 @@ fn createChildren(hwnd: w.HWND) void {
     app.white_brush = w.CreateSolidBrush(w.rgb(ui.white));
     app.hairline_brush = w.CreateSolidBrush(w.rgb(ui.hairline));
 
-    // ink title bar (Windows 11; ignored elsewhere)
-    const cap = w.rgb(ui.ink);
-    const cap_text = w.rgb(ui.paper);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
 
     app.tree = w.CreateWindowExW(0, L("SysTreeView32"), null, w.WS_CHILD | w.WS_TABSTOP | w.TVS_HASBUTTONS | w.TVS_LINESATROOT | w.TVS_SHOWSELALWAYS | w.TVS_FULLROWSELECT, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_TREE), app.hinst, null);
     app.search = w.CreateWindowExW(0, L("EDIT"), null, w.WS_CHILD | w.WS_TABSTOP | w.ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_SEARCH), app.hinst, null);
     app.list = w.CreateWindowExW(0, L("SysListView32"), null, w.WS_CHILD | w.WS_TABSTOP | w.LVS_REPORT | w.LVS_SHOWSELALWAYS | w.LVS_OWNERDATA, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_LIST), app.hinst, null);
     app.preview = w.CreateWindowExW(0, L(w.RICHEDIT_CLASS), null, w.WS_CHILD | w.WS_TABSTOP | w.WS_VSCROLL | w.ES_MULTILINE | w.ES_READONLY | w.ES_AUTOVSCROLL | w.ES_NOHIDESEL, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_PREVIEW), app.hinst, null);
-    app.status = w.CreateWindowExW(0, L("msctls_statusbar32"), null, w.WS_CHILD | w.WS_VISIBLE | w.SBARS_SIZEGRIP, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_STATUS), app.hinst, null);
+    app.status = w.CreateWindowExW(0, L("msctls_statusbar32"), null, w.WS_CHILD | w.WS_VISIBLE, 0, 0, 0, 0, hwnd, @ptrFromInt(ID_STATUS), app.hinst, null);
+    _ = w.SetWindowTheme(app.status.?, L(""), L("")); // unthemed: takes the palette's background colour
+    _ = w.SetWindowSubclass(app.list.?, ui.listSubclass, 1, 0);
 
     inline for (.{ app.tree, app.search, app.list, app.status }) |h| _ = w.SendMessageW(h.?, w.WM_SETFONT, @intFromPtr(font), 1);
     _ = w.SendMessageW(app.preview.?, w.WM_SETFONT, @intFromPtr(mono), 1);
@@ -1355,6 +1373,11 @@ fn createChildren(hwnd: w.HWND) void {
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_PROPS, L("All &properties (MAPI, incl. named)"));
     _ = w.AppendMenuW(edit, w.MF_SEPARATOR, 0, null);
     _ = w.AppendMenuW(edit, w.MF_STRING, CMD_SELECT_ALL, L("Select &all\tCtrl+A"));
+    const view = w.CreatePopupMenu().?;
+    _ = w.AppendMenuW(view, w.MF_STRING, CMD_THEME_SYSTEM, L("Theme: follow &Windows"));
+    _ = w.AppendMenuW(view, w.MF_STRING, CMD_THEME_LIGHT, L("Theme: &light"));
+    _ = w.AppendMenuW(view, w.MF_STRING, CMD_THEME_DARK, L("Theme: &dark"));
+    app.view_menu = view;
     const tools = w.CreatePopupMenu().?;
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_ANALYSE, L("&Analyse headers in this folder (risk, spoofing)\tCtrl+R"));
     _ = w.AppendMenuW(tools, w.MF_STRING, CMD_HDR_REPORT, L("Header analysis &report for selected message\tCtrl+I"));
@@ -1374,13 +1397,69 @@ fn createChildren(hwnd: w.HWND) void {
     app.help_menu = help;
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(file), L("&File"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(edit), L("&Message"));
+    _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(view), L("&View"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(tools), L("&Tools"));
     _ = w.AppendMenuW(menu, w.MF_POPUP, @intFromPtr(help), L("&Help"));
     _ = w.SetMenu(hwnd, menu);
 
     ui.createWelcome(hwnd, app.hinst, app.scale, "v" ++ build_options.version, .{ CMD_OPEN, CMD_OPEN_FOLDER, CMD_INSTALL });
+    applyTheme();
     if (ui.welcome.hwnd) |h| _ = w.ShowWindow(h, w.SW_SHOW);
     w.DragAcceptFiles(hwnd, 1);
+}
+
+/// Ink title bar with paper text (Windows 11; ignored elsewhere).
+fn inkCaption(hwnd: w.HWND) void {
+    const cap = w.rgb(ui.bar);
+    const cap_text = w.rgb(ui.on_bar);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
+    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
+}
+
+/// Put the main window in the light or dark theme: palette, brushes, the controls' colours and
+/// visual styles, menu bar and the text already shown. Message windows take the theme when opened.
+fn applyTheme() void {
+    const dark = switch (app.theme) {
+        .system => ui.systemDark(),
+        .light => false,
+        .dark => true,
+    };
+    ui.setDark(dark);
+    rtf.dark = dark;
+    ui.menu_font = app.font;
+    inline for (.{ &app.pane_brush, &app.white_brush, &app.hairline_brush }) |b| if (b.*) |h| {
+        _ = w.DeleteObject(@ptrCast(h));
+    };
+    app.pane_brush = w.CreateSolidBrush(w.rgb(ui.pane));
+    app.white_brush = w.CreateSolidBrush(w.rgb(ui.white));
+    app.hairline_brush = w.CreateSolidBrush(w.rgb(ui.hairline));
+    const hwnd = app.hwnd.?;
+    inkCaption(hwnd);
+
+    const tree = app.tree.?;
+    ui.themeControl(tree, L("Explorer"));
+    _ = w.SendMessageW(tree, w.TVM_SETBKCOLOR, 0, @intCast(w.rgb(ui.pane)));
+    _ = w.SendMessageW(tree, w.TVM_SETTEXTCOLOR, 0, @intCast(w.rgb(ui.ink)));
+    if (ui.glyphList(sc(16))) |il| _ = w.SendMessageW(tree, w.TVM_SETIMAGELIST, 0, @bitCast(@intFromPtr(il)));
+
+    const list = app.list.?;
+    ui.themeControl(list, L("Explorer"));
+    _ = w.SendMessageW(list, w.LVM_SETBKCOLOR, 0, @intCast(w.rgb(ui.white)));
+    _ = w.SendMessageW(list, w.LVM_SETTEXTBKCOLOR, 0, @intCast(w.rgb(ui.white)));
+    _ = w.SendMessageW(list, w.LVM_SETTEXTCOLOR, 0, @intCast(w.rgb(ui.ink)));
+    const header: usize = @bitCast(w.SendMessageW(list, w.LVM_GETHEADER, 0, 0));
+    if (header != 0) ui.themeHeader(@ptrFromInt(header));
+
+    _ = w.SendMessageW(app.preview.?, w.EM_SETBKGNDCOLOR, 0, @intCast(w.rgb(ui.white)));
+    ui.themeControl(app.preview.?, null);
+    _ = w.SendMessageW(app.status.?, w.SB_SETBKCOLOR, 0, @intCast(w.rgb(ui.pane)));
+    ui.retheme();
+
+    if (app.view_menu) |m| _ = w.CheckMenuRadioItem(m, CMD_THEME_SYSTEM, CMD_THEME_DARK, CMD_THEME_SYSTEM + @as(u32, @intFromEnum(app.theme)), 0);
+    _ = w.DrawMenuBar(hwnd);
+    _ = w.RedrawWindow(hwnd, null, null, 0x1 | 0x4 | 0x80 | 0x400); // INVALIDATE | ERASE | ALLCHILDREN | FRAME
+    if (!app.preview_empty) showPreview(); // the text's colours belong to the theme
 }
 
 fn popupAt(hwnd: w.HWND, items: []const struct { id: usize, text: [:0]const u16 }) usize {
@@ -1441,7 +1520,7 @@ fn openHtml(a: Allocator, full: []const u8, title: []const u8) bool {
         const dir = tempDir(a) catch break :in_app;
         const data = toWAlloc(a, std.fmt.allocPrint(a, "{s}\\webview", .{dir}) catch break :in_app) catch break :in_app;
         const tw = toWAlloc(a, std.fmt.allocPrint(a, "{s} - pstview", .{if (title.len > 0) title else "(no subject)"}) catch break :in_app) catch break :in_app;
-        webview2.setCaptionColors(w.rgb(ui.ink), w.rgb(ui.paper));
+        webview2.setCaptionColors(w.rgb(ui.bar), w.rgb(ui.on_bar));
         if (webview2.show(app.gpa, app.hinst, tw, full, data, sc(1100), sc(820))) return true;
     }
     _ = w.ShellExecuteW(app.hwnd, L("open"), fw, null, null, w.SW_SHOW);
@@ -1707,11 +1786,18 @@ fn mwCreate(hwnd: w.HWND, st: *MsgWin) void {
     _ = w.SendMessageW(st.atts.?, w.LVM_SETEXTENDEDLISTVIEWSTYLE, 0, @intCast(w.LVS_EX_FULLROWSELECT | w.LVS_EX_DOUBLEBUFFER));
     _ = w.SetWindowTheme(st.atts.?, L("Explorer"), null);
     _ = w.SendMessageW(st.body.?, w.EM_SETMARGINS, w.EC_LEFTMARGIN | w.EC_RIGHTMARGIN, @intCast((@as(u32, @intCast(sc(16))) << 16) | @as(u32, @intCast(sc(16)))));
-    const cap = w.rgb(ui.ink);
-    const cap_text = w.rgb(ui.paper);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
-    _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
+    inkCaption(hwnd);
+    // theme (as it is when the window opens)
+    _ = w.SendMessageW(st.header.?, w.EM_SETBKGNDCOLOR, 0, @intCast(w.rgb(ui.white)));
+    _ = w.SendMessageW(st.atts.?, w.LVM_SETBKCOLOR, 0, @intCast(w.rgb(ui.white)));
+    _ = w.SendMessageW(st.atts.?, w.LVM_SETTEXTBKCOLOR, 0, @intCast(w.rgb(ui.white)));
+    _ = w.SendMessageW(st.atts.?, w.LVM_SETTEXTCOLOR, 0, @intCast(w.rgb(ui.ink)));
+    _ = w.SetWindowSubclass(st.atts.?, ui.listSubclass, 1, 0);
+    if (ui.dark) {
+        inline for (.{ st.header, st.atts, st.body }) |h| ui.themeControl(h.?, null);
+        const hdr: usize = @bitCast(w.SendMessageW(st.atts.?, w.LVM_GETHEADER, 0, 0));
+        if (hdr != 0) ui.themeHeader(@ptrFromInt(hdr));
+    }
     const cols = [_]struct { t: [:0]const u16, wd: i32 }{ .{ .t = L("Part / attachment"), .wd = 420 }, .{ .t = L("Size"), .wd = 90 }, .{ .t = L("Type"), .wd = 200 }, .{ .t = L("Preview"), .wd = 160 } };
     for (cols, 0..) |c, i| {
         var col: w.LVCOLUMNW = .{ .mask = w.LVCF_TEXT | w.LVCF_WIDTH | w.LVCF_SUBITEM, .cx = sc(c.wd), .pszText = c.t, .iSubItem = @intCast(i) };
@@ -1901,7 +1987,20 @@ fn mwCommand(st: *MsgWin, id: u16) void {
 }
 
 fn mwProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI) w.LRESULT {
+    if (ui.menuBarMessage(hwnd, msg, lp)) |r| return r;
     switch (msg) {
+        w.WM_NCPAINT, w.WM_NCACTIVATE => {
+            const r = w.DefWindowProcW(hwnd, msg, wp, lp);
+            ui.paintMenuBarLine(hwnd);
+            return r;
+        },
+        w.WM_ERASEBKGND => {
+            // shows through the 1-pixel gaps between the panes as separators
+            var rc: w.RECT = undefined;
+            _ = w.GetClientRect(hwnd, &rc);
+            _ = w.FillRect(@ptrFromInt(wp), &rc, app.hairline_brush);
+            return 1;
+        },
         w.WM_CREATE => {
             const cs: *const ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(lp)));
             const st: *MsgWin = @ptrCast(@alignCast(cs.*.?));
@@ -1974,7 +2073,8 @@ fn imgProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
             defer _ = w.EndPaint(hwnd, &ps);
             var rc: w.RECT = undefined;
             _ = w.GetClientRect(hwnd, &rc);
-            _ = w.FillRect(hdc, &rc, w.GetSysColorBrush(@intCast(w.COLOR_BTNFACE)));
+            _ = w.FillRect(hdc, &rc, app.pane_brush);
+            _ = w.SetTextColor(hdc, w.rgb(ui.ink_soft));
             const parent = w.GetParent(hwnd) orelse return 0;
             const st = mwFromHwnd(parent) orelse return 0;
             const img = st.image orelse return 0;
@@ -2216,6 +2316,10 @@ fn onCommand(id: u16, code: u16) void {
         CMD_OPEN => openDialog(),
         CMD_OPEN_FOLDER => openFolderDialog(),
         CMD_CLOSE => closePst(),
+        CMD_THEME_SYSTEM, CMD_THEME_LIGHT, CMD_THEME_DARK => {
+            app.theme = @enumFromInt(id - CMD_THEME_SYSTEM);
+            applyTheme();
+        },
         CMD_INSTALL => offerInstall(true),
         CMD_DEFAULT_APPS => openDefaultApps(),
         CMD_UNINSTALL => if (uninstallInteractive(app.hwnd)) {
@@ -2311,7 +2415,24 @@ fn onNotify(nm: *w.NMHDR) LRESULT {
 const LRESULT = w.LRESULT;
 
 fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI) LRESULT {
+    if (ui.menuBarMessage(hwnd, msg, lp)) |r| return r;
     switch (msg) {
+        w.WM_NCPAINT, w.WM_NCACTIVATE => {
+            const r = w.DefWindowProcW(hwnd, msg, wp, lp);
+            ui.paintMenuBarLine(hwnd);
+            return r;
+        },
+        w.WM_ERASEBKGND => {
+            var rc: w.RECT = undefined;
+            _ = w.GetClientRect(hwnd, &rc);
+            _ = w.FillRect(@ptrFromInt(wp), &rc, app.white_brush);
+            return 1;
+        },
+        w.WM_SETTINGCHANGE => {
+            // Windows switched between light and dark
+            if (app.theme == .system and app.tree != null and ui.systemDark() != ui.dark) applyTheme();
+            return 0;
+        },
         w.WM_CREATE => {
             app.hwnd = hwnd;
             createChildren(hwnd);

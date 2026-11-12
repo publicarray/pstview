@@ -20,7 +20,6 @@ const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 
 extern "ole32" fn CoTaskMemAlloc(usize) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GetProcAddress(?*anyopaque, [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 
 const hkey_local_machine: w.HKEY = @ptrFromInt(0xFFFFFFFF80000002);
 const key_wow64_32key: u32 = 0x0200;
@@ -209,7 +208,7 @@ fn startEnvironment(data_dir: [:0]const u16) bool {
     var buf: [700]u16 = undefined;
     const dll = w.LoadLibraryW(runtimeDll(&buf) orelse return false) orelse return false;
     const create: *const fn (c_int, c_int, [*:0]const u16, *Options, *Handler) callconv(.winapi) HRESULT =
-        @ptrCast(@alignCast(GetProcAddress(dll, "CreateWebViewEnvironmentWithOptionsInternal") orelse return false));
+        @ptrCast(@alignCast(w.GetProcAddress(dll, "CreateWebViewEnvironmentWithOptionsInternal") orelse return false));
     const installed_runtime = 0;
     return create(1, installed_runtime, data_dir, &options, &on_environment) >= 0;
 }

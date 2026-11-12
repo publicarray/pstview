@@ -10,9 +10,19 @@
 :root{
   --ink:#13233F; --ink-soft:#606C80; --paper:#F6F4EE; --amber:#F5B700; --pane:#F9F8F5;
   --hairline:#E3E1DA; --muted:#7C8595; --white:#fff; --select:#E4E9F2; --hover:#EFEEE9;
+  /* the ink bar and what is written on it are the same in both themes */
+  --bar:#13233F; --on-bar:#F6F4EE; --primary:#13233F; --primary-hover:#1d3257; --disabled:#b3b8c2;
+  --shadow:#13233f2e; --recovered:#C98F00;
   --left:290px; --listh:45%;
   --ui:system-ui,-apple-system,"Segoe UI","Cantarell","Noto Sans",sans-serif;
   --mono:ui-monospace,Menlo,"DejaVu Sans Mono","Liberation Mono",Consolas,monospace;
+}
+/* dark: the same roles on an ink ground (--ink is the text colour, --white the content ground) */
+:root[data-theme=dark]{
+  --ink:#E4E8EF; --ink-soft:#A3ADBD; --paper:#131B29; --pane:#161F2E; --hairline:#263247;
+  --muted:#8490A3; --white:#0F1724; --select:#22324D; --hover:#1B2637;
+  --bar:#0B1422; --primary:#2F4B7C; --primary-hover:#3A5990; --disabled:#566176;
+  --shadow:#00000080; --recovered:#E0A91A; color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -22,19 +32,19 @@ button{font:inherit;color:inherit}
 svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
 
 /* menu bar */
-#bar{flex:none;height:38px;background:var(--ink);color:var(--paper);display:flex;align-items:center;padding:0 10px 0 16px;gap:2px}
+#bar{flex:none;height:38px;background:var(--bar);color:var(--on-bar);display:flex;align-items:center;padding:0 10px 0 16px;gap:2px}
 #bar .mark{font-weight:600;letter-spacing:.14em;font-size:12px;margin-right:18px;display:flex;align-items:center;gap:9px}
 #bar .mark i{width:8px;height:8px;border-radius:50%;background:var(--amber);display:block}
 .menu{position:relative}
-.menu>button{background:none;border:0;padding:6px 11px;border-radius:5px;color:var(--paper)}
+.menu>button{background:none;border:0;padding:6px 11px;border-radius:5px;color:var(--on-bar)}
 .menu>button:hover,.menu.open>button{background:#ffffff1c}
 .drop{display:none;position:absolute;top:32px;left:0;min-width:300px;background:var(--white);color:var(--ink);
-  border:1px solid var(--hairline);border-radius:8px;padding:5px;z-index:50;box-shadow:0 8px 28px #13233f2e}
+  border:1px solid var(--hairline);border-radius:8px;padding:5px;z-index:50;box-shadow:0 8px 28px var(--shadow)}
 .menu.open .drop,.drop.ctx{display:block}
 .drop.ctx{position:fixed;top:0;left:0}
 .drop button{display:flex;width:100%;text-align:left;background:none;border:0;padding:6px 12px;border-radius:5px;gap:24px;justify-content:space-between;white-space:nowrap}
 .drop button:hover:not(:disabled){background:var(--select)}
-.drop button:disabled{color:#b3b8c2}
+.drop button:disabled{color:var(--disabled)}
 .drop button kbd{font:inherit;color:var(--muted)}
 .drop hr{border:0;border-top:1px solid var(--hairline);margin:5px 6px}
 
@@ -49,7 +59,7 @@ svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .node:hover{background:var(--hover)}
 .node.cur{background:var(--select)}
 .node svg{color:var(--ink-soft)}
-.node.recovered svg{color:#C98F00}
+.node.recovered svg{color:var(--recovered)}
 .node.mailbox svg{color:var(--ink)}
 .node .tw{width:16px;height:30px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:9px}
 .node.label{color:var(--ink-soft)}
@@ -83,7 +93,7 @@ svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 #tabs button.on{color:var(--ink);border-bottom-color:var(--ink);font-weight:600}
 #tabs button.alert:after{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);margin-left:7px}
 #tabs .fill{flex:1}
-#tabs .act{border:1px solid var(--hairline);border-radius:6px;padding:3px 10px;margin:0 0 5px 6px}
+#tabs .act{border:1px solid var(--hairline);border-radius:6px;padding:3px 10px;margin:0 0 5px 6px;color:var(--ink)}
 #tabs .act:hover{background:var(--hover)}
 .tab{flex:1;min-height:0;display:none;overflow:auto}
 .tab.on{display:block}
@@ -93,10 +103,10 @@ pre.txt{margin:0;padding:14px 24px;font:12.5px/1.5 var(--mono);white-space:pre-w
 table.atts{border-collapse:collapse;margin:10px 24px;-webkit-user-select:text;user-select:text}
 table.atts td{padding:6px 18px 6px 0;border-bottom:1px solid var(--hairline)}
 table.atts td:nth-child(2),table.atts td:nth-child(3){color:var(--muted)}
-.btn{border:1px solid var(--hairline);background:var(--white);border-radius:6px;padding:4px 12px}
+.btn{border:1px solid var(--hairline);background:var(--white);color:var(--ink);border-radius:6px;padding:4px 12px}
 .btn:hover{background:var(--hover)}
-.btn.pri{background:var(--ink);border-color:var(--ink);color:var(--paper)}
-.btn.pri:hover{background:#1d3257}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:var(--on-bar)}
+.btn.pri:hover{background:var(--primary-hover)}
 .attbar{padding:12px 24px 0}
 
 /* welcome */
@@ -118,22 +128,22 @@ table.atts td:nth-child(2),table.atts td:nth-child(3){color:var(--muted)}
 #viewer.on{display:flex}
 /* scrollbars of the list would otherwise show through the report */
 body.viewing #main{visibility:hidden}
-#viewer header{flex:none;height:38px;background:var(--ink);color:var(--paper);display:flex;align-items:center;padding:0 10px 0 16px;gap:8px}
+#viewer header{flex:none;height:38px;background:var(--bar);color:var(--on-bar);display:flex;align-items:center;padding:0 10px 0 16px;gap:8px}
 #viewer header span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#viewer header button{background:none;border:1px solid #ffffff40;border-radius:6px;padding:3px 12px;color:var(--paper)}
+#viewer header button{background:none;border:1px solid #ffffff40;border-radius:6px;padding:3px 12px;color:var(--on-bar)}
 #viewer header button:hover{background:#ffffff1c}
 #viewer iframe{flex:1;min-height:0}
 #shade{position:fixed;inset:0;background:#13233f47;z-index:70;display:none;align-items:center;justify-content:center}
 #shade.on{display:flex}
-#dialog{background:var(--white);border-radius:10px;padding:22px 24px 18px;min-width:380px;max-width:min(680px,90vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px #13233f4d}
+#dialog{background:var(--white);color:var(--ink);border-radius:10px;padding:22px 24px 18px;min-width:380px;max-width:min(680px,90vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px var(--shadow)}
 #dialog h2{margin:0 0 10px;font-size:16px;font-weight:600}
 #dialog .body{white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;cursor:text}
-#dialog textarea{width:560px;max-width:80vw;height:300px;font:12px/1.4 var(--mono);border:1px solid var(--hairline);border-radius:6px;padding:8px;outline:0;resize:none;-webkit-user-select:text;user-select:text}
+#dialog textarea{width:560px;max-width:80vw;height:300px;font:12px/1.4 var(--mono);border:1px solid var(--hairline);background:var(--pane);color:var(--ink);border-radius:6px;padding:8px;outline:0;resize:none;-webkit-user-select:text;user-select:text}
 #dialog .buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 #dialog a{color:var(--ink)}
 #busy{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;cursor:progress}
 #busy.on{display:flex}
-#busy div{background:var(--ink);color:var(--paper);padding:10px 20px;border-radius:8px;display:flex;align-items:center;gap:12px}
+#busy div{background:var(--primary);color:var(--on-bar);padding:10px 20px;border-radius:8px;display:flex;align-items:center;gap:12px}
 #busy i{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:pulse 1s ease-in-out infinite alternate}
 @keyframes pulse{from{opacity:.25}to{opacity:1}}
 #dragshield{position:fixed;inset:0;z-index:80;display:none}
@@ -250,6 +260,21 @@ const glyph = g => `<svg class="g" viewBox="0 0 16 16"><path d="${GLYPH[g] || GL
 
 function status(text) { $('#stext').textContent = text || ''; }
 
+// ---------------------------------------------------------------- theme (follows the system unless chosen in View)
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+const theme = { choice: 'system', dark: false };
+/** Apply the theme to the page and tell the model, which themes the documents it renders. */
+async function applyTheme() {
+  const dark = theme.choice === 'system' ? darkQuery.matches : theme.choice === 'dark';
+  const changed = dark !== theme.dark;
+  theme.dark = dark;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  await pv.call('theme', dark ? 'dark' : 'light');
+  if (changed && st.msg && st.focus >= 0) loadMessage(st.focus); // re-render the open message
+}
+darkQuery.addEventListener('change', () => applyTheme());
+const themeLabel = (name, label) => () => (theme.choice === name ? '\u2713  ' : '\u2003  ') + label;
+
 // ---------------------------------------------------------------- dialogs
 function dialog(heading, body, buttons) {
   return new Promise(resolve => {
@@ -285,7 +310,8 @@ function viewer(title, html, savable) {
   $('#viewer').classList.add('on');
   document.body.classList.add('viewing');
 }
-const textDoc = text => `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><pre style="margin:0;padding:18px 24px;font:12.5px/1.5 ui-monospace,Menlo,'DejaVu Sans Mono',monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:#13233F">${esc(text)}</pre>`;
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const textDoc = text => `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><body style="margin:0;background:${cssVar('--white')}"><pre style="margin:0;padding:18px 24px;font:12.5px/1.5 ui-monospace,Menlo,'DejaVu Sans Mono',monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:${cssVar('--ink')}">${esc(text)}</pre>`;
 $('#vclose').onclick = () => { $('#viewer').classList.remove('on'); document.body.classList.remove('viewing'); $('#vframe').srcdoc = ''; };
 $('#vsave').onclick = async () => shown(await pv.call('savedoc'));
 
@@ -548,6 +574,7 @@ async function act(name) {
       return viewer(r.title, r.html, true);
     }
     case 'analyse': return resetList(await pv.call('analyse'));
+    case 'theme-system': case 'theme-light': case 'theme-dark': theme.choice = name.slice(6); return applyTheme();
     case 'paste': {
       const ok = await dialog('Analyse headers', '<div style="margin-bottom:10px">Paste the internet headers of a message (or a whole message) below.</div><textarea id="pasted" spellcheck="false"></textarea>', [['Analyse', true], ['Cancel', false]]);
       const text = $('#pasted').value;
@@ -601,6 +628,11 @@ const MENUS = [
     null,
     ['Select all', 'selectall', need, MOD + 'A'],
   ]],
+  ['View', [
+    [themeLabel('system', 'Theme: follow the system'), 'theme-system'],
+    [themeLabel('light', 'Theme: light'), 'theme-light'],
+    [themeLabel('dark', 'Theme: dark'), 'theme-dark'],
+  ]],
   ['Tools', [
     ['Analyse headers in this folder (risk, spoofing)', 'analyse', need, MOD + 'R'],
     ['Header analysis report for selected message', 'hdrreport', needRow, MOD + 'I'],
@@ -627,7 +659,7 @@ const CONTEXT = [
   ['Select all', 'selectall', need],
 ];
 const itemsHtml = items => items.map(it => it === null ? '<hr>' :
-  `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${esc(it[0])}</span>${it[3] ? `<kbd>${esc(it[3])}</kbd>` : ''}</button>`).join('');
+  `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${esc(typeof it[0] === 'function' ? it[0]() : it[0])}</span>${it[3] ? `<kbd>${esc(it[3])}</kbd>` : ''}</button>`).join('');
 
 $('#menus').innerHTML = MENUS.map((m, i) => `<div class="menu" data-m="${i}"><button>${m[0]}</button><div class="drop"></div></div>`).join('');
 function closeMenus() {
@@ -727,6 +759,7 @@ async function selftest(r) {
       }, 50);
     });
     if (!/Content-Security-Policy/.test(st.msg.html)) throw 'message document has no CSP';
+    if (/color-scheme:light dark/.test(st.msg.html)) throw 'message document was not themed';
     await new Promise(ok => setTimeout(ok, 400));
     let scripted = true;
     try { scripted = !!frame.contentWindow.eval; } catch (e) { scripted = false; }
@@ -743,6 +776,7 @@ async function selftest(r) {
 (async () => {
   const r = await pv.call('ready');
   st.version = r.version; st.url = r.url;
+  await applyTheme();
   $('#ver').textContent = 'v' + r.version;
   if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);
   if (r.opened) await showMailbox(r.opened);

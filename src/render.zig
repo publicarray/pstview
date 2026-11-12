@@ -303,7 +303,11 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
     var st: SanitizeStats = .{};
     const html_utf8 = try m.bodyHtmlUtf8(a);
     var body_html: []const u8 = "";
-    if (html_utf8.len > 0) {
+    // HTML mail is written for a white page and often sets only one of text and background
+    // colour: it is always shown on white (black text on a dark theme would be unreadable).
+    // Plain text follows the theme.
+    const is_html = html_utf8.len > 0;
+    if (is_html) {
         body_html = try sanitize(a, html_utf8, m, &st);
     } else {
         var tmp: List = .empty;
@@ -334,6 +338,7 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
         \\.att{border:1px solid #8886;border-radius:4px;padding:6px;font-size:12px;max-width:260px}
         \\.att img{display:block;max-width:240px;max-height:180px;margin-bottom:4px}
         \\.mail{padding:14px 18px;overflow-wrap:anywhere}
+        \\.mail.html{background:#fff;color:#000;color-scheme:light}
         \\.mail img[data-blocked-src]{outline:1px dashed #c33;min-width:20px;min-height:12px}
         \\pre.plain{white-space:pre-wrap;font:13px/1.4 Consolas,ui-monospace,monospace}
         \\</style></head><body><div class="hdr"><h1>
@@ -393,7 +398,7 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
         }
         try out.appendSlice(a, "</div>");
     }
-    try out.appendSlice(a, "<div class=\"mail\">");
+    try out.appendSlice(a, if (is_html) "<div class=\"mail html\">" else "<div class=\"mail\">");
     try out.appendSlice(a, body_html);
     try out.appendSlice(a, "</div></body></html>\n");
     return out.toOwnedSlice(a);

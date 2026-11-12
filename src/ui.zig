@@ -1,6 +1,10 @@
 //! Visual style for the GUI, after design/design-philosophy.md ("Sealed Signal"): an ink-navy
 //! ground, paper-white for content, and a single amber accent used only where something needs
 //! attention. Flat colour, hairline separators, generous spacing; native controls throughout.
+//!
+//! Two themes share the roles below: light (ink text on paper) and dark (paper text on an ink
+//! ground). `setDark` switches; windows repaint from the palette, controls get the system's dark
+//! visuals through `themeControl`, and the menu bar is painted here (`menuBarMessage`).
 
 const std = @import("std");
 const w = @import("win.zig");
@@ -8,42 +12,194 @@ const mime = @import("mime.zig");
 const glyph = @import("glyph.zig");
 const L = w.L;
 
-// ---- palette (0xRRGGBB; convert with w.rgb)
-pub const ink: u32 = 0x13233F;
-pub const ink_soft: u32 = 0x606C80;
-pub const paper: u32 = 0xF6F4EE;
+// ---- palette (0xRRGGBB; convert with w.rgb). The names are roles: `ink` is the text colour and
+// `white` the content ground in either theme.
+pub var ink: u32 = 0x13233F;
+pub var ink_soft: u32 = 0x606C80;
+pub var paper: u32 = 0xF6F4EE;
 pub const amber: u32 = 0xF5B700;
 /// Left pane and chrome: a lighter paper.
-pub const pane: u32 = 0xF9F8F5;
-pub const hairline: u32 = 0xE3E1DA;
+pub var pane: u32 = 0xF9F8F5;
+pub var hairline: u32 = 0xE3E1DA;
 /// Secondary text.
-pub const muted: u32 = 0x7C8595;
-pub const white: u32 = 0xFFFFFF;
+pub var muted: u32 = 0x7C8595;
+pub var white: u32 = 0xFFFFFF;
+/// Selected / hot item in chrome painted here (the menu bar).
+pub var select: u32 = 0xE4E9F2;
+/// Title bars: ink with paper text in both themes.
+pub var bar: u32 = 0x13233F;
+pub const on_bar: u32 = 0xF6F4EE;
+/// Amber dark enough to read as a glyph on the current ground.
+pub var amber_glyph: u32 = 0xC98F00;
+
+pub var dark = false;
+
+pub fn setDark(on: bool) void {
+    dark = on;
+    const p: [10]u32 = if (on)
+        .{ 0xE4E8EF, 0xA3ADBD, 0x131B29, 0x161F2E, 0x263247, 0x8490A3, 0x0F1724, 0x22324D, 0x0B1422, 0xE0A91A }
+    else
+        .{ 0x13233F, 0x606C80, 0xF6F4EE, 0xF9F8F5, 0xE3E1DA, 0x7C8595, 0xFFFFFF, 0xE4E9F2, 0x13233F, 0xC98F00 };
+    ink, ink_soft, paper, pane, hairline, muted, white, select, bar, amber_glyph = p;
+    loadDarkApi();
+    // popup menus, scroll bars and common dialogs of this process follow the theme
+    if (set_preferred_app_mode) |f| _ = f(if (on) 2 else 3); // ForceDark / ForceLight
+    if (flush_menu_themes) |f| f();
+}
+
+/// True when Windows is set to dark mode for apps.
+pub fn systemDark() bool {
+    var key: ?w.HKEY = null;
+    if (w.RegOpenKeyExW(w.HKEY_CURRENT_USER, L("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), 0, w.KEY_READ, &key) != 0) return false;
+    defer _ = w.RegCloseKey(key.?);
+    var light: u32 = 1;
+    var cb: u32 = 4;
+    if (w.RegQueryValueExW(key.?, L("AppsUseLightTheme"), null, null, @ptrCast(&light), &cb) != 0) return false;
+    return light == 0;
+}
+
+// The dark visuals of the common controls are reached through uxtheme exports that have ordinals
+// but no names (Windows 10 1809 and later; absent on older systems, where controls stay light).
+var allow_dark_for_window: ?*const fn (w.HWND, w.BOOL) callconv(.winapi) w.BOOL = null;
+var set_preferred_app_mode: ?*const fn (c_int) callconv(.winapi) c_int = null;
+var flush_menu_themes: ?*const fn () callconv(.winapi) void = null;
+var dark_api_loaded = false;
+
+fn loadDarkApi() void {
+    if (dark_api_loaded) return;
+    dark_api_loaded = true;
+    const ux = w.LoadLibraryW(L("uxtheme.dll")) orelse return;
+    if (w.GetProcAddress(ux, @ptrFromInt(133))) |p| allow_dark_for_window = @ptrCast(@alignCast(p));
+    if (w.GetProcAddress(ux, @ptrFromInt(135))) |p| set_preferred_app_mode = @ptrCast(@alignCast(p));
+    if (w.GetProcAddress(ux, @ptrFromInt(136))) |p| flush_menu_themes = @ptrCast(@alignCast(p));
+}
+
+/// Give a control the system visuals of the current theme (scroll bars, selection, button faces).
+/// `light_theme` is the visual style used in the light theme (null = the control's default).
+pub fn themeControl(h: w.HWND, light_theme: ?[*:0]const u16) void {
+    loadDarkApi();
+    if (allow_dark_for_window) |f| _ = f(h, @intFromBool(dark));
+    _ = w.SetWindowTheme(h, if (dark) L("DarkMode_Explorer") else light_theme, null);
+    _ = w.SendMessageW(h, 0x031A, 0, 0); // WM_THEMECHANGED
+}
+
+/// A list view's header: dark visuals; its text colour comes from `headerTextColor`.
+pub fn themeHeader(header: w.HWND) void {
+    loadDarkApi();
+    if (allow_dark_for_window) |f| _ = f(header, @intFromBool(dark));
+    _ = w.SetWindowTheme(header, if (dark) L("DarkMode_ItemsView") else null, null);
+}
+
+/// Subclass procedure for a list view: paints its header's text in the theme's text colour
+/// (the dark header visuals keep the system's black text otherwise).
+pub fn listSubclass(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM, _: usize, _: usize) callconv(w.WINAPI) w.LRESULT {
+    if (msg == w.WM_NOTIFY and dark) {
+        const nm: *const w.NMHDR = @ptrFromInt(@as(usize, @bitCast(lp)));
+        if (nm.code == w.NM_CUSTOMDRAW) {
+            const header: usize = @bitCast(w.SendMessageW(hwnd, w.LVM_GETHEADER, 0, 0));
+            if (nm.hwndFrom != null and @intFromPtr(nm.hwndFrom.?) == header) {
+                const cd: *const w.NMCUSTOMDRAW = @ptrCast(@alignCast(nm));
+                if (cd.dwDrawStage == 0x1) return 0x20; // CDDS_PREPAINT -> CDRF_NOTIFYITEMDRAW
+                if (cd.dwDrawStage == 0x10001) { // CDDS_ITEMPREPAINT
+                    if (cd.hdc) |dc| _ = w.SetTextColor(dc, w.rgb(ink));
+                    return 0;
+                }
+            }
+        }
+    }
+    return w.DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// ---- menu bar (dark theme): Windows paints it light unless the window draws it itself, through
+// the undocumented WM_UAHDRAWMENU / WM_UAHDRAWMENUITEM messages.
+
+const WM_UAHDRAWMENU = 0x0091;
+const WM_UAHDRAWMENUITEM = 0x0092;
+const UahMenu = extern struct { hmenu: ?w.HMENU, hdc: ?w.HDC, flags: u32 };
+const UahDrawMenuItem = extern struct { dis: w.DRAWITEMSTRUCT, um: UahMenu, position: c_int };
+const objid_menu: i32 = -3;
+
+/// Font for the menu bar items (the GUI's text font).
+pub var menu_font: ?w.HFONT = null;
+
+fn fillColor(dc: w.HDC, rc: w.RECT, color: u32) void {
+    const br = w.CreateSolidBrush(w.rgb(color)) orelse return;
+    _ = w.FillRect(dc, &rc, br);
+    _ = w.DeleteObject(@ptrCast(br));
+}
+
+/// Handles the menu bar drawing messages in the dark theme; null = not handled (pass on).
+pub fn menuBarMessage(hwnd: w.HWND, msg: u32, lp: w.LPARAM) ?w.LRESULT {
+    if (!dark or (msg != WM_UAHDRAWMENU and msg != WM_UAHDRAWMENUITEM) or lp == 0) return null;
+    if (msg == WM_UAHDRAWMENU) {
+        const um: *const UahMenu = @ptrFromInt(@as(usize, @bitCast(lp)));
+        var mbi: w.MENUBARINFO = .{};
+        var wr: w.RECT = undefined;
+        if (w.GetMenuBarInfo(hwnd, objid_menu, 0, &mbi) == 0 or w.GetWindowRect(hwnd, &wr) == 0) return null;
+        const rc: w.RECT = .{ .left = mbi.rcBar.left - wr.left, .top = mbi.rcBar.top - wr.top, .right = mbi.rcBar.right - wr.left, .bottom = mbi.rcBar.bottom - wr.top };
+        fillColor(um.hdc orelse return null, rc, pane);
+        return 0;
+    }
+    const d: *const UahDrawMenuItem = @ptrFromInt(@as(usize, @bitCast(lp)));
+    const dc = d.um.hdc orelse return null;
+    var text: [128]u16 = undefined;
+    var mii: w.MENUITEMINFOW = .{ .fMask = 0x40, .dwTypeData = &text, .cch = text.len - 1 }; // MIIM_STRING
+    if (w.GetMenuItemInfoW(d.um.hmenu orelse return null, @intCast(d.position), 1, &mii) == 0) return null;
+    const state = d.dis.itemState;
+    const hot = (state & (0x40 | 0x1)) != 0; // ODS_HOTLIGHT | ODS_SELECTED
+    const off = (state & (0x2 | 0x4 | 0x80)) != 0; // ODS_GRAYED | ODS_DISABLED | ODS_INACTIVE
+    fillColor(dc, d.dis.rcItem, if (hot) select else pane);
+    _ = w.SetBkMode(dc, w.TRANSPARENT);
+    _ = w.SetTextColor(dc, w.rgb(if (off) muted else ink));
+    if (menu_font) |f| _ = w.SelectObject(dc, @ptrCast(f));
+    var rc = d.dis.rcItem;
+    const hide_prefix: u32 = if ((state & 0x100) != 0) 0x100000 else 0; // ODS_NOACCEL -> DT_HIDEPREFIX
+    _ = w.DrawTextW(dc, &text, @intCast(mii.cch), &rc, w.DT_CENTER | w.DT_SINGLELINE | w.DT_VCENTER | hide_prefix);
+    return 0;
+}
+
+/// The one-pixel line under the menu bar, which the system paints light: call after the default
+/// handling of WM_NCPAINT and WM_NCACTIVATE.
+pub fn paintMenuBarLine(hwnd: w.HWND) void {
+    if (!dark) return;
+    var mbi: w.MENUBARINFO = .{};
+    if (w.GetMenuBarInfo(hwnd, objid_menu, 0, &mbi) == 0) return;
+    var client: w.RECT = undefined;
+    var wr: w.RECT = undefined;
+    _ = w.GetClientRect(hwnd, &client);
+    _ = w.MapWindowPoints(hwnd, null, &client, 2);
+    if (w.GetWindowRect(hwnd, &wr) == 0) return;
+    const line: w.RECT = .{ .left = client.left - wr.left, .top = client.top - wr.top - 1, .right = client.right - wr.left, .bottom = client.top - wr.top };
+    const dc = w.GetWindowDC(hwnd) orelse return;
+    fillColor(dc, line, pane);
+    _ = w.ReleaseDC(hwnd, dc);
+}
 
 // ---- folder glyphs (Segoe Fluent Icons / Segoe MDL2 Assets, both ship with Windows)
 
 pub const Glyph = glyph.Glyph;
 pub const folderGlyph = glyph.folderGlyph;
 
-const glyph_cp = std.enums.directEnumArray(Glyph, struct { u16, u32 }, 0, .{
-    .folder = .{ 0xE8B7, ink_soft },
-    .mailbox = .{ 0xE7B8, ink },
-    .inbox = .{ 0xE715, ink_soft },
-    .sent = .{ 0xE724, ink_soft },
-    .drafts = .{ 0xE70F, ink_soft },
-    .deleted = .{ 0xE74D, ink_soft },
-    .junk = .{ 0xE7BA, ink_soft },
-    .archive = .{ 0xE7B8, ink_soft },
-    .calendar = .{ 0xE787, ink_soft },
-    .contacts = .{ 0xE77B, ink_soft },
-    .tasks = .{ 0xE9D5, ink_soft },
-    .notes = .{ 0xE70B, ink_soft },
-    .journal = .{ 0xE81C, ink_soft },
-    .search = .{ 0xE721, ink_soft },
-    .hidden = .{ 0xED1A, ink_soft },
+const Tone = enum { soft, strong, amber };
+const glyph_cp = std.enums.directEnumArray(Glyph, struct { u16, Tone }, 0, .{
+    .folder = .{ 0xE8B7, .soft },
+    .mailbox = .{ 0xE7B8, .strong },
+    .inbox = .{ 0xE715, .soft },
+    .sent = .{ 0xE724, .soft },
+    .drafts = .{ 0xE70F, .soft },
+    .deleted = .{ 0xE74D, .soft },
+    .junk = .{ 0xE7BA, .soft },
+    .archive = .{ 0xE7B8, .soft },
+    .calendar = .{ 0xE787, .soft },
+    .contacts = .{ 0xE77B, .soft },
+    .tasks = .{ 0xE9D5, .soft },
+    .notes = .{ 0xE70B, .soft },
+    .journal = .{ 0xE81C, .soft },
+    .search = .{ 0xE721, .soft },
+    .hidden = .{ 0xED1A, .soft },
     // the one amber figure: items brought back from deleted space
-    .recovered = .{ 0xE777, 0xC98F00 },
-    .document = .{ 0xE8A5, ink_soft },
+    .recovered = .{ 0xE777, .amber },
+    .document = .{ 0xE8A5, .soft },
 });
 
 /// Image list with every `Glyph`, `px` pixels square, drawn in its palette colour with alpha.
@@ -55,7 +211,12 @@ pub fn glyphList(px: i32) ?w.HIMAGELIST {
     const font = iconFont(dc, -px) orelse return il;
     defer _ = w.DeleteObject(font);
     for (std.enums.values(Glyph)) |g| {
-        const cp, const color = glyph_cp[@intFromEnum(g)];
+        const cp, const tone = glyph_cp[@intFromEnum(g)];
+        const color = switch (tone) {
+            .soft => ink_soft,
+            .strong => ink,
+            .amber => amber_glyph,
+        };
         const bmp = glyphBitmap(dc, font, px, cp, color) orelse continue;
         _ = w.ImageList_Add(il, bmp, null);
         _ = w.DeleteObject(bmp);
@@ -192,6 +353,14 @@ fn commandLink(parent: w.HWND, inst: ?w.HINSTANCE, style: u32, id: u16, text: [:
     const b = w.CreateWindowExW(0, L("BUTTON"), text, style, 0, 0, 0, 0, parent, @ptrFromInt(id), inst, null) orelse return null;
     _ = w.SendMessageW(b, w.BCM_SETNOTE, 0, @intCast(@intFromPtr(note.ptr)));
     return b;
+}
+
+/// Repaint the welcome screen in the current theme.
+pub fn retheme() void {
+    if (welcome.paper_brush) |b| _ = w.DeleteObject(@ptrCast(b));
+    welcome.paper_brush = w.CreateSolidBrush(w.rgb(paper));
+    for ([_]?w.HWND{ welcome.open_file, welcome.open_folder, welcome.install }) |b| if (b) |h| themeControl(h, null);
+    if (welcome.hwnd) |h| _ = w.InvalidateRect(h, null, 1);
 }
 
 /// Show or hide the install offer (hidden once installed).
@@ -402,8 +571,8 @@ pub fn dialog(owner: ?w.HWND, inst: ?w.HINSTANCE, spec: DialogSpec) i32 {
     }
     const caption = if (about) L("About pstview") else L("pstview");
     const hwnd = w.CreateWindowExW(ex, DIALOG_CLASS, caption, style, x, y, ww, wh, owner, null, inst, @ptrCast(&st)) orelse return w.IDCANCEL;
-    const cap = w.rgb(ink);
-    const cap_text = w.rgb(paper);
+    const cap = w.rgb(bar);
+    const cap_text = w.rgb(on_bar);
     _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_CAPTION_COLOR, &cap, 4);
     _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_BORDER_COLOR, &cap, 4);
     _ = w.DwmSetWindowAttribute(hwnd, w.DWMWA_TEXT_COLOR, &cap_text, 4);
@@ -420,6 +589,7 @@ pub fn dialog(owner: ?w.HWND, inst: ?w.HINSTANCE, spec: DialogSpec) i32 {
             defer tb.deinit(std.heap.page_allocator);
             crlfWide(std.heap.page_allocator, &tb, spec.body);
             _ = w.SetWindowTextW(e, @ptrCast(tb.items.ptr));
+            if (dark) themeControl(e, null); // its scroll bar
             st.edit = e;
         }
         yy += body_h;
@@ -440,6 +610,7 @@ pub fn dialog(owner: ?w.HWND, inst: ?w.HINSTANCE, spec: DialogSpec) i32 {
         const h = w.CreateWindowExW(0, L("BUTTON"), b.text, bstyle, bx, st.footer_top + @divTrunc(st.sc(60) - bh, 2), bw, bh, hwnd, @ptrFromInt(@as(usize, @intCast(b.id))), inst, null);
         if (h) |bh_| {
             _ = w.SendMessageW(bh_, w.WM_SETFONT, @intFromPtr(st.text_font), 1);
+            if (dark) themeControl(bh_, null);
             if (i == 0) first = bh_;
         }
         bx += bw + st.sc(8);
@@ -578,8 +749,8 @@ fn paintDialog(hwnd: w.HWND, dc: w.HDC, st: *DialogState) void {
             if (st.glyph_font) |gf| {
                 const cp: u16, const color: u32 = switch (spec.kind) {
                     .info => .{ 0xE946, ink },
-                    .warning => .{ 0xE7BA, 0xC98F00 },
-                    else => .{ 0xE783, 0xB3261E },
+                    .warning => .{ 0xE7BA, amber_glyph },
+                    else => .{ 0xE783, if (dark) 0xFF7B72 else 0xB3261E },
                 };
                 var gr: w.RECT = .{ .left = P, .top = P - st.sc(2), .right = P + st.sc(40), .bottom = P + st.sc(40) };
                 const g = [1]u16{cp};

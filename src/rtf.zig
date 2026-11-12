@@ -26,6 +26,26 @@ pub const C = enum(u8) {
 };
 
 // colour table entries in enum order (index 1..); muted tones around the ink of ui.zig
+/// Colours for a dark ground instead of a light one (set by the GUI's theme).
+pub var dark = false;
+
+const dark_palette = [_][3]u8{
+    .{ 0xe4, 0xe8, 0xef }, // normal
+    .{ 0xa3, 0xad, 0xbd }, // label
+    .{ 0x8f, 0xb4, 0xf0 }, // header name
+    .{ 0xc0, 0xa6, 0xf5 }, // ip
+    .{ 0x6f, 0xd3, 0xcc }, // email
+    .{ 0x6c, 0xcb, 0x8c }, // pass
+    .{ 0xff, 0x7b, 0x72 }, // fail
+    .{ 0xe3, 0xa5, 0x47 }, // warn
+    .{ 0x6e, 0x7a, 0x8e }, // subtle
+    .{ 0xff, 0x7b, 0x72 }, // high
+    .{ 0xe3, 0xa5, 0x47 }, // medium
+    .{ 0xd6, 0xc5, 0x6a }, // low
+    .{ 0x9d, 0xb7, 0xde }, // date
+    .{ 0xff, 0xff, 0xff }, // title
+};
+
 const palette = [_][3]u8{
     .{ 0x1b, 0x26, 0x38 }, // normal
     .{ 0x60, 0x6c, 0x80 }, // label
@@ -236,7 +256,7 @@ fn internetHeaderLine(w: *Writer, line: []const u8) void {
 pub fn colorize(a: Allocator, text: []const u8, font: []const u8, half_points: u32) []const u8 {
     var w: Writer = .{ .a = a, .base = half_points };
     w.out.print(a, "{{\\rtf1\\ansi\\ansicpg1252\\deff0\\uc1{{\\fonttbl{{\\f0\\fnil {s};}}{{\\f1\\fswiss {s};}}}}{{\\colortbl ;", .{ font, body_face }) catch {};
-    for (palette) |p| w.out.print(a, "\\red{d}\\green{d}\\blue{d};", .{ p[0], p[1], p[2] }) catch {};
+    for (if (dark) dark_palette else palette) |p| w.out.print(a, "\\red{d}\\green{d}\\blue{d};", .{ p[0], p[1], p[2] }) catch {};
     w.out.print(a, "}}\\f0\\fs{d}\\cf1 ", .{half_points}) catch {};
 
     const Region = enum { head, body, inet };
