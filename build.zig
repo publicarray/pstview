@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Release version. Bump it in the commit that gets tagged; the tag must be "v" ++ this.
-const release_version = "0.3.1";
+const release_version = "0.4.0";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
