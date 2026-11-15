@@ -155,6 +155,13 @@ body.viewing #main{visibility:hidden}
 #busy i{width:8px;height:8px;border-radius:50%;background:var(--amber);animation:pulse 1s ease-in-out infinite alternate}
 @keyframes pulse{from{opacity:.25}to{opacity:1}}
 #dragshield{position:fixed;inset:0;z-index:80;display:none}
+#attview{padding:0 24px 18px}
+#attview img{max-width:100%;height:auto;display:block;border:1px solid var(--hairline);background:var(--white)}
+#attview small{display:block;color:var(--muted);margin:8px 0}
+/* a message in its own window: the same page, showing only the reading pane */
+body.single #left,body.single #vsplit,body.single #searchbar,body.single #listwrap,body.single #hsplit,
+body.single #welcome,body.single #expand{display:none!important}
+body.single #main{display:flex!important}
 .hidden{display:none!important}
 </style>
 </head>
@@ -216,7 +223,7 @@ body.viewing #main{visibility:hidden}
 </div>
 <div id="shade"><div id="dialog"></div></div>
 <div id="dragshield"></div>
-<div id="busy"><div><i></i>Working&hellip;</div></div>
+<div id="busy"><div><i></i><span>Working&hellip;</span></div></div>
 
 <script>
 "use strict";
@@ -227,6 +234,10 @@ const modKey = e => mac ? e.metaKey : e.ctrlKey;
 const MOD = mac ? '⌘' : 'Ctrl+';
 
 // ---------------------------------------------------------------- bridge to the model (webapp.zig)
+// WebView2 (Windows) and WebKit (macOS, Linux) name their message channel differently
+const post = window.chrome && window.chrome.webview
+  ? s => window.chrome.webview.postMessage(s)
+  : s => window.webkit.messageHandlers.pstview.postMessage(s);
 const pv = {
   seq: 0, pending: new Map(), busyTimer: 0,
   call(cmd, ...args) {
@@ -234,16 +245,27 @@ const pv = {
       const id = ++pv.seq;
       pv.pending.set(id, resolve);
       if (!pv.busyTimer) pv.busyTimer = setTimeout(() => $('#busy').classList.add('on'), 250);
-      window.webkit.messageHandlers.pstview.postMessage([id, cmd, ...args].join('\x1f'));
+      post([id, cmd, ...args].join('\x1f'));
     });
   },
   reply(id, data) {
     const resolve = pv.pending.get(id);
     pv.pending.delete(id);
-    if (pv.pending.size === 0) { clearTimeout(pv.busyTimer); pv.busyTimer = 0; $('#busy').classList.remove('on'); }
+    if (pv.pending.size === 0) {
+      clearTimeout(pv.busyTimer); pv.busyTimer = 0; $('#busy').classList.remove('on');
+      if (pv.before !== null) { status(pv.before); pv.before = null; $('#busy span').textContent = 'Working\u2026'; }
+    }
     if (resolve) resolve(data);
   },
-  opened(mb) { showMailbox(mb); },
+  opened(mb) { pv.reply(0); showMailbox(mb); },
+  /** Progress of the request being answered: status text, restored when the answer is in. */
+  before: null,
+  progress(text) {
+    if (pv.before === null) pv.before = $('#stext').textContent;
+    status(text);
+    $('#busy span').textContent = text; // (the overlay itself appears when a request takes long)
+    if (pv.onprogress) pv.onprogress(text);
+  },
 };
 window.pv = pv;
 
@@ -251,7 +273,10 @@ window.pv = pv;
 const COLS = [['Received',140],['Modified',140],['From',180],['To',180],['Subject',380],['Size',80,1],['Class',120],['Risk (header analysis)',320],['Note',260]];
 const ROW = 28, CHUNK = 200;
 const st = { mb: null, folder: -1, count: 0, total: 0, col: 0, desc: true, gen: 0, cache: new Map(), asked: new Set(),
-  sel: new Set(), all: false, focus: -1, anchor: -1, msg: null, msgRow: -1, tab: 'mail', version: '', url: '' };
+  sel: new Set(), all: false, focus: -1, anchor: -1, msg: null, msgRow: -1, tab: 'mail', version: '', url: '',
+  single: '', setup: {} };
+/** The message a command is about, as the model expects it: this window's message, or the focused row. */
+const ref = () => st.single || st.focus;
 
 const GLYPH = {
   folder:'M1.5 4.5h4.2l1.5 1.5h7.3v7.5h-13z', mailbox:'M2 3h12v10H2z M2 9h3.5l1 2h3l1-2H14',
@@ -277,8 +302,9 @@ async function applyTheme() {
   const changed = dark !== theme.dark;
   theme.dark = dark;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  await pv.call('theme', dark ? 'dark' : 'light');
-  if (changed && st.msg && st.focus >= 0) loadMessage(st.focus); // re-render the open message
+  await pv.call('theme', dark ? 'dark' : 'light', theme.choice);
+  if (!changed || !st.msg) return; // else re-render the open message
+  if (st.single) showMessage(await pv.call('msg', st.single)); else if (st.focus >= 0) loadMessage(st.focus);
 }
 darkQuery.addEventListener('change', () => applyTheme());
 const themeLabel = (name, label) => () => (theme.choice === name ? '\u2713  ' : '\u2003  ') + label;
@@ -507,7 +533,7 @@ $('#rows').onmousedown = e => {
   if (e.button === 2 && (st.all || st.sel.has(r))) return; // right-click inside the selection keeps it
   focusRow(r, e);
 };
-$('#rows').ondblclick = e => { if (e.target.closest('.row')) act('expand'); };
+$('#rows').ondblclick = e => { if (e.target.closest('.row')) act('openmsg'); };
 $('#rows').oncontextmenu = e => {
   e.preventDefault();
   if (e.target.closest('.row')) popup(e.clientX, e.clientY, CONTEXT);
@@ -555,10 +581,16 @@ $('#tabs').onclick = e => { if (e.target.dataset.tab) showTab(e.target.dataset.t
 async function loadMessage(r) {
   const gen = st.gen, m = await pv.call('msg', r);
   if (gen !== st.gen || r !== st.focus) return;
+  st.msgRow = r;
+  showMessage(m);
+}
+
+/** Fill the reading pane with what the model answered for one message. */
+function showMessage(m) {
   $('#hint').classList.add('hidden');
   $('#tabs').classList.remove('hidden');
   if (m.error) { st.msg = null; $('#mailframe').srcdoc = textDoc(m.error); showTab('mail'); return; }
-  st.msg = m; st.msgRow = r;
+  st.msg = m;
   $('#mailframe').srcdoc = m.html;
   $('#tab-analysis pre').innerHTML = analysisHtml(m.analysis);
   if (m.headers) $('#tab-headers pre').innerHTML = headersHtml(m.headers);
@@ -567,17 +599,35 @@ async function loadMessage(r) {
   document.querySelector('#tabs [data-tab=atts]').textContent = m.atts.length ? `Attachments (${m.atts.length})` : 'Attachments';
   $('#tab-atts').innerHTML = m.atts.length
     ? `<div class="attbar"><button class="btn" data-att="all">Save all attachments&hellip;</button></div><table class="atts">` +
-      m.atts.map((a, i) => `<tr><td>${esc(a.name)}</td><td>${esc(a.size)}</td><td>${esc(a.type)}</td><td><button class="btn" data-att="${i}">Save&hellip;</button>${a.text !== undefined ? ` <button class="btn" data-view="${i}">View text</button>` : ''}</td></tr>`).join('') +
-      `</table><pre class="txt" id="atttext"></pre>`
+      m.atts.map((a, i) => `<tr><td>${esc(a.name)}</td><td>${esc(a.size)}</td><td>${esc(a.type)}</td><td><button class="btn" data-att="${i}">Save&hellip;</button>${a.view ? ` <button class="btn" data-view="${i}">View ${a.view}</button>` : ''}</td></tr>`).join('') +
+      `</table><div id="attview"></div><pre class="txt" id="atttext"></pre>`
     : `<pre class="txt">This message has no attachments.</pre>`;
   showTab(st.tab);
 }
 
 $('#tab-atts').onclick = async e => {
   const t = e.target;
-  if (t.dataset.view !== undefined) { $('#atttext').textContent = st.msg.atts[+t.dataset.view].text; return; }
-  if (t.dataset.att === undefined || st.msgRow < 0) return;
-  shown(await (t.dataset.att === 'all' ? pv.call('saveatts', st.msgRow) : pv.call('saveatts', st.msgRow, t.dataset.att)));
+  const of = st.single || st.msgRow;
+  if (!st.msg || of === -1) return;
+  if (t.dataset.view !== undefined) {
+    // text is shown as text; an image as an <img> of a data: URL (the page's CSP allows nothing else)
+    const r = await pv.call('att', of, t.dataset.view);
+    $('#attview').innerHTML = ''; $('#atttext').textContent = '';
+    if (r.error) { $('#atttext').textContent = r.error; return; }
+    if (r.image) {
+      const img = new Image();
+      img.onload = () => { note.textContent = `${r.name} \u2014 ${img.naturalWidth} \u00d7 ${img.naturalHeight} px`; };
+      img.onerror = () => { note.textContent = `${r.name} \u2014 the image could not be decoded.`; };
+      const note = document.createElement('small');
+      note.textContent = r.name;
+      img.alt = '';
+      img.src = r.image;
+      $('#attview').append(note, img);
+    } else $('#atttext').textContent = r.text;
+    return;
+  }
+  if (t.dataset.att === undefined) return;
+  shown(await (t.dataset.att === 'all' ? pv.call('saveatts', of) : pv.call('saveatts', of, t.dataset.att)));
 };
 
 // ---------------------------------------------------------------- splitters
@@ -603,8 +653,22 @@ async function act(name) {
   switch (name) {
     case 'open': case 'openfolder': return showMailbox(await pv.call(name));
     case 'close': await pv.call('close'); return closeView();
+    case 'closewin': return pv.call('closewin');
+    case 'openmsg': if (needRow()) { const r = await pv.call('openmsg', st.focus); if (r.error) notice(r.error); } return;
+    case 'onemsg': case 'oneeml': return shown(await pv.call('exportone', name.slice(3), ref()));
+    case 'install': {
+      const s = st.setup;
+      const ok = await dialog(s.installed ? 'Update the installed copy of pstview?' : 'Install pstview for this user?', esc(s.installText),
+        [[s.installed ? 'Update' : 'Install', true], ['Cancel', false]]);
+      return ok ? setupDone(await pv.call('install')) : undefined;
+    }
+    case 'uninstall': {
+      const ok = await dialog('Uninstall pstview?', esc(st.setup.uninstallText), [['Uninstall', true], ['Keep pstview', false]]);
+      return ok ? setupDone(await pv.call('uninstall')) : undefined;
+    }
+    case 'defaults': return setupDone(await pv.call('defaults'));
     case 'msg': case 'eml': case 'none': return shown(await pv.call('export', name, selection()));
-    case 'saveatts': return shown(await pv.call('saveatts', st.focus));
+    case 'saveatts': return shown(await pv.call('saveatts', ref()));
     case 'hash': return shown(await pv.call('hash'));
     case 'selectall': if (st.count) { st.all = true; st.sel.clear(); renderRows(); } return;
     case 'expand': {
@@ -616,7 +680,7 @@ async function act(name) {
       return;
     }
     case 'hdrreport': case 'props': {
-      const r = await pv.call('doc', name === 'props' ? 'props' : 'hdr', st.focus);
+      const r = await pv.call('doc', name === 'props' ? 'props' : 'hdr', ref());
       if (r.error) return notice(r.error);
       return viewer(r.title, r.html, true);
     }
@@ -651,9 +715,26 @@ async function act(name) {
       return dialog('pstview', `Version ${esc(st.version)}<br><br>Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.<br><br>` +
         `Opens PST and OST files (including Outlook 2013+ OSTs and multi-part Acronis exports) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.<br><br>` +
         `Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.<br><br>` +
-        `Messages are shown by the system web view with scripts and all network access blocked.<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
+        `Messages are shown by the system web view with scripts and all network access blocked.<br><br>${esc(st.setup.about || '')}<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
   }
 }
+
+/** After install / uninstall / default apps: say what happened, refresh the Help menu, close when told to. */
+async function setupDone(r) {
+  if (r.setup) st.setup = r.setup;
+  if (r.error) return notice(r.error, 'pstview could not do that');
+  if (r.message) await notice(r.message);
+  if (r.quit) pv.call('quit');
+}
+/** First start of a portable copy: offer to install it (Help > Install does the same at any time). */
+async function offerInstall() {
+  const s = st.setup;
+  const choice = await dialog('Install pstview for this user?', esc(s.installText), [['Install', 'yes'], ['Keep using it portable', 'no'], ["Don't offer this again", 'never']]);
+  if (choice === 'yes') return setupDone(await pv.call('install'));
+  if (choice === 'never') { await pv.call('nooffer'); st.setup.offer = false; }
+}
+const canInstall = () => !!st.setup.available;
+const isInstalled = () => !!st.setup.installed;
 
 const MENUS = [
   ['File', [
@@ -669,7 +750,8 @@ const MENUS = [
     ['Show SHA-256 of source file', 'hash', need],
   ]],
   ['Message', [
-    ['Enlarge reading pane / back to list', 'expand', needRow, 'Enter'],
+    ['Open message in its own window', 'openmsg', needRow, 'Enter'],
+    ['Enlarge reading pane / back to list', 'expand', needRow],
     ['Header analysis report', 'hdrreport', needRow, MOD + 'I'],
     ['All properties (MAPI, incl. named)', 'props', needRow],
     null,
@@ -691,9 +773,34 @@ const MENUS = [
     ['Integrity log', 'integrity', need],
     ['Verify every block (checksums)…', 'verify', need],
   ]],
-  ['Help', [['About pstview', 'about']]],
+  ['Help', [
+    [() => isInstalled() ? 'Update the installed copy…' : 'Install pstview for this user…', 'install', canInstall],
+    [() => st.setup.defaultsLabel || 'Choose default apps…', 'defaults', isInstalled],
+    ['Uninstall pstview…', 'uninstall', isInstalled],
+    null,
+    ['About pstview', 'about'],
+  ]],
+];
+/** Menus of a message window. */
+const MENUS_SINGLE = [
+  ['Message', [
+    ['Header analysis report', 'hdrreport', null, MOD + 'I'],
+    ['All properties (MAPI, incl. named)', 'props'],
+    null,
+    ['Export as .msg…', 'onemsg'],
+    ['Export as .eml…', 'oneeml'],
+    ['Save attachments…', 'saveatts'],
+    null,
+    ['Close', 'closewin', null, 'Esc'],
+  ]],
+  ['View', [
+    [themeLabel('system', 'Theme: follow the system'), 'theme-system'],
+    [themeLabel('light', 'Theme: light'), 'theme-light'],
+    [themeLabel('dark', 'Theme: dark'), 'theme-dark'],
+  ]],
 ];
 const CONTEXT = [
+  ['Open message in its own window', 'openmsg', needRow],
   ['Enlarge reading pane', 'expand', needRow],
   ['Header analysis report', 'hdrreport', needRow],
   ['All properties (MAPI)', 'props', needRow],
@@ -708,14 +815,18 @@ const CONTEXT = [
 const itemsHtml = items => items.map(it => it === null ? '<hr>' :
   `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${esc(typeof it[0] === 'function' ? it[0]() : it[0])}</span>${it[3] ? `<kbd>${esc(it[3])}</kbd>` : ''}</button>`).join('');
 
-$('#menus').innerHTML = MENUS.map((m, i) => `<div class="menu" data-m="${i}"><button>${m[0]}</button><div class="drop"></div></div>`).join('');
+let menus = MENUS;
+function buildMenus() {
+  $('#menus').innerHTML = menus.map((m, i) => `<div class="menu" data-m="${i}"><button>${m[0]}</button><div class="drop"></div></div>`).join('');
+}
+buildMenus();
 function closeMenus() {
   document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open'));
   const c = $('.drop.ctx'); if (c) c.remove();
 }
 function openMenu(m) {
   closeMenus();
-  m.querySelector('.drop').innerHTML = itemsHtml(MENUS[+m.dataset.m][1]);
+  m.querySelector('.drop').innerHTML = itemsHtml(menus[+m.dataset.m][1]);
   m.classList.add('open');
 }
 $('#menus').addEventListener('mousedown', e => {
@@ -744,7 +855,15 @@ document.addEventListener('click', e => {
   if (b && !b.disabled) act(b.dataset.act);
 });
 document.addEventListener('contextmenu', e => { if (!e.target.closest('input,textarea,pre,.body')) e.preventDefault(); });
-['dragover', 'drop'].forEach(n => document.addEventListener(n, e => e.preventDefault()));
+// Files dropped on the window are opened. A page never learns the path of a dropped file: the
+// shells read it (WebView2 is handed the File objects for that; Cocoa and GTK see the drop itself).
+document.addEventListener('dragover', e => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = st.single ? 'none' : 'copy'; });
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  const wv = window.chrome && window.chrome.webview;
+  if (wv && wv.postMessageWithAdditionalObjects && !st.single && e.dataTransfer && e.dataTransfer.files.length)
+    wv.postMessageWithAdditionalObjects('drop', e.dataTransfer.files);
+});
 
 document.addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
@@ -752,17 +871,24 @@ document.addEventListener('keydown', e => {
     if ($('.menu.open') || $('.drop.ctx')) return closeMenus();
     if ($('#shade').classList.contains('on')) return;
     if ($('#viewer').classList.contains('on')) return $('#vclose').click();
+    if (st.single) return act('closewin');
     if ($('#listwrap').classList.contains('hidden')) return act('expand');
     if (typing) { e.target.blur(); $('#rows').focus(); }
     return;
   }
-  if (e.key === 'F5') return e.preventDefault();
+  // the web view's own shortcuts (reload, find, print, view source, dev tools) have no place here
+  if (/^F(3|5|7|12)$/.test(e.key) || (modKey(e) && /^[pgjuPGJU]$/.test(e.key))) return e.preventDefault();
   if ($('#shade').classList.contains('on') || $('#viewer').classList.contains('on')) {
     if (modKey(e) && /^[rR]$/.test(e.key)) e.preventDefault();
     return;
   }
   if (modKey(e)) {
     const k = e.key.toLowerCase();
+    if (st.single) {
+      if (k === 'i') { e.preventDefault(); act('hdrreport'); }
+      if (k === 'r' || k === 'o' || k === 'f') e.preventDefault();
+      return;
+    }
     if (k === 'r') { e.preventDefault(); if (st.mb) act('analyse'); return; }
     if (k === 'o') { e.preventDefault(); return act('open'); }
     if (k === 'i') { e.preventDefault(); if (needRow()) act('hdrreport'); return; }
@@ -770,7 +896,7 @@ document.addEventListener('keydown', e => {
     if (k === 'a' && !typing) { e.preventDefault(); return act('selectall'); }
     return;
   }
-  if (typing || !st.mb) return;
+  if (typing || !st.mb || st.single) return;
   const page = Math.max(1, Math.floor($('#rows').clientHeight / ROW) - 1), f = st.focus;
   const go = r => { e.preventDefault(); focusRow(Math.min(Math.max(r, 0), st.count - 1), e); };
   switch (e.key) {
@@ -780,7 +906,7 @@ document.addEventListener('keydown', e => {
     case 'PageUp': return go(f - page);
     case 'Home': return go(0);
     case 'End': return go(st.count - 1);
-    case 'Enter': e.preventDefault(); return act('expand');
+    case 'Enter': e.preventDefault(); return act('openmsg');
   }
 });
 
@@ -820,23 +946,57 @@ async function selftest(r) {
       probe.innerHTML = render(hostile);
       if (probe.textContent !== hostile || probe.querySelector(':not(span):not(b)')) throw 'colouring let markup through';
     }
+    if (typeof st.setup.available !== 'boolean' || !st.setup.installText) throw 'no install state';
+    const byNid = await pv.call('msg', st.msg.nid);
+    if (byNid.error || byNid.subject !== st.msg.subject) throw 'message not found by its id';
+    // a message in its own window: the window opens, shows the message, reports and is closed
+    const opened = await pv.call('openmsg', 0);
+    if (opened.error) throw opened.error;
+    for (const t0 = Date.now(); ; await new Promise(ok => setTimeout(ok, 100))) {
+      const w = await pv.call('selfwin');
+      if (w.ok && w.open === 0) break;
+      if (Date.now() - t0 > 20000) throw w.ok ? 'the message window did not close' : 'the message window did not show its message';
+    }
+    // progress text of a long request: the model sends it, and (where the shell's event pump
+    // lets the page run meanwhile) it is shown while the request is still being answered
+    let progressed = 0;
+    pv.onprogress = () => { progressed++; pv.call('selfwin'); };
+    const analysed = await pv.call('analyse');
+    pv.onprogress = null;
+    if (analysed.error) throw analysed.error;
+    if (!progressed) throw 'no progress text during the header analysis';
+    await new Promise(ok => setTimeout(ok, 200));
+    const live = (await pv.call('selfwin')).live;
     const sorted = await pv.call('sort', 4);
     if (sorted.count !== st.count) throw 'sort changed the row count';
     const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
     if (!found.count) throw 'search did not find the first message';
     clearTimeout(timer);
-    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), search and sort answered`);
+    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, search and sort answered`);
   } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
 }
 
 (async () => {
   const r = await pv.call('ready');
-  st.version = r.version; st.url = r.url;
+  st.version = r.version; st.url = r.url; st.setup = r.setup || {};
+  if (r.theme) theme.choice = r.theme;
+  if (r.standalone) {
+    // a message window: only the reading pane, with its own short menu
+    st.single = r.standalone;
+    document.body.classList.add('single');
+    menus = MENUS_SINGLE;
+    buildMenus();
+    await applyTheme();
+    showMessage(await pv.call('msg', st.single));
+    if (r.selftest) pv.call('selftest', 'win', st.msg && $('#mailframe').srcdoc === st.msg.html ? st.msg.nid : '');
+    return;
+  }
   await applyTheme();
   $('#ver').textContent = 'v' + r.version;
   if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);
   if (r.opened) await showMailbox(r.opened);
-  if (r.selftest) selftest(r);
+  if (r.selftest) return selftest(r);
+  if (st.setup.offer) offerInstall();
 })();
 </script>
 </body>

@@ -1,12 +1,16 @@
-//! pstview for macOS and Linux: the portable half of the GUI.
+//! pstview: the portable half of the GUI, the same on Windows, macOS and Linux.
 //!
-//! The window's content is one page (webui.html) shown in the operating system's own web view
-//! (WKWebView on macOS, WebKitGTK on Linux). This file is the model behind that page: it opens the
-//! source read-only, answers the page's requests with JSON and runs exports and reports. The
-//! platform shells (gui_mac.zig, gui_gtk.zig) provide the window, the web view and the dialogs.
+//! A window's content is one page (webui.html) shown in the operating system's own web view
+//! (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux). This file is the model behind
+//! that page: it opens the source read-only, answers the page's requests with JSON and runs
+//! exports and reports. The platform shells (gui_win.zig, gui_mac.zig, gui_gtk.zig) provide the
+//! windows, the web views and the dialogs.
 //!
-//! Page -> model: a string "id \x1f command \x1f arg ..." posted to the "pstview" message handler.
-//! Model -> page: `pv.reply(id, <json>)` evaluated in the page.
+//! Window 0 is the main window. A message opened on its own (double-click, Enter) gets a further
+//! window showing the same page, which then shows only that message.
+//!
+//! Page -> model: a string "id \x1f command \x1f arg ..." posted to the shell's message handler.
+//! Model -> page: `pv.reply(id, <json>)` evaluated in the page of the window that asked.
 //!
 //! Message HTML is shown by the page in a sandboxed frame (no scripts) from the sanitised,
 //! CSP-locked document of render.zig; the shells also refuse every navigation, so nothing in a
@@ -30,19 +34,30 @@ const propview = @import("propview.zig");
 const mime = @import("mime.zig");
 const platform = @import("platform.zig");
 const glyph = @import("glyph.zig");
+const setup = @import("setup.zig");
 const build_options = @import("build_options");
 
 /// What the model needs from the platform shell.
 pub const Shell = struct {
-    /// Run JavaScript in the page.
-    eval: *const fn (js: []const u8) void,
+    /// Run JavaScript in the page of window `win` (nothing happens when it is gone).
+    eval: *const fn (win: u32, js: []const u8) void,
     /// File or folder chooser; null when cancelled. Paths are absolute.
     pickOpen: *const fn (a: Allocator, title: []const u8, multiple: bool, folders: bool) ?[]const []const u8,
     pickSave: *const fn (a: Allocator, title: []const u8, name: []const u8) ?[]const u8,
     /// Open a folder or file with the desktop's default application.
     openPath: *const fn (path: []const u8) void,
     openUrl: *const fn (url: []const u8) void,
+    /// Title of the main window.
     setTitle: *const fn (title: []const u8) void,
+    /// A further window showing the page; its id (never 0), or null when it cannot be made.
+    openWindow: *const fn (title: []const u8) ?u32,
+    /// Close a further window, after the current request has been answered.
+    closeWindow: *const fn (win: u32) void,
+    /// Handle the window events that are waiting, so that the page can show progress while a
+    /// long request is being answered. Requests arriving meanwhile are queued by the model.
+    pump: *const fn () void,
+    /// The page's theme changed: the window frame may follow.
+    setDark: *const fn (dark: bool) void,
     quit: *const fn (code: u8) void,
 };
 
@@ -93,7 +108,27 @@ const App = struct {
     selftest: bool = false,
     /// The page's theme (it follows the system or the View menu); documents are rendered to match.
     dark: bool = false,
+    /// "system", "light" or "dark": the View menu's choice, handed to every further window.
+    theme_choice: []const u8 = "system",
+    /// The window whose request is being answered.
+    cur_win: u32 = 0,
+    /// Messages open in their own windows.
+    msg_wins: std.ArrayList(MsgWin) = .empty,
+    closing: bool = false,
+    selftest_win: bool = false,
+    /// A request is being answered. It may show a dialog or pump events for its progress text;
+    /// what arrives meanwhile waits in `queue` / `deferred_open`.
+    busy: bool = false,
+    queue: std.ArrayList(Queued) = .empty,
+    deferred_open: ?[]const []const u8 = null,
+    progress_label: []const u8 = "",
+    progress_pct: u64 = std.math.maxInt(u64),
+    /// Self-test: a request arrived while another was being answered (the page ran meanwhile).
+    saw_reentry: bool = false,
 };
+
+const MsgWin = struct { win: u32, nid: u32 };
+const Queued = struct { win: u32, text: []u8 };
 
 var app: App = undefined;
 
@@ -108,10 +143,17 @@ pub fn init(gpa: Allocator, io: Io, shell: Shell, start_paths: []const []const u
         .selftest = selftest,
     };
     mime.charset_hook = &platform.charsetToUtf8;
+    store.mbox.scan_progress = &mboxProgress;
 }
 
 pub fn deinit() void {
+    app.closing = true;
     closeSource();
+    app.msg_wins.deinit(app.gpa);
+    app.msg_wins = .empty;
+    for (app.queue.items) |q| app.gpa.free(q.text);
+    app.queue.deinit(app.gpa);
+    app.queue = .empty;
     app.gpa.free(app.last_doc);
     app.gpa.free(app.last_doc_name);
     app.last_doc = &.{};
@@ -121,20 +163,82 @@ pub fn deinit() void {
 /// Files handed over by the desktop (macOS "Open With", dock drop), before or after the page is up.
 pub fn openFromShell(paths: []const []const u8) void {
     if (paths.len == 0) return;
-    if (!app.page_ready) {
+    if (!app.page_ready or app.busy) {
         const copy = app.gpa.alloc([]const u8, paths.len) catch return;
         for (paths, 0..) |p, i| copy[i] = app.gpa.dupe(u8, p) catch "";
-        app.start_paths = copy;
+        if (app.busy) app.deferred_open = copy else app.start_paths = copy; // (a few bytes, kept)
         return;
     }
+    app.busy = true;
+    openNow(paths);
+    drain();
+}
+
+fn openNow(paths: []const []const u8) void {
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    app.cur_win = 0;
+    app.progress_pct = std.math.maxInt(u64);
     var out: List = .empty;
     out.appendSlice(a, "pv.opened(") catch return;
     openPaths(a, &out, paths) catch return;
     out.append(a, ')') catch return;
-    app.shell.eval(out.items);
+    app.shell.eval(0, out.items);
+}
+
+/// Answer what arrived while a request was being answered, then accept requests again.
+fn drain() void {
+    while (true) {
+        if (app.queue.items.len > 0) {
+            const q = app.queue.orderedRemove(0);
+            defer app.gpa.free(q.text);
+            handle(q.win, q.text);
+        } else if (app.deferred_open) |paths| {
+            app.deferred_open = null;
+            openNow(paths);
+        } else break;
+    }
+    app.busy = false;
+}
+
+// ================================================================ progress
+
+/// Progress of a long request, as status text of the main window: shown whenever the percentage
+/// changes. The shell handles its waiting window events so that the page gets to show it.
+fn progress(label: []const u8, done: u64, total: u64) void {
+    // a percentage, or just the count when the total is not known
+    const n = if (total > 0) @min(done *| 100 / total, 100) else done;
+    if (n == app.progress_pct and label.ptr == app.progress_label.ptr) return;
+    app.progress_pct = n;
+    app.progress_label = label;
+    var buf: [200]u8 = undefined;
+    app.shell.eval(0, std.fmt.bufPrint(&buf, "pv.progress(\"{s} {d}{s}\")", .{ label, n, if (total > 0) "%" else "" }) catch return);
+    app.shell.pump();
+}
+
+fn mboxProgress(done: u64, total: u64) void {
+    progress("Scanning MBOX\u{2026}", done, total);
+}
+fn recoverProgress(done: u64, total: u64) void {
+    progress("Scanning the file for stale index pages\u{2026}", done, total);
+}
+fn verifyProgress(done: usize, total: usize) void {
+    progress("Verifying every block\u{2026}", done, total);
+}
+fn indexProgress(done: usize, total: usize) void {
+    progress("Reading the folder's messages\u{2026}", done, total);
+}
+fn mailboxProgress(done: usize, total: usize) void {
+    progress("Reading the mailbox for the header analysis\u{2026}", done, total);
+}
+
+/// The user closed a message window.
+pub fn windowClosed(win: u32) void {
+    for (app.msg_wins.items, 0..) |mw, i| if (mw.win == win) {
+        _ = app.msg_wins.swapRemove(i);
+        return;
+    };
 }
 
 // ================================================================ JSON output
@@ -201,7 +305,21 @@ fn failure(a: Allocator, out: *List, comptime fmt: []const u8, args: anytype) Er
 // ================================================================ requests
 
 /// One request from the page; always answers with exactly one `pv.reply`.
-pub fn onMessage(text: []const u8) void {
+pub fn onMessage(win: u32, text: []const u8) void {
+    if (app.busy) {
+        app.saw_reentry = true;
+        const copy = app.gpa.dupe(u8, text) catch return;
+        app.queue.append(app.gpa, .{ .win = win, .text = copy }) catch app.gpa.free(copy);
+        return;
+    }
+    app.busy = true;
+    handle(win, text);
+    drain();
+}
+
+fn handle(win: u32, text: []const u8) void {
+    app.cur_win = win;
+    app.progress_pct = std.math.maxInt(u64);
     var arena = std.heap.ArenaAllocator.init(app.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -222,7 +340,7 @@ pub fn onMessage(text: []const u8) void {
         out.appendSlice(a, "{\"error\":\"Out of memory.\"}") catch return;
     };
     out.append(a, ')') catch return;
-    app.shell.eval(out.items);
+    app.shell.eval(win, out.items);
 }
 
 fn argAt(rest: []const u8, n: usize) []const u8 {
@@ -243,6 +361,14 @@ fn rowMsg(row: ?usize) ?u32 {
     return app.view.items[r];
 }
 
+/// A message named by the page: "0x<nid>" (a message window) or a view row of the current folder.
+fn msgRef(arg: []const u8) ?u32 {
+    if (app.file == null) return null;
+    if (std.mem.startsWith(u8, arg, "0x")) return std.fmt.parseInt(u32, arg[2..], 16) catch null;
+    const mi = rowMsg(std.fmt.parseInt(usize, arg, 10) catch return null) orelse return null;
+    return app.msgs[mi].nid;
+}
+
 fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!void {
     const eq = std.mem.eql;
     if (eq(u8, cmd, "ready")) return ready(a, out);
@@ -256,18 +382,52 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         return openPaths(a, out, paths);
     }
     if (eq(u8, cmd, "close")) {
+        if (app.cur_win != 0) return out.appendSlice(a, "{}");
         closeSource();
         app.shell.setTitle("pstview");
         return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "theme")) {
         app.dark = eq(u8, argAt(rest, 0), "dark");
+        for ([_][]const u8{ "system", "light", "dark" }) |c| if (eq(u8, argAt(rest, 1), c)) {
+            app.theme_choice = c;
+        };
+        app.shell.setDark(app.dark);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "closewin")) {
+        if (app.cur_win != 0) app.shell.closeWindow(app.cur_win);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "quit")) {
+        app.shell.quit(0);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "setup")) return setupInfo(a, out);
+    if (eq(u8, cmd, "install") or eq(u8, cmd, "uninstall") or eq(u8, cmd, "defaults")) {
+        const r = if (eq(u8, cmd, "install")) setup.install(a, app.io, build_options.version) else if (eq(u8, cmd, "uninstall")) setup.uninstall(a, app.io) else setup.defaults(a, app.io);
+        if (r.url.len > 0) app.shell.openUrl(r.url);
+        try out.append(a, '{');
+        try kv(a, out, true, if (r.ok) "message" else "error", r.text);
+        try out.print(a, ",\"quit\":{},\"setup\":", .{r.quit});
+        try setupInfo(a, out);
+        return out.append(a, '}');
+    }
+    if (eq(u8, cmd, "nooffer")) {
+        setup.dismissOffer(a, app.io);
         return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "site")) {
         app.shell.openUrl(project_url);
         return out.appendSlice(a, "{}");
     }
+    if (eq(u8, cmd, "selftest") and eq(u8, argAt(rest, 0), "win")) {
+        // a message window reports that it showed its message, and is closed again
+        app.selftest_win = argAt(rest, 1).len > 0;
+        if (app.cur_win != 0) app.shell.closeWindow(app.cur_win);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "selfwin")) return out.print(a, "{{\"ok\":{},\"open\":{d},\"live\":{}}}", .{ app.selftest_win, app.msg_wins.items.len, app.saw_reentry });
     if (eq(u8, cmd, "selftest")) {
         const ok = eq(u8, argAt(rest, 0), "ok");
         std.debug.print("pstview selftest {s}: {s}\n", .{ if (ok) "passed" else "FAILED", argAt(rest, 1) });
@@ -302,12 +462,28 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
     }
     if (eq(u8, cmd, "rows")) return rows(a, out, argInt(rest, 0) orelse 0, argInt(rest, 1) orelse 0);
     if (eq(u8, cmd, "msg")) {
-        const mi = rowMsg(argInt(rest, 0)) orelse return failure(a, out, "No such message.", .{});
-        return preview(a, out, app.msgs[mi].nid);
+        const nid = msgRef(argAt(rest, 0)) orelse return failure(a, out, "No such message.", .{});
+        return preview(a, out, nid);
+    }
+    if (eq(u8, cmd, "openmsg")) {
+        const mi = rowMsg(argInt(rest, 0)) orelse return failure(a, out, "Select a message first.", .{});
+        const s = app.msgs[mi];
+        const title = try std.fmt.allocPrint(a, "{s} \u{2014} pstview", .{if (s.subject.len > 0) s.subject else "(no subject)"});
+        const win = app.shell.openWindow(title) orelse return failure(a, out, "The message window could not be opened.", .{});
+        try app.msg_wins.append(app.gpa, .{ .win = win, .nid = s.nid });
+        return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "doc")) {
-        const mi = rowMsg(argInt(rest, 1)) orelse return failure(a, out, "Select a message first.", .{});
-        return if (eq(u8, argAt(rest, 0), "props")) allProperties(a, out, app.msgs[mi].nid) else headerReport(a, out, app.msgs[mi].nid);
+        const nid = msgRef(argAt(rest, 1)) orelse return failure(a, out, "Select a message first.", .{});
+        return if (eq(u8, argAt(rest, 0), "props")) allProperties(a, out, nid) else headerReport(a, out, nid);
+    }
+    if (eq(u8, cmd, "exportone")) {
+        const nid = msgRef(argAt(rest, 1)) orelse return failure(a, out, "Select a message first.", .{});
+        return exportOne(a, out, nid, eq(u8, argAt(rest, 0), "msg"));
+    }
+    if (eq(u8, cmd, "att")) {
+        const nid = msgRef(argAt(rest, 0)) orelse return failure(a, out, "No such message.", .{});
+        return attachmentView(a, out, nid, argInt(rest, 1) orelse 0);
     }
     if (eq(u8, cmd, "export")) {
         const k = argAt(rest, 0);
@@ -315,8 +491,8 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         return exportSelected(a, out, kind, argAt(rest, 1));
     }
     if (eq(u8, cmd, "saveatts")) {
-        const mi = rowMsg(argInt(rest, 0)) orelse return failure(a, out, "Select a message first.", .{});
-        return saveAttachments(a, out, app.msgs[mi].nid, if (argAt(rest, 1).len > 0) argInt(rest, 1) else null);
+        const nid = msgRef(argAt(rest, 0)) orelse return failure(a, out, "Select a message first.", .{});
+        return saveAttachments(a, out, nid, if (argAt(rest, 1).len > 0) argInt(rest, 1) else null);
     }
     if (eq(u8, cmd, "analyse")) {
         analyseFolder();
@@ -335,9 +511,18 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
 fn ready(a: Allocator, out: *List) Error!void {
     try out.append(a, '{');
     try kv(a, out, true, "version", build_options.version);
-    try kv(a, out, false, "os", if (builtin.os.tag.isDarwin()) "macos" else "linux");
+    try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else "linux");
     try kv(a, out, false, "url", project_url);
-    try out.print(a, ",\"selftest\":{}", .{app.selftest});
+    try kv(a, out, false, "theme", app.theme_choice);
+    if (app.cur_win != 0) {
+        // a message window: the page shows this one message
+        for (app.msg_wins.items) |mw| if (mw.win == app.cur_win) {
+            try out.print(a, ",\"standalone\":\"0x{x:0>8}\",\"selftest\":{}", .{ mw.nid, app.selftest });
+        };
+        return out.append(a, '}');
+    }
+    try out.print(a, ",\"selftest\":{},\"setup\":", .{app.selftest});
+    try setupInfo(a, out);
     app.page_ready = true;
     if (app.start_paths.len > 0) {
         const paths = app.start_paths;
@@ -345,6 +530,17 @@ fn ready(a: Allocator, out: *List) Error!void {
         try out.appendSlice(a, ",\"opened\":");
         try openPaths(a, out, paths);
     }
+    try out.append(a, '}');
+}
+
+/// Install state for the Help menu and the first-run offer (setup.zig).
+fn setupInfo(a: Allocator, out: *List) Error!void {
+    const s = setup.info(a, app.io);
+    try out.print(a, "{{\"available\":{},\"installed\":{},\"running\":{},\"offer\":{}", .{ s.available, s.installed, s.running_installed, s.offer and !app.selftest and app.start_paths.len == 0 });
+    try kv(a, out, false, "about", s.about);
+    try kv(a, out, false, "installText", s.install_text);
+    try kv(a, out, false, "uninstallText", s.uninstall_text);
+    try kv(a, out, false, "defaultsLabel", s.defaults_label);
     try out.append(a, '}');
 }
 
@@ -366,6 +562,8 @@ fn fmtLocalLong(buf: []u8, t: ?i64) []const u8 {
 // ================================================================ source and folders
 
 fn closeSource() void {
+    // message windows show items of the source that is going away
+    while (app.msg_wins.pop()) |mw| if (!app.closing) app.shell.closeWindow(mw.win);
     if (app.file) |f| f.close();
     app.file = null;
     app.gpa.free(app.file_path);
@@ -515,14 +713,14 @@ const columns = [_][]const u8{ "Received", "Modified", "From", "To", "Subject", 
 /// Build (once per folder) the search fields and header analysis of every message.
 fn ensureIndex() *search.FolderIndex {
     if (app.index) |*ix| return ix;
-    app.index = search.buildIndexCtx(app.folder_arena.allocator(), app.file.?, app.msgs, null, app.mailbox_ctx);
+    app.index = search.buildIndexCtx(app.folder_arena.allocator(), app.file.?, app.msgs, &indexProgress, app.mailbox_ctx);
     return &app.index.?;
 }
 
 fn analyseFolder() void {
     if (app.cur_folder == null) return;
     if (app.mailbox_ctx == null) {
-        app.mailbox_ctx = search.buildMailboxContext(app.file_arena.allocator(), app.file.?, null);
+        app.mailbox_ctx = search.buildMailboxContext(app.file_arena.allocator(), app.file.?, &mailboxProgress);
         app.index = null; // rebuild with mailbox-wide knowledge
     }
     _ = ensureIndex();
@@ -680,10 +878,7 @@ fn preview(a: Allocator, out: *List, nid: u32) Error!void {
         try kv(a, out, true, "name", if (att.filename.len > 0) att.filename else "(embedded item)");
         try kv(a, out, false, "size", std.fmt.bufPrint(&sb, "{d} KB", .{@divTrunc(att.size + 1023, 1024)}) catch "");
         try kv(a, out, false, "type", if (att.method == 5) "embedded message" else if (att.mime.len > 0) att.mime else render.mimeForName(att.filename));
-        if (att.method != 5 and isTextAttachment(att)) {
-            const d = att.data();
-            try kv(a, out, false, "text", d[0..@min(d.len, 512 * 1024)]);
-        }
+        try kv(a, out, false, "view", if (att.method == 5) "" else if (render.isImage(att)) "image" else if (isTextAttachment(att)) "text" else "");
         try out.append(a, '}');
     }
     try out.appendSlice(a, "]}");
@@ -892,6 +1087,51 @@ fn exportSelected(a: Allocator, out: *List, kind: ExportKind, sel: []const u8) E
     return message(a, out, "Exported {d} item(s), {d} failed.\nReport written alongside.\n\n{s}", .{ ok, failed, dir });
 }
 
+/// One attachment for the reading pane: text as text, an image as a data: URL. Anything else is
+/// never opened (attachments may be unsafe): it can only be saved.
+fn attachmentView(a: Allocator, out: *List, nid: u32, which: usize) Error!void {
+    const m = app.file.?.loadMessage(a, nid) catch |e| return failure(a, out, "Cannot read message: {s}", .{@errorName(e)});
+    if (which >= m.attachments.len) return failure(a, out, "No such attachment.", .{});
+    const att = &m.attachments[which];
+    if (att.method == 5) return failure(a, out, "Embedded message: save it to export it as .msg.", .{});
+    const d = att.data();
+    if (render.isImage(att)) {
+        if (d.len > 24 * 1024 * 1024) return failure(a, out, "The image is too large to show here; save it instead.", .{});
+        const mime_type = if (att.mime.len > 0 and std.ascii.startsWithIgnoreCase(att.mime, "image/")) att.mime else render.mimeForName(att.filename);
+        // only the plain raster types: an SVG can carry markup
+        var ok = false;
+        for ([_][]const u8{ "image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp" }) |t| ok = ok or std.ascii.eqlIgnoreCase(mime_type, t);
+        if (!ok) return failure(a, out, "This image type is not shown here; save it instead.", .{});
+        try out.append(a, '{');
+        try kv(a, out, true, "name", att.filename);
+        const enc = std.base64.standard.Encoder;
+        const b64 = try a.alloc(u8, enc.calcSize(d.len));
+        _ = enc.encode(b64, d);
+        try out.appendSlice(a, ",\"image\":\"data:");
+        for (mime_type) |c| try out.append(a, std.ascii.toLower(c));
+        try out.appendSlice(a, ";base64,");
+        try out.appendSlice(a, b64);
+        try out.append(a, '"');
+    } else if (isTextAttachment(att)) {
+        try out.append(a, '{');
+        try kv(a, out, true, "name", att.filename);
+        try kv(a, out, false, "text", d[0..@min(d.len, 2 * 1024 * 1024)]);
+    } else return failure(a, out, "Not opened (attachments may be unsafe). Save it, then inspect it in a safe environment.", .{});
+    try out.append(a, '}');
+}
+
+/// Export one message through a save dialog (the message window's File menu).
+fn exportOne(a: Allocator, out: *List, nid: u32, as_msg: bool) Error!void {
+    var m = app.file.?.loadMessage(a, nid) catch |e| return failure(a, out, "Cannot read message: {s}", .{@errorName(e)});
+    const name = exp.safeName(a, "", m.subject(a) catch "", if (as_msg) "msg" else "eml") catch "message";
+    const path = app.shell.pickSave(a, if (as_msg) "Export as .msg" else "Export as .eml", name) orelse return out.appendSlice(a, "{\"cancelled\":true}");
+    // .eml from an MBOX is the original message, byte for byte
+    const raw: ?[]const u8 = if (as_msg) null else (app.file.?.rawMessage(a, nid) catch null);
+    const data = raw orelse ((if (as_msg) exp.buildMsg(a, &m) else exp.buildEml(a, &m, 0)) catch |e| return failure(a, out, "Export failed: {s}", .{@errorName(e)}));
+    writePath(path, data) catch |e| return failure(a, out, "Export failed: {s}", .{@errorName(e)});
+    try message(a, out, "Exported:\n{s}", .{path});
+}
+
 fn attachmentBytes(a: Allocator, att: *pst.Attachment, ext_out: *[]const u8) ?[]const u8 {
     if (att.method == 5) {
         var inner = (pst.embeddedMessage(a, att) catch null) orelse return null;
@@ -942,7 +1182,7 @@ fn integrity(a: Allocator, out: *List, verify: bool) Error!void {
     if (verify) {
         var tot: pst.VerifyStats = .{};
         for (parts) |p| {
-            const st = pst.verifyAll(p.file, null) catch continue;
+            const st = pst.verifyAll(p.file, &verifyProgress) catch continue;
             tot.nodes += st.nodes;
             tot.subnodes += st.subnodes;
             tot.blocks += st.blocks;
@@ -970,7 +1210,7 @@ fn recoverDeleted(a: Allocator, out: *List) Error!void {
         return message(a, out, "Recovery from stale index pages applies to PST/OST files.\n\nFor Thunderbird mailboxes, messages deleted but not yet compacted are already listed and marked in their folders.", .{});
     if (app.recovery != null) return message(a, out, "Recovery has already run for this file - see the [Recovered items] branch.", .{});
     const fa = app.file_arena.allocator();
-    const r = app.file.?.recoverDeleted(fa, app.file_path, null) catch |e| return failure(a, out, "Recovery failed: {s}", .{@errorName(e)});
+    const r = app.file.?.recoverDeleted(fa, app.file_path, &recoverProgress) catch |e| return failure(a, out, "Recovery failed: {s}", .{@errorName(e)});
     app.recovery = r;
     const p = std.fmt.allocPrint;
     const root = addBranch(fa, -1, .label, .recovered, 0, "[Recovered items]", "Recovered items", 0, p(fa, "[Recovered items] ({d})", .{r.deleted.len + r.versions.len}) catch "[Recovered items]");

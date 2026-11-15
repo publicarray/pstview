@@ -1,4 +1,4 @@
-//! pstview on macOS: a Cocoa window whose content is a WKWebView (the system web view), plus the
+//! pstview on macOS: Cocoa windows whose content is a WKWebView (the system web view), plus the
 //! menu bar and the open / save panels. The page and the model behind it are in webapp.zig.
 //!
 //! The Objective-C runtime, AppKit and WebKit are loaded at run time (they are in every macOS
@@ -26,10 +26,13 @@ var sel_registerName: *const fn ([*:0]const u8) callconv(.c) SEL = undefined;
 var objc_allocateClassPair: *const fn (id, [*:0]const u8, usize) callconv(.c) id = undefined;
 var class_addMethod: *const fn (id, SEL, *const anyopaque, [*:0]const u8) callconv(.c) u8 = undefined;
 var objc_registerClassPair: *const fn (id) callconv(.c) void = undefined;
+/// NSDefaultRunLoopMode (an NSString), when found.
+var default_mode: id = null;
 
 fn loadRuntime() bool {
     const objc = std.c.dlopen("/usr/lib/libobjc.A.dylib", .{ .LAZY = true }) orelse return false;
-    _ = std.c.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", .{ .LAZY = true }) orelse return false;
+    const appkit = std.c.dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", .{ .LAZY = true }) orelse return false;
+    if (std.c.dlsym(appkit, "NSDefaultRunLoopMode")) |p| default_mode = @as(*const id, @ptrCast(@alignCast(p))).*;
     _ = std.c.dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", .{ .LAZY = true }) orelse return false;
     msg_send = std.c.dlsym(objc, "objc_msgSend") orelse return false;
     objc_getClass = @ptrCast(@alignCast(std.c.dlsym(objc, "objc_getClass") orelse return false));
@@ -87,22 +90,128 @@ fn utf8(ns_string: id) []const u8 {
 }
 
 var ns_app: id = null;
-var window: id = null;
-var webview: id = null;
-var first_load_done = false;
+var delegate: id = null;
+var gpa: Allocator = undefined;
+
+/// One window and its web view; the main window has id 0.
+const Win = struct { id: u32, window: id, webview: id, first_load_done: bool = false };
+var wins: std.ArrayList(Win) = .empty;
+var next_id: u32 = 1;
+
+fn winById(n: u32) ?*Win {
+    for (wins.items) |*w| if (w.id == n) return w;
+    return null;
+}
+
+fn winByView(view: id) ?*Win {
+    for (wins.items) |*w| if (w.webview == view) return w;
+    return null;
+}
 
 // ================================================================ shell for webapp.zig
 
-fn eval(js: []const u8) void {
+fn eval(win: u32, js: []const u8) void {
+    const w = winById(win) orelse return;
     const s = nsString(js);
     defer release(s);
-    send2(void, webview, "evaluateJavaScript:completionHandler:", s, nil);
+    send2(void, w.webview, "evaluateJavaScript:completionHandler:", s, nil);
 }
 
 fn setTitle(title: []const u8) void {
+    const w = winById(0) orelse return;
     const s = nsString(title);
     defer release(s);
-    send1(void, window, "setTitle:", s);
+    send1(void, w.window, "setTitle:", s);
+}
+
+/// A window showing the page; its requests arrive at the delegate, which finds it by its web view.
+fn createWindow(n: u32, title: []const u8, width: f64, height: f64) bool {
+    // web view: no persistent data store (nothing is written to disk)
+    const config = send0(id, cls("WKWebViewConfiguration"), "new");
+    defer release(config);
+    send1(void, config, "setWebsiteDataStore:", send0(id, cls("WKWebsiteDataStore"), "nonPersistentDataStore"));
+    const handler_name = nsString("pstview");
+    defer release(handler_name);
+    send2(void, send0(id, config, "userContentController"), "addScriptMessageHandler:name:", delegate, handler_name);
+
+    const frame: NSRect = .{ .x = 0, .y = 0, .w = width, .h = height };
+    const style: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
+    const window = send4(id, send0(id, cls("NSWindow"), "alloc"), "initWithContentRect:styleMask:backing:defer:", frame, style, @as(usize, 2), no) orelse return false;
+    const t = nsString(title);
+    defer release(t);
+    send1(void, window, "setTitle:", t);
+    const webview = send2(id, send0(id, if (n == 0) webViewClass() else cls("WKWebView"), "alloc"), "initWithFrame:configuration:", frame, config) orelse return false;
+    wins.append(gpa, .{ .id = n, .window = window, .webview = webview }) catch return false;
+    send1(void, webview, "setNavigationDelegate:", delegate);
+    send1(void, window, "setDelegate:", delegate);
+    send1(void, window, "setContentView:", webview);
+    release(webview); // the window keeps it
+    send0(void, window, "center");
+    send1(void, window, "makeKeyAndOrderFront:", nil);
+
+    const html = nsString(webapp.page_html);
+    _ = send2(id, webview, "loadHTMLString:baseURL:", html, nil);
+    release(html);
+    return true;
+}
+
+fn openWindow(title: []const u8) ?u32 {
+    const n = next_id;
+    if (!createWindow(n, title, 1000, 760)) return null;
+    next_id += 1;
+    return n;
+}
+
+/// Closing happens from the run loop: the request that asked for it is still being answered.
+fn closeWindow(win: u32) void {
+    if (win == 0) return;
+    const w = winById(win) orelse return;
+    send3(void, w.window, "performSelector:withObject:afterDelay:", sel_registerName("close"), nil, @as(f64, 0));
+}
+
+fn setDark(_: bool) void {}
+
+/// Let the run loop deliver what is waiting (script calls to the web view, window events).
+fn pump() void {
+    const mode = default_mode orelse return;
+    var n: usize = 0;
+    while (n < 50) : (n += 1) {
+        _ = send2(u8, send0(id, cls("NSRunLoop"), "currentRunLoop"), "runMode:beforeDate:", mode, send0(id, cls("NSDate"), "date"));
+        const event = send4(id, ns_app, "nextEventMatchingMask:untilDate:inMode:dequeue:", ~@as(usize, 0), nil, mode, yes) orelse break;
+        send1(void, ns_app, "sendEvent:", event);
+    }
+}
+
+/// -[performDragOperation:] of the web view: files dropped on the window are opened. (The page
+/// would get them without their paths.)
+fn onPerformDrag(_: id, _: SEL, sender: id) callconv(.c) u8 {
+    const board = send0(id, sender, "draggingPasteboard") orelse return no;
+    const kind = nsString("NSFilenamesPboardType");
+    defer release(kind);
+    const files = send1(id, board, "propertyListForType:", kind) orelse return no;
+    if (send1(u8, files, "isKindOfClass:", cls("NSArray")) == 0) return no;
+    const n = send0(usize, files, "count");
+    if (n == 0) return no;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const paths = a.alloc([]const u8, n) catch return no;
+    for (paths, 0..) |*p, i| p.* = a.dupe(u8, utf8(send1(id, files, "objectAtIndex:", i))) catch return no;
+    webapp.openFromShell(paths);
+    return yes;
+}
+
+var view_class: id = null;
+
+/// WKWebView with the drop handled by pstview.
+fn webViewClass() id {
+    if (view_class == null) {
+        const c = objc_allocateClassPair(cls("WKWebView"), "PstviewWebView", 0) orelse return cls("WKWebView");
+        _ = class_addMethod(c, sel_registerName("performDragOperation:"), &onPerformDrag, "c@:@");
+        objc_registerClassPair(c);
+        view_class = c;
+    }
+    return view_class;
 }
 
 fn pickOpen(a: Allocator, title: []const u8, multiple: bool, folders: bool) ?[]const []const u8 {
@@ -163,17 +272,29 @@ fn quit(code: u8) void {
 
 /// -[userContentController:didReceiveScriptMessage:]: a request from the page.
 fn onScriptMessage(_: id, _: SEL, _: id, message: id) callconv(.c) void {
+    const w = winByView(send0(id, message, "webView")) orelse return;
     const body = send0(id, message, "body") orelse return;
     if (send1(u8, body, "isKindOfClass:", cls("NSString")) == 0) return;
-    webapp.onMessage(utf8(body));
+    webapp.onMessage(w.id, utf8(body));
+}
+
+/// -[windowWillClose:]: a message window goes away; closing the main window ends the program.
+fn onWindowWillClose(_: id, _: SEL, notification: id) callconv(.c) void {
+    const window = send0(id, notification, "object");
+    for (wins.items, 0..) |w, i| if (w.window == window) {
+        _ = wins.swapRemove(i);
+        if (w.id == 0) send1(void, ns_app, "terminate:", nil) else webapp.windowClosed(w.id);
+        return;
+    };
 }
 
 /// -[webView:decidePolicyForNavigationAction:decisionHandler:]: only the page itself and the
 /// about:srcdoc frames it fills are loaded; a link in a message never navigates anywhere.
-fn onNavigation(_: id, _: SEL, _: id, action: id, handler: *Block) callconv(.c) void {
+fn onNavigation(_: id, _: SEL, view: id, action: id, handler: *Block) callconv(.c) void {
     var allow = false;
-    if (!first_load_done) {
-        first_load_done = true;
+    const w = winByView(view);
+    if (w != null and !w.?.first_load_done) {
+        w.?.first_load_done = true;
         allow = true;
     } else {
         const url = send0(id, send0(id, action, "request"), "URL");
@@ -203,6 +324,7 @@ fn makeDelegate() id {
     _ = class_addMethod(c, sel_registerName("webView:decidePolicyForNavigationAction:decisionHandler:"), &onNavigation, "v@:@@@?");
     _ = class_addMethod(c, sel_registerName("applicationShouldTerminateAfterLastWindowClosed:"), &onLastWindowClosed, "c@:@");
     _ = class_addMethod(c, sel_registerName("application:openFiles:"), &onOpenFiles, "v@:@@");
+    _ = class_addMethod(c, sel_registerName("windowWillClose:"), &onWindowWillClose, "v@:@");
     objc_registerClassPair(c);
     return send0(id, c, "new");
 }
@@ -250,40 +372,23 @@ fn makeMenus() void {
 
 // ================================================================ start
 
-pub fn run(gpa: Allocator, io: Io, start_paths: []const []const u8, selftest: bool) u8 {
+pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: bool) u8 {
     if (!loadRuntime()) {
         std.debug.print("pstview: cannot load AppKit / WebKit\n", .{});
         return 1;
     }
+    gpa = gpa_;
     _ = send0(id, cls("NSAutoreleasePool"), "new");
     ns_app = send0(id, cls("NSApplication"), "sharedApplication");
     _ = send1(u8, ns_app, "setActivationPolicy:", @as(isize, 0)); // a regular app: dock icon and menu bar
-    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .quit = &quit }, start_paths, selftest);
+    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit }, start_paths, selftest);
 
-    const delegate = makeDelegate();
+    delegate = makeDelegate();
     send1(void, ns_app, "setDelegate:", delegate);
     makeMenus();
 
-    // web view: no persistent data store (nothing is written to disk), requests arrive at the delegate
-    const config = send0(id, cls("WKWebViewConfiguration"), "new");
-    send1(void, config, "setWebsiteDataStore:", send0(id, cls("WKWebsiteDataStore"), "nonPersistentDataStore"));
-    const handler_name = nsString("pstview");
-    send2(void, send0(id, config, "userContentController"), "addScriptMessageHandler:name:", delegate, handler_name);
-
-    const frame: NSRect = .{ .x = 0, .y = 0, .w = 1400, .h = 900 };
-    const style: usize = 1 | 2 | 4 | 8; // titled, closable, miniaturizable, resizable
-    window = send4(id, send0(id, cls("NSWindow"), "alloc"), "initWithContentRect:styleMask:backing:defer:", frame, style, @as(usize, 2), no);
-    setTitle("pstview");
-    webview = send2(id, send0(id, cls("WKWebView"), "alloc"), "initWithFrame:configuration:", frame, config);
-    send1(void, webview, "setNavigationDelegate:", delegate);
-    send1(void, window, "setContentView:", webview);
-    send0(void, window, "center");
-    send1(void, window, "makeKeyAndOrderFront:", nil);
+    if (!createWindow(0, "pstview", 1400, 900)) return 1;
     send1(void, ns_app, "activateIgnoringOtherApps:", yes);
-
-    const html = nsString(webapp.page_html);
-    _ = send2(id, webview, "loadHTMLString:baseURL:", html, nil);
-    release(html);
 
     send0(void, ns_app, "run");
     webapp.deinit();

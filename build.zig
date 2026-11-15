@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Release version. Bump it in the commit that gets tagged; the tag must be "v" ++ this.
-const release_version = "0.4.0";
+const release_version = "0.5.0";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -25,13 +25,14 @@ pub fn build(b: *std.Build) void {
 
     const os = target.result.os.tag;
 
-    // GUI viewer. Windows: Win32 (gui.zig). macOS and Linux: a native window around the system
-    // web view (gui_posix.zig); Cocoa / WebKit and GTK / WebKitGTK are loaded at run time, so
+    // GUI viewer: native windows around the system web view, with the same page and model
+    // (webui.html, webapp.zig) on every platform. Windows: WebView2 (gui_win.zig). macOS and
+    // Linux (gui_posix.zig): Cocoa / WebKit and GTK / WebKitGTK are loaded at run time, so
     // nothing but libc is linked and every target cross-compiles. A static (musl) Linux build
     // cannot load them and gets pstx only.
     if (os == .windows) {
         const gui_mod = b.createModule(.{
-            .root_source_file = b.path("src/gui.zig"),
+            .root_source_file = b.path("src/gui_win.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -52,6 +53,9 @@ pub fn build(b: *std.Build) void {
             }),
         });
         gui.root_module.addOptions("build_options", opts);
+        // what Help > Install puts in the applications menu (Linux; src/setup.zig)
+        gui.root_module.addAnonymousImport("icon_png", .{ .root_source_file = b.path("design/icon-256.png") });
+        gui.root_module.addAnonymousImport("desktop_entry", .{ .root_source_file = b.path("packaging/linux/pstview.desktop") });
         b.installArtifact(gui);
     }
 
@@ -75,7 +79,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests (portable modules)
     const test_step = b.step("test", "Run unit tests");
-    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig", "src/mbox.zig", "src/multi.zig", "src/namemap.zig", "src/itemview.zig", "src/rtf.zig", "src/render.zig", "src/export.zig", "src/pst.zig" }) |src| {
+    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig", "src/mbox.zig", "src/multi.zig", "src/namemap.zig", "src/itemview.zig", "src/render.zig", "src/export.zig", "src/pst.zig" }) |src| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(src),

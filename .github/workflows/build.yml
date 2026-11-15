@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # pstview.exe (Win32 GUI) + pstx.exe
+          # pstview.exe (Win32 window + WebView2) + pstx.exe
           - os: windows-latest
             platform: windows
           # pstx static (musl), so it runs on any distribution; pstview (GTK + WebKitGTK, loaded
@@ -60,7 +60,24 @@ jobs:
         run: TZ=Australia/Sydney bash testdata/smoke.sh zig-out/bin/pstx | diff -u testdata/smoke-sydney.txt -
 
       # The GUI opens the demo mailbox, lists a folder, renders a message in the system web view
-      # (sandboxed frame), searches and sorts, then exits 0.
+      # (sandboxed frame), opens it in a window of its own, searches and sorts, then exits 0.
+      - name: GUI self-test (Windows, WebView2)
+        if: matrix.platform == 'windows'
+        run: timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
+
+      - name: Install and uninstall for the user (Linux, scratch home)
+        if: matrix.platform == 'linux'
+        run: |
+          export HOME="$RUNNER_TEMP/home" XDG_DATA_HOME=
+          mkdir -p "$HOME" stage-install
+          cp zig-out-gui/bin/pstview zig-out/bin/pstx stage-install/
+          stage-install/pstview --install
+          test -x "$HOME/.local/bin/pstview" -a -x "$HOME/.local/bin/pstx"
+          grep -q "^Exec=\"$HOME/.local/bin/pstview\" %F" "$HOME/.local/share/applications/pstview.desktop"
+          test -s "$HOME/.local/share/icons/hicolor/256x256/apps/pstview.png"
+          "$HOME/.local/bin/pstview" --uninstall
+          test ! -e "$HOME/.local/bin/pstview" -a ! -e "$HOME/.local/share/applications/pstview.desktop"
+
       - name: GUI self-test (Linux, GTK + WebKitGTK under Xvfb)
         if: matrix.platform == 'linux'
         run: |
@@ -93,7 +110,7 @@ jobs:
               tar -C stage -czf "dist/$name.tar.gz" "$name"
             fi
           }
-          linux_files="packaging/linux/pstview.desktop packaging/linux/install.sh"
+          linux_files="packaging/linux/pstview.desktop"
           cp design/icon-256.png pstview.png
           case "${{ matrix.platform }}" in
             windows) pack windows-x64 zig-out/bin/pstview.exe zig-out/bin/pstx.exe ;;

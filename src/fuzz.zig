@@ -18,7 +18,6 @@ const headers = @import("headers.zig");
 const hreport = @import("headerreport.zig");
 const search = @import("search.zig");
 const rtfcp = @import("rtfcp.zig");
-const rtf = @import("rtf.zig");
 const Smith = std.testing.Smith;
 
 fn fmtTime(buf: []u8, t: ?i64) []const u8 {
@@ -134,7 +133,6 @@ pub fn oneRtfBytes(raw: []const u8) anyerror!void {
     _ = rtfcp.body(a, raw) catch {};
     _ = rtfcp.decompress(a, raw) catch {};
     _ = rtfcp.extract(a, raw) catch {};
-    _ = rtf.colorize(a, raw, "Consolas", 20);
 }
 
 const seed_mail =

@@ -12,32 +12,30 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 
 | File | Platforms | What it is |
 |---|---|---|
-| `pstview.exe` | Windows | GUI (Win32). Folder tree, sortable/searchable message list, preview pane (headers, recipients, attachments, body, internet headers), header analysis, export and reports. Drag a PST, OST, MBOX file or mail folder onto the window, use *File > Open*, or pass it on the command line. |
-| `pstview.app` / `pstview` | macOS, Linux | GUI with the same functions: a native window (Cocoa / GTK) with native open and save dialogs, its content shown by the system web view (WKWebView / WebKitGTK). Use *File > Open*, pass files on the command line, or (macOS) *Open With*. |
+| `pstview.exe` / `pstview.app` / `pstview` | Windows, macOS, Linux | GUI, the same on every platform: folder tree, sortable / searchable message list and a reading pane with tabs (*Message* with HTML mail shown in place, *Header analysis*, *Internet headers*, *Attachments*); double-click or Enter opens a message in a window of its own. Header analysis, export and reports. A native window (Win32 / Cocoa / GTK) with native open and save dialogs, its content shown by the system web view (WebView2 / WKWebView / WebKitGTK). Use *File > Open*, drop a PST, OST, MBOX file or mail folder on the window, pass files on the command line, or *Open with*. |
 | `pstx` / `pstx.exe` | Windows, macOS, Linux | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. Takes a `.pst`, `.ost`, MBOX file or folder of MBOX mailboxes (`hidden`, `verify` and `recover` are PST/OST only; `analyse` takes a `.eml` or a text file of headers). |
 
 Release downloads, each with both programs: `pstview-<version>-windows-x64.zip`, and `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64` archives.
 
 * **macOS:** `pstview.app` and `pstx`. They are ad-hoc signed, not notarised: after unpacking, run `xattr -dr com.apple.quarantine pstview.app pstx` (or allow them in *System Settings > Privacy & Security*). Needs macOS 11 or later; nothing else to install.
-* **Linux:** `pstview` needs GTK 3 and WebKitGTK, which most desktops already have (`sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0`, `sudo dnf install gtk3 webkit2gtk4.1`, `sudo pacman -S gtk3 webkit2gtk-4.1`); it says so when they are missing. `pstx` is static and runs on any distribution. `./install.sh` copies both to `~/.local/bin` and adds a menu entry (`./install.sh --uninstall` removes them); running them from the unpacked folder works too.
+* **Windows:** `pstview.exe` needs the Microsoft Edge WebView2 Runtime, which is part of Windows 11 and of up-to-date Windows 10; it says so when it is missing. `pstx.exe` needs nothing.
+* **Linux:** `pstview` needs GTK 3 and WebKitGTK, which most desktops already have (`sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0`, `sudo dnf install gtk3 webkit2gtk4.1`, `sudo pacman -S gtk3 webkit2gtk-4.1`); it says so when they are missing. `pstx` is static and runs on any distribution. Running them from the unpacked folder works; *Help > Install* (or `./pstview --install`) installs them for the user.
 
 ## HTML mail and reports
 
-HTML messages, the header analysis report and the property list are shown inside pstview by the web view that is part of the operating system - no bundled browser engine: **WebView2** on Windows (included in Windows 11; *Message > View HTML*, Ctrl+H), **WKWebView** on macOS and **WebKitGTK** on Linux (the reading pane). Without a WebView2 runtime, Windows falls back to the default browser.
+HTML messages (in the reading pane's *Message* tab and in message windows), the header analysis report and the property list are shown inside pstview by the web view that is part of the operating system - no bundled browser engine: **WebView2** on Windows, **WKWebView** on macOS and **WebKitGTK** on Linux. The *Attachments* tab shows text attachments as text and PNG / JPEG / GIF / BMP / WebP images as pictures; anything else can only be saved.
 
 **Light and dark.** pstview follows the system's light or dark setting on every platform, and *View > Theme* switches it for the session (the choice is not stored: pstview writes no settings). HTML mail is always laid out on white inside the themed window - mail is written for a white page and often sets only its text colour, which would leave black text on a dark ground; plain-text mail and the reports follow the theme.
 
-What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The mail's own CSS is confined to the mail: its rules are re-scoped to the mail's container, which also clips it, so a message can neither restyle nor cover the header block above it (sender, dates, the safe-view note). The web view itself runs the page with scripts disabled (a sandboxed frame on macOS / Linux), refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
+What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The mail's own CSS is confined to the mail: its rules are re-scoped to the mail's container, which also clips it, so a message can neither restyle nor cover the header block above it (sender, dates, the safe-view note). The message is shown in a sandboxed frame, where no script runs; the web view refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
 
-## Portable or installed (Windows)
+## Portable or installed
 
-pstview runs straight from the release zip; portable use writes nothing to the PC. On start it offers to install for the current user, and *Help > Install pstview for this user* does the same at any time. Ticking *Don't offer this again* keeps it portable and stores only that choice (`HKCU\Software\pstview`, value `NoInstallPrompt`). Installing:
+pstview runs straight from the release archive; portable use writes nothing to the computer. *Help > Install pstview for this user* installs it, *Help > Uninstall pstview* removes exactly what was installed, and the item between them makes pstview the default for mailbox files. No administrator or root rights are needed on any platform.
 
-* copies `pstview.exe` and `pstx.exe` to `%LOCALAPPDATA%\Programs\pstview`, with a Start menu shortcut;
-* registers file handlers for `.pst`, `.ost`, `.mbox` and `.mbx` (an *Open with* entry everywhere; the default only for types no other app has claimed - Windows asks the user to confirm defaults, see *Help > Choose default apps*);
-* adds an uninstall entry to *Settings > Apps*.
-
-Everything is per user under `HKCU`, so no administrator rights are needed. *Help > Uninstall pstview* (or *Settings > Apps*) removes the files, the shortcut and only the registry values pstview added.
+* **Windows:** copies `pstview.exe` and `pstx.exe` to `%LOCALAPPDATA%\Programs\pstview` with a Start menu shortcut; registers file handlers for `.pst`, `.ost`, `.mbox` and `.mbx` (an *Open with* entry everywhere; the default only for types no other app has claimed - Windows asks the user to confirm defaults, see *Help > Choose default apps*); adds an uninstall entry to *Settings > Apps*. Everything is per user under `HKCU`. A portable copy offers to install when it starts; *Don't offer this again* stores only that choice (`HKCU\Software\pstview`, value `NoInstallPrompt`).
+* **Linux:** copies `pstview` and `pstx` to `~/.local/bin` and adds a menu entry, the icon and a file type for `.pst` / `.ost` under `~/.local/share`. *Help > Make pstview the default* runs `xdg-mime`. From a terminal: `pstview --install`, `pstview --uninstall`.
+* **macOS:** copies `pstview.app` to `~/Applications` and registers it with Launch Services. The default app for a file type is chosen in Finder (*Get Info > Open with > Change All*); the Help menu item says so.
 
 ### pstx examples
 
@@ -65,7 +63,7 @@ pstx recover backup.ost                             # deleted items / earlier ve
 
 ## Calendar, contacts, tasks, notes and journal
 
-Item fields are shown in the preview, the message window, the HTML view and `pstx show`. Most of them are named properties (IDs 0x8000+); pstview reads each PST's name-to-ID map (NID 0x61) to find them:
+Item fields are shown in the reading pane, the message window and `pstx show`. Most of them are named properties (IDs 0x8000+); pstview reads each PST's name-to-ID map (NID 0x61) to find them:
 
 * **Appointments / meetings:** start, end, all-day, duration, location, recurrence pattern, time zone, show-as, meeting state (organised, received, cancelled), response, organiser and required / optional / resource attendees.
 * **Contacts:** full name, file-as, name parts, nickname, company, title, department, office, manager, assistant, up to three e-mail addresses, all phone numbers, business / home / other addresses, web pages, IM, birthday, anniversary, partner. **Distribution lists:** members.
@@ -95,7 +93,7 @@ Open several PST/OST files together (multi-select in *File > Open*, drop several
 
 ## Header analysis
 
-A message-header analyser in the spirit of Microsoft's Message Header Analyzer, MXToolbox and the Google Admin Toolbox, built in and **fully offline** (no DNS, reputation or geo-IP lookups; nothing leaves the machine). In the GUI: *Message > Header analysis report* (Ctrl+I) for the selected item, or *Tools > Analyse headers from clipboard / from .eml or .txt file* for headers copied from anywhere. The report opens as a self-contained HTML page and shows:
+A message-header analyser in the spirit of Microsoft's Message Header Analyzer, MXToolbox and the Google Admin Toolbox, built in and **fully offline** (no DNS, reputation or geo-IP lookups; nothing leaves the machine). In the GUI: the *Header analysis* tab of the reading pane, *Message > Header analysis report* (Ctrl+I) for the full report on the selected item, or *Tools > Analyse pasted headers / headers from .eml or .txt file* for headers copied from anywhere. The report opens as a self-contained HTML page and shows:
 
 * **Verdict and findings:** spoofing, impersonation of internal users, lookalike domains, Reply-To diversion, failed authentication, Microsoft 365 phishing/spam verdicts, delays and clock skew.
 * **Summary:** From, Sender, Reply-To, Return-Path, recipients, Date, Message-ID, mailer, total delivery time, earliest recorded origin IP.
@@ -137,9 +135,9 @@ zig build -Drelease -Dtarget=x86_64-linux-gnu    # pstview + pstx for Linux (gli
 zig build -Drelease -Dtarget=aarch64-macos       # pstview + pstx for macOS, from any host
 ```
 
-On macOS and Linux `pstx` uses libc for the local time zone and `iconv` (macOS: `libiconv`, loaded at run time). The GUI there loads its platform libraries at run time as well (the Objective-C runtime, AppKit and WebKit on macOS; GTK 3 and WebKitGTK on Linux), so nothing but libc is linked, no SDK or development package is needed, and every target can be cross-compiled from any host. A static musl build cannot load shared libraries and therefore produces `pstx` only. `packaging/macos/make-app.sh` wraps the macOS binaries in `pstview.app`.
+On macOS and Linux `pstx` uses libc for the local time zone and `iconv` (macOS: `libiconv`, loaded at run time). The GUI loads its web view at run time on every platform (the installed WebView2 runtime on Windows, found through the registry - no loader DLL is shipped; the Objective-C runtime, AppKit and WebKit on macOS; GTK 3 and WebKitGTK on Linux), so no SDK or development package is needed, and every target can be cross-compiled from any host. A static musl build cannot load shared libraries and therefore produces `pstx` only. `packaging/macos/make-app.sh` wraps the macOS binaries in `pstview.app`.
 
-CI builds all platforms, checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`), and runs the GUI self-test on macOS and Linux: `pstview --selftest <source>` opens the source, lists a folder, renders a message in the web view, searches and sorts, then exits 0 or 1.
+CI builds all platforms, checks that `pstx` prints identical output for the demo mailbox everywhere (`testdata/smoke.sh`), and runs the GUI self-test on Windows, macOS and Linux: `pstview --selftest <source>` opens the source, lists a folder, renders a message in the web view, opens it in a window of its own, searches and sorts, then exits 0 or 1.
 
 The version shown in *Help > About* and by `pstx --version` comes from `git describe`; set `release_version` in `build.zig` before tagging a release (a tag that does not match it fails the build).
 
@@ -153,9 +151,9 @@ The version shown in *Help > About* and by `pstx --version` comes from `git desc
 * `src/mime.zig`: RFC 5322 / MIME parsing (encoded words, parameters, dates, addresses, multipart bodies).
 * `src/mbox.zig`: MBOX reader (Takeout labels, Thunderbird, Apple Mail); `src/multi.zig`: several PST/OST parts merged into one mailbox; `src/store.zig`: one interface over all sources.
 * `src/export.zig`: EML and MSG (Compound File Binary) writers, CSV/HTML reports.
-* `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings; `src/webview2.zig`: the in-app HTML viewer (WebView2).
-* `src/gui_posix.zig`, `src/webapp.zig`, `src/webui.html`: macOS / Linux GUI - entry point, the model that answers the page's requests, and the page; `src/gui_mac.zig` (Cocoa, WKWebView) and `src/gui_gtk.zig` (GTK 3, WebKitGTK): window, web view and dialogs.
-* `src/ui.zig`: Windows visual style (palette from `design/`, folder glyphs, welcome screen, task dialogs); `src/glyph.zig`: folder-to-glyph mapping shared by the GUIs; `src/install.zig`: per-user install / uninstall (Windows); `packaging/`: macOS app bundle, Linux desktop entry and installer.
+* `src/webui.html`, `src/webapp.zig`: the GUI, shared by all platforms - the page (visual style after `design/`) and the model that answers its requests; `src/glyph.zig`: folder-to-glyph mapping.
+* `src/gui_win.zig` (Win32, WebView2; bindings in `src/win.zig`), `src/gui_mac.zig` (Cocoa, WKWebView), `src/gui_gtk.zig` (GTK 3, WebKitGTK): windows, web views and dialogs per platform; `src/gui_posix.zig`: macOS / Linux entry point.
+* `src/setup.zig`: per-user install / uninstall / default apps on every platform (Windows registry work in `src/install.zig`); `packaging/`: macOS app bundle, Linux desktop entry.
 * `src/fuzz.zig`: fuzz targets for everything that reads untrusted content (mail parsing, rendering, export, header analysis, RTF) and the properties they check.
 * `src/cli.zig`: command line; `src/platform.zig`: local time zone and charset conversion per OS (Win32 or libc).
 * `testdata/`: the fictional demo mailbox, its generator and the cross-platform smoke test.
