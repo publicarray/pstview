@@ -1,3 +1,5 @@
+<img src="design/icon-128.png" alt="pstview logo: an envelope under a magnifying glass" width="96" align="right">
+
 # pstview
 
 A small, read-only viewer and exporter for Outlook `.pst` / `.ost` files and MBOX mailboxes, with offline header analysis and recovery of deleted items. Written in Zig with no third-party dependencies; the GUI and the command-line tool run on Windows, macOS and Linux.
