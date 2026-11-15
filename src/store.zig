@@ -17,7 +17,7 @@ pub const recover = @import("recover.zig");
 pub const Store = union(enum) {
     pst: *pst.Pst,
     mbox: *mbox.Mbox,
-    /// Several PST/OST files merged into one mailbox (e.g. an Acronis export in parts).
+    /// Several PST/OST files merged into one mailbox (e.g. a backup exported in parts).
     set: *multi.Set,
 
     /// Open `path`: a PST/OST (by signature), an mbox file, a directory (PST/OST parts are merged

@@ -717,7 +717,7 @@ async function act(name) {
     }
     case 'about':
       return dialog('pstview', `Version ${esc(st.version)}<br><br>Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.<br><br>` +
-        `Opens PST and OST files (including Outlook 2013+ OSTs and multi-part Acronis exports) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.<br><br>` +
+        `Opens PST and OST files (including Outlook 2013+ OSTs and mailboxes exported in several parts) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.<br><br>` +
         `Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.<br><br>` +
         `Messages are shown by the system web view with scripts and all network access blocked.<br><br>${esc(st.setup.about || '')}<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
   }

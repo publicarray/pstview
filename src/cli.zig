@@ -310,7 +310,7 @@ fn pstOnly(out: *Io.Writer, f: Store, cmd: []const u8) ?*pst.Pst {
 }
 
 /// Resolve "Inbox/0.1 Inbox read" style paths below the top-of-store folder.
-/// With duplicate names (Acronis exports can contain two "Deleted Items"), the folder with most items wins.
+/// With duplicate names (an export can contain two "Deleted Items"), the folder with most items wins.
 pub fn findFolder(a: std.mem.Allocator, f: Store, path: []const u8) !?u32 {
     var cur: u32 = f.rootFolder();
     const top = try f.subFolders(a, cur);

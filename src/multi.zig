@@ -1,4 +1,4 @@
-//! Several PST/OST files opened as one mailbox - typically an Acronis Microsoft 365 backup exported
+//! Several PST/OST files opened as one mailbox - typically a mailbox backup exported
 //! as a set of PST parts.
 //!
 //! The folder trees of all parts are merged by folder path (case-insensitive): "Inbox" in part 1
