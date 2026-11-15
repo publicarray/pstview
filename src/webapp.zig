@@ -112,6 +112,10 @@ pub fn init(gpa: Allocator, io: Io, shell: Shell, start_paths: []const []const u
 
 pub fn deinit() void {
     closeSource();
+    app.gpa.free(app.last_doc);
+    app.gpa.free(app.last_doc_name);
+    app.last_doc = &.{};
+    app.last_doc_name = &.{};
 }
 
 /// Files handed over by the desktop (macOS "Open With", dock drop), before or after the page is up.
@@ -440,6 +444,9 @@ fn startFolder() i64 {
 
 fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent: i32, depth: u32) !void {
     if (depth > 64) return;
+    // a damaged file can list a folder as its own sub-folder: each folder is shown once
+    if (depth > 0 and nid == app.file.?.rootFolder()) return;
+    for (app.folders.items) |seen| if (seen.kind == .normal and seen.nid == nid) return;
     const info = app.file.?.folderInfo(a, nid) catch return;
     const is_root = nid == app.file.?.rootFolder();
     var idx = parent;
@@ -867,8 +874,9 @@ fn exportSelected(a: Allocator, out: *List, kind: ExportKind, sel: []const u8) E
         .format = app.file.?.describe(&fmt_buf),
         .sha256_hex = sha,
         .generated_utc = now,
-        .tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time",
+        .tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time; daylight saving applied for each date)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time",
         .tz_offset = off,
+        .offset_at = &platform.localOffset,
         .title = std.fmt.allocPrint(a, "Export report - {s}", .{fpath}) catch "Export report",
     };
     var report_failed = false;
@@ -903,7 +911,7 @@ fn saveAttachments(a: Allocator, out: *List, nid: u32, which: ?usize) Error!void
         const att = &m.attachments[i];
         var ext: []const u8 = "";
         const data = attachmentBytes(a, att, &ext) orelse return failure(a, out, "The attachment could not be read.", .{});
-        const name = if (ext.len > 0) (exp.safeName(a, "", att.filename, ext) catch "embedded.msg") else (if (att.filename.len > 0) std.fs.path.basename(att.filename) else "attachment.bin");
+        const name = if (ext.len > 0) (exp.safeName(a, "", att.filename, ext) catch "embedded.msg") else (exp.safeFileName(a, "", if (att.filename.len > 0) att.filename else "attachment.bin") catch "attachment.bin");
         const path = app.shell.pickSave(a, "Save attachment as", name) orelse return out.appendSlice(a, "{\"cancelled\":true}");
         writePath(path, data) catch |e| return failure(a, out, "Save failed: {s}", .{@errorName(e)});
         return message(a, out, "Saved:\n{s}", .{path});
@@ -916,8 +924,7 @@ fn saveAttachments(a: Allocator, out: *List, nid: u32, which: ?usize) Error!void
         var pb: [8]u8 = undefined;
         const pfx = std.fmt.bufPrint(&pb, "{d:0>2}", .{i + 1}) catch "";
         const fname = if (att.filename.len > 0) att.filename else "attachment";
-        const dot = std.mem.lastIndexOfScalar(u8, fname, '.');
-        const name = exp.safeName(a, pfx, if (ext.len > 0) fname else (if (dot) |d| fname[0..d] else fname), if (ext.len > 0) ext else (if (dot) |d| fname[d + 1 ..] else "bin")) catch continue;
+        const name = (if (ext.len > 0) exp.safeName(a, pfx, fname, ext) else exp.safeFileName(a, pfx, fname)) catch continue;
         writeFile(a, picked[0], name, data) catch continue;
         saved += 1;
     }

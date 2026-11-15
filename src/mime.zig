@@ -488,7 +488,7 @@ pub fn parseDate(s: []const u8) ?i64 {
     const d = day orelse return null;
     const m = month orelse return null;
     const y = year orelse return null;
-    if (!have_time or d < 1 or d > 31 or y < 1900 or y > 9999 or hh > 23 or mi > 59 or ss > 60) return null;
+    if (!have_time or d < 1 or d > 31 or y < 1900 or y > 9999 or hh < 0 or hh > 23 or mi < 0 or mi > 59 or ss < 0 or ss > 60) return null;
     return daysFromCivil(y, m, d) * 86400 + hh * 3600 + mi * 60 + ss - zone;
 }
 

@@ -540,38 +540,73 @@ pub fn buildMsg(a: Allocator, m: *pst.Message) ![]u8 {
 
 // ================================================================ file names
 
-/// Windows-safe file name: "<prefix> <subject>.<ext>" (max ~150 chars).
-pub fn safeName(a: Allocator, prefix: []const u8, subject: []const u8, ext: []const u8) ![]u8 {
+/// A character that must not reach a file name: path separators and the other characters
+/// Windows refuses, control characters, and the invisible direction marks that make
+/// "invoice[RLO]fdp.exe" read as "invoiceexe.pdf".
+fn badNameChar(cs: []const u8) bool {
+    if (cs.len == 1) return cs[0] < 0x20 or cs[0] == 0x7F or std.mem.indexOfScalar(u8, "<>:\"/\\|?*", cs[0]) != null;
+    const c = std.unicode.utf8Decode(cs) catch return true;
+    return (c >= 0x80 and c <= 0x9F) or c == 0x200E or c == 0x200F or (c >= 0x202A and c <= 0x202E) or (c >= 0x2066 and c <= 0x2069) or c == 0xFEFF;
+}
+
+/// Device names Windows opens instead of a file, whatever the extension ("NUL.txt").
+fn reservedName(stem: []const u8) bool {
+    const t = std.mem.trim(u8, stem, " .");
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |r| if (std.ascii.eqlIgnoreCase(t, r)) return true;
+    return t.len == 4 and std.ascii.isDigit(t[3]) and (std.ascii.eqlIgnoreCase(t[0..3], "COM") or std.ascii.eqlIgnoreCase(t[0..3], "LPT"));
+}
+
+/// File name that is safe on every platform: "<prefix> <subject>.<ext>". Subject and extension
+/// come from the mailbox (subjects, attachment names) and are not trusted: nothing in the result
+/// is a path separator, and it fits the 255 bytes a name may have on macOS / Linux.
+pub fn safeName(a: Allocator, prefix: []const u8, subject: []const u8, ext_in: []const u8) ![]u8 {
+    var ext: List = .empty;
+    for (ext_in) |c| {
+        if (ext.items.len >= 16) break;
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_') try ext.append(a, c);
+    }
+    if (ext.items.len == 0) try ext.appendSlice(a, "bin");
     var out: List = .empty;
     try out.appendSlice(a, prefix);
     if (prefix.len > 0) try out.append(a, ' ');
+    const stem_at = out.items.len;
     var count: usize = 0;
     var view = std.unicode.Utf8View.init(subject) catch std.unicode.Utf8View.initUnchecked("");
     var it = view.iterator();
     while (it.nextCodepointSlice()) |cs| {
-        if (count >= 100) break;
-        if (cs.len == 1) {
-            const c = cs[0];
-            if (c < 0x20 or std.mem.indexOfScalar(u8, "<>:\"/\\|?*", c) != null) {
-                try out.append(a, '_');
-                count += 1;
-                continue;
-            }
-        }
-        try out.appendSlice(a, cs);
+        if (count >= 100 or out.items.len + cs.len > 200) break;
+        if (badNameChar(cs)) try out.append(a, '_') else try out.appendSlice(a, cs);
         count += 1;
     }
-    while (out.items.len > 0 and (out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '.')) _ = out.pop();
-    if (count == 0) try out.appendSlice(a, "(no subject)");
+    while (out.items.len > stem_at and (out.items[out.items.len - 1] == ' ' or out.items[out.items.len - 1] == '.')) _ = out.pop();
+    if (out.items.len == stem_at) try out.appendSlice(a, "(no subject)");
+    if (prefix.len == 0 and reservedName(out.items)) try out.insert(a, 0, '_');
     try out.append(a, '.');
-    try out.appendSlice(a, ext);
+    try out.appendSlice(a, ext.items);
     return out.toOwnedSlice(a);
+}
+
+/// `safeName` for an attachment's own file name: the last path component, keeping a plain
+/// extension ("report.final.pdf"); "bin" when there is none.
+pub fn safeFileName(a: Allocator, prefix: []const u8, file_name: []const u8) ![]u8 {
+    const base = if (std.mem.lastIndexOfAny(u8, file_name, "/\\")) |sep| file_name[sep + 1 ..] else file_name;
+    if (std.mem.lastIndexOfScalar(u8, base, '.')) |d| {
+        const ext = base[d + 1 ..];
+        const plain = for (ext) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') break false;
+        } else true;
+        if (d > 0 and ext.len > 0 and ext.len <= 16 and plain) return safeName(a, prefix, base[0..d], ext);
+    }
+    return safeName(a, prefix, base, "bin");
 }
 
 // ================================================================ reports
 
+/// One quoted CSV field. A value that a spreadsheet would run as a formula ("=HYPERLINK(...)",
+/// "+cmd|...", "@SUM") gets a leading apostrophe: subjects and names come from the mailbox.
 pub fn csvField(a: Allocator, out: *List, s: []const u8) !void {
     try out.append(a, '"');
+    if (s.len > 0 and std.mem.indexOfScalar(u8, "=+-@\t\r", s[0]) != null) try out.append(a, '\'');
     for (s) |c| {
         if (c == '"') try out.append(a, '"');
         if (c == '\r' or c == '\n') {
@@ -617,8 +652,19 @@ pub const ReportMeta = struct {
     sha256_hex: []const u8,
     generated_utc: i64,
     tz_label: []const u8,
+    /// Seconds east of UTC, for every time when `offset_at` is not set.
     tz_offset: i64,
+    /// The local offset at a given time. With it each date gets its own daylight-saving
+    /// offset, as in the item list and the exported file names; one fixed offset would put the
+    /// dates of the other half of the year an hour out.
+    offset_at: ?*const fn (t: i64) i64 = null,
+
     title: []const u8,
+
+    fn time(meta: ReportMeta, buf: []u8, t: ?i64) []const u8 {
+        const off = if (meta.offset_at) |f| (if (t) |v| f(v) else 0) else meta.tz_offset;
+        return pst.fmtTime(buf, t, off);
+    }
 };
 
 pub fn reportCsv(a: Allocator, rows: []const ReportRow, meta: ReportMeta) ![]u8 {
@@ -629,11 +675,11 @@ pub fn reportCsv(a: Allocator, rows: []const ReportRow, meta: ReportMeta) ![]u8 
     for (rows) |r| {
         try csvField(a, &out, r.folder);
         try out.print(a, ",0x{x:0>8},", .{r.nid});
-        try csvField(a, &out, pst.fmtTime(&b, r.received, meta.tz_offset));
+        try csvField(a, &out, meta.time(&b, r.received));
         try out.append(a, ',');
-        try csvField(a, &out, pst.fmtTime(&b, r.sent, meta.tz_offset));
+        try csvField(a, &out, meta.time(&b, r.sent));
         try out.append(a, ',');
-        try csvField(a, &out, pst.fmtTime(&b, r.modified, meta.tz_offset));
+        try csvField(a, &out, meta.time(&b, r.modified));
         inline for (.{ "from", "to", "cc", "subject", "class" }) |f| {
             try out.append(a, ',');
             try csvField(a, &out, @field(r, f));
@@ -685,9 +731,9 @@ pub fn reportHtml(a: Allocator, rows: []const ReportRow, meta: ReportMeta) ![]u8
     for (rows, 0..) |r, i| {
         try out.print(a, "<tr><td>{d}</td><td>", .{i + 1});
         try htmlEscape(a, &out, r.folder);
-        try out.print(a, "</td><td>{s}</td>", .{pst.fmtTime(&b, r.received, meta.tz_offset)});
-        try out.print(a, "<td>{s}</td>", .{pst.fmtTime(&b, r.sent, meta.tz_offset)});
-        try out.print(a, "<td>{s}</td><td>", .{pst.fmtTime(&b, r.modified, meta.tz_offset)});
+        try out.print(a, "</td><td>{s}</td>", .{meta.time(&b, r.received)});
+        try out.print(a, "<td>{s}</td>", .{meta.time(&b, r.sent)});
+        try out.print(a, "<td>{s}</td><td>", .{meta.time(&b, r.modified)});
         try htmlEscape(a, &out, r.from);
         try out.appendSlice(a, "</td><td>");
         try htmlEscape(a, &out, r.to);
@@ -707,4 +753,64 @@ pub fn reportHtml(a: Allocator, rows: []const ReportRow, meta: ReportMeta) ![]u8
     }
     try out.appendSlice(a, "</table></body></html>\n");
     return out.toOwnedSlice(a);
+}
+
+test "file names from mailbox content" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = std.testing;
+    try t.expectEqualStrings("00000004 Re_ a_b.eml", try safeName(a, "00000004", "Re: a/b", "eml"));
+    try t.expectEqualStrings("01 passwd.bin", try safeFileName(a, "01", "../../etc/passwd"));
+    try t.expectEqualStrings("01 x.bin", try safeFileName(a, "01", "a./../x"));
+    try t.expectEqualStrings("01 a.txt_evil.bin", try safeFileName(a, "01", "a.txt:evil"));
+    try t.expectEqualStrings("01 x.exe", try safeFileName(a, "01", "..\\\\windows\\x.exe"));
+    try t.expectEqualStrings("_NUL.txt", try safeFileName(a, "", "NUL.txt"));
+    try t.expectEqualStrings("_com1.bin", try safeFileName(a, "", "com1"));
+    try t.expectEqualStrings("01 NUL.txt", try safeFileName(a, "01", "NUL.txt"));
+    try t.expectEqualStrings("(no subject).eml", try safeName(a, "", " . ", "eml"));
+    try t.expectEqualStrings("invoice_fdp.exe", try safeFileName(a, "", "invoice\u{202E}fdp.exe"));
+    try t.expectEqualStrings("report.final.pdf", try safeFileName(a, "", "report.final.pdf"));
+    try t.expectEqualStrings("02 README.bin", try safeFileName(a, "02", "README"));
+    try t.expectEqualStrings("02 .bashrc.bin", try safeFileName(a, "02", ".bashrc"));
+    try t.expectEqualStrings("02 (no subject).bin", try safeFileName(a, "02", "x/"));
+    // 100 three-byte characters would be 300 bytes: more than a file name may have
+    var subject: List = .empty;
+    for (0..100) |_| try subject.appendSlice(a, "\u{3042}");
+    const long = try safeName(a, "00000004", subject.items, "eml");
+    try t.expect(long.len <= 255 and std.unicode.utf8ValidateSlice(long));
+    try t.expect(std.mem.endsWith(u8, long, "\u{3042}.eml"));
+}
+
+test "CSV fields cannot be formulas" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var out: List = .empty;
+    for ([_][]const u8{ "=HYPERLINK(\"http://x\")", "+1", "-1", "@SUM(A1)", "a \"b\"\r\nc", "" }) |v| {
+        try csvField(a, &out, v);
+        try out.append(a, ',');
+    }
+    try std.testing.expectEqualStrings("\"'=HYPERLINK(\"\"http://x\"\")\",\"'+1\",\"'-1\",\"'@SUM(A1)\",\"a \"\"b\"\"  c\",\"\",", out.items);
+}
+
+test "report times follow daylight saving per date" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Zone = struct {
+        // one hour ahead of UTC until 2026-10-25 01:00 UTC, level with it after
+        fn offset(t: i64) i64 {
+            return if (t < 1792890000) 3600 else 0;
+        }
+    };
+    const row: ReportRow = .{ .folder = "Inbox", .nid = 3, .received = 1792537200, .sent = 1792976400, .modified = null, .from = "", .to = "", .cc = "", .subject = "=1+1", .class = "", .size = 0, .attachments = "", .export_file = "" };
+    var meta: ReportMeta = .{ .pst_path = "x.pst", .pst_size = 0, .sha256_hex = "", .generated_utc = 1794700800, .tz_label = "local time", .tz_offset = 0, .title = "t", .offset_at = &Zone.offset };
+    const csv = try reportCsv(a, &.{row}, meta);
+    try std.testing.expect(std.mem.indexOf(u8, csv, "\"2026-10-21 00:00:00\",\"2026-10-26 01:00:00\",\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, csv, "\"'=1+1\"") != null);
+    const html = try reportHtml(a, &.{row}, meta);
+    try std.testing.expect(std.mem.indexOf(u8, html, "2026-10-21 00:00:00") != null and std.mem.indexOf(u8, html, "2026-10-26 01:00:00") != null);
+    meta.offset_at = null; // a fixed offset still works
+    try std.testing.expect(std.mem.indexOf(u8, try reportCsv(a, &.{row}, meta), "\"2026-10-20 23:00:00\"") != null);
 }

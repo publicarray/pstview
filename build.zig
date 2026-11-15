@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests (portable modules)
     const test_step = b.step("test", "Run unit tests");
-    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig", "src/mbox.zig", "src/multi.zig", "src/namemap.zig", "src/itemview.zig", "src/rtf.zig" }) |src| {
+    for ([_][]const u8{ "src/rtfcp.zig", "src/mime.zig", "src/headers.zig", "src/mbox.zig", "src/multi.zig", "src/namemap.zig", "src/itemview.zig", "src/rtf.zig", "src/render.zig", "src/export.zig", "src/pst.zig" }) |src| {
         const tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(src),
@@ -85,6 +85,23 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+
+    // Fuzz targets for untrusted content (src/fuzz.zig): once over the seed inputs as part of
+    // `zig build test`; `zig build fuzz --fuzz` keeps mutating them, guided by coverage.
+    // --fuzz=<limit> works through one target: -Dfuzz-target=<part of its name> picks it
+    // ("message", "header block", "sanitiser", "RTF").
+    const fuzz_target = b.option([]const u8, "fuzz-target", "Fuzz only the targets whose name contains this text");
+    const fuzz_tests = b.addTest(.{
+        .filters = if (fuzz_target) |f| &.{f} else &.{},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_fuzz = b.addRunArtifact(fuzz_tests);
+    b.step("fuzz", "Run the fuzz targets (add --fuzz to keep searching)").dependOn(&run_fuzz.step);
+    test_step.dependOn(&run_fuzz.step);
 }
 
 /// `git describe` without the leading "v"; the release version plus the commit id when no tag is

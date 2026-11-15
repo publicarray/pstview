@@ -27,7 +27,7 @@ HTML messages, the header analysis report and the property list are shown inside
 
 **Light and dark.** pstview follows the system's light or dark setting on every platform, and *View > Theme* switches it for the session (the choice is not stored: pstview writes no settings). HTML mail is always laid out on white inside the themed window - mail is written for a white page and often sets only its text colour, which would leave black text on a dark ground; plain-text mail and the reports follow the theme.
 
-What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The web view itself runs the page with scripts disabled (a sandboxed frame on macOS / Linux), refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
+What is shown is never the raw message: the HTML is sanitised (scripts, frames, forms, event handlers and `javascript:` URLs removed), remote images and CSS are replaced and counted so no tracking pixel is fetched, `cid:` images are embedded from the attachments, and a Content-Security-Policy forbids scripts and network access. The mail's own CSS is confined to the mail: its rules are re-scoped to the mail's container, which also clips it, so a message can neither restyle nor cover the header block above it (sender, dates, the safe-view note). The web view itself runs the page with scripts disabled (a sandboxed frame on macOS / Linux), refuses every navigation and new window - a link in a message leads nowhere - and keeps no profile (macOS / Linux: non-persistent; Windows: a temp folder deleted on exit).
 
 ## Portable or installed (Windows)
 
@@ -46,6 +46,7 @@ pstx tree    backup.pst
 pstx list    backup.pst "Inbox/0.1 Inbox read"
 pstx list    backup.pst 0x8462                  # folder by NID (shown by `tree`)
 pstx show    backup.pst 00200044                # one message by NID
+pstx show    backup.pst 00200044 --html msg.html  # the sanitised safe view of the GUI, as a page
 pstx export  backup.pst 0x8462 C:\out msg --modified 2026-11-05
 pstx export  backup.pst "Sent Items" C:\out eml --match "contract"
 pstx hash    backup.pst
@@ -58,7 +59,9 @@ pstx props   backup.pst 00200044 --html props.html  # every MAPI property of one
 pstx recover backup.ost                             # deleted items / earlier versions from stale index pages
 ```
 
-`export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date.
+`export` writes one `.msg` or `.eml` per item plus `pstview report.html` and `pstview report.csv` (source path, size, file format, SHA-256, every item's dates, sender, recipients, subject, attachments and exported file name). Dates for `--modified` and in reports are in this computer's local time zone, with daylight saving applied for each date. In the CSV a value that a spreadsheet would run as a formula (a subject starting with `=`, `+`, `-` or `@`) gets a leading apostrophe. File names are built from subjects and attachment names with path separators, control and direction-override characters replaced.
+
+`pstx` exits with 0 when the command did what was asked and 1 otherwise (source cannot be opened, folder or item not found, an item that could not be exported - the export continues with the rest and lists the failures).
 
 ## Calendar, contacts, tasks, notes and journal
 
@@ -126,7 +129,9 @@ Requires Zig 0.17 (0.17.1 or newer).
 ```
 zig build -Drelease      # -> zig-out\bin\pstview.exe, pstx.exe (ReleaseSafe)
 zig build                # Debug build
-zig build test           # unit tests
+zig build test           # unit tests, and every fuzz target once over its seed inputs
+zig build fuzz -Doptimize=ReleaseSafe --fuzz=10K                         # coverage-guided fuzzing of untrusted content
+zig build fuzz -Doptimize=ReleaseSafe -Dfuzz-target=sanitiser --fuzz=1M  # one target: "raw message", "header block", "sanitiser", "RTF"
 zig build -Drelease -Dtarget=x86_64-linux-musl   # static pstx for Linux, from any host
 zig build -Drelease -Dtarget=x86_64-linux-gnu    # pstview + pstx for Linux (glibc), from any host
 zig build -Drelease -Dtarget=aarch64-macos       # pstview + pstx for macOS, from any host
@@ -151,6 +156,7 @@ The version shown in *Help > About* and by `pstx --version` comes from `git desc
 * `src/gui.zig`, `src/win.zig`: Win32 GUI and bindings; `src/webview2.zig`: the in-app HTML viewer (WebView2).
 * `src/gui_posix.zig`, `src/webapp.zig`, `src/webui.html`: macOS / Linux GUI - entry point, the model that answers the page's requests, and the page; `src/gui_mac.zig` (Cocoa, WKWebView) and `src/gui_gtk.zig` (GTK 3, WebKitGTK): window, web view and dialogs.
 * `src/ui.zig`: Windows visual style (palette from `design/`, folder glyphs, welcome screen, task dialogs); `src/glyph.zig`: folder-to-glyph mapping shared by the GUIs; `src/install.zig`: per-user install / uninstall (Windows); `packaging/`: macOS app bundle, Linux desktop entry and installer.
+* `src/fuzz.zig`: fuzz targets for everything that reads untrusted content (mail parsing, rendering, export, header analysis, RTF) and the properties they check.
 * `src/cli.zig`: command line; `src/platform.zig`: local time zone and charset conversion per OS (Win32 or libc).
 * `testdata/`: the fictional demo mailbox, its generator and the cross-platform smoke test.
 

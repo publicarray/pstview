@@ -488,13 +488,18 @@ pub const Pst = struct {
         if (self.all_nodes) |n| return n;
         var list: std.ArrayList(NbtEntry) = .empty;
         errdefer list.deinit(self.gpa);
-        try self.walkNbt(self.nbt_ib, &list, 0);
+        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer seen.deinit(self.gpa);
+        try self.walkNbt(self.nbt_ib, &list, &seen, 0);
         self.all_nodes = try list.toOwnedSlice(self.gpa);
         return self.all_nodes.?;
     }
 
-    fn walkNbt(self: *Pst, ib: u64, list: *std.ArrayList(NbtEntry), depth: u8) !void {
+    /// `seen`: pages already walked. A damaged (or crafted) index whose pages point back at each
+    /// other, or many times at the same page, is walked once per page instead of without end.
+    fn walkNbt(self: *Pst, ib: u64, list: *std.ArrayList(NbtEntry), seen: *std.AutoHashMapUnmanaged(u64, void), depth: u8) !void {
         if (depth > 32) return;
+        if ((try seen.getOrPut(self.gpa, ib)).found_existing) return;
         const p = self.page(ib) catch return; // logged by page()
         const m = self.pageMeta(p) catch {
             self.note(.page_bad_type, ib, 0);
@@ -503,7 +508,7 @@ pub const Pst = struct {
         for (0..m.c_ent) |i| {
             const o = i * m.cb_ent;
             if (m.level > 0) {
-                try self.walkNbt(rd64(p, o + 16), list, depth + 1);
+                try self.walkNbt(rd64(p, o + 16), list, seen, depth + 1);
             } else if (m.cb_ent >= 28) {
                 try list.append(self.gpa, .{ .nid = @truncate(rd64(p, o)), .bid_data = rd64(p, o + 8), .bid_sub = rd64(p, o + 16), .nid_parent = rd32(p, o + 24) });
             }
@@ -536,6 +541,8 @@ pub const Pst = struct {
                 const i = chosen orelse return null;
                 ib = rd64(p, i * m.cb_ent + 16);
             } else {
+                // NBTENTRY is 32 bytes (nidParent at 24), BBTENTRY 24: the callers read that far
+                if (m.cb_ent < @as(usize, if (is_bbt) 18 else 28)) return error.Corrupt;
                 for (0..m.c_ent) |i| {
                     var ek = rd64(p, i * m.cb_ent);
                     if (is_bbt) ek &= ~@as(u64, 1);
@@ -604,14 +611,21 @@ pub const Pst = struct {
     pub fn readDataBlocks(self: *Pst, a: Allocator, bid: u64) ![][]u8 {
         var list: std.ArrayList([]u8) = .empty;
         if (bid == 0) return list.toOwnedSlice(a);
-        try self.collectBlocks(a, bid, &list, 0);
+        // The blocks of one data tree are distinct, so together they are no larger than the
+        // file (times what zlib can expand, in a 4K OST). Without this limit three small
+        // blocks that name each other a thousand times over would unfold into gigabytes.
+        var budget: u64 = @max(self.file_size, 1 << 20) *| @as(u64, if (self.format == .unicode_4k) 1024 else 1);
+        try self.collectBlocks(a, bid, &list, &budget, 0);
         return list.toOwnedSlice(a);
     }
 
-    fn collectBlocks(self: *Pst, a: Allocator, bid: u64, list: *std.ArrayList([]u8), depth: u8) anyerror!void {
+    fn collectBlocks(self: *Pst, a: Allocator, bid: u64, list: *std.ArrayList([]u8), budget: *u64, depth: u8) anyerror!void {
         if (depth > 3) return error.Corrupt;
         const b = try self.readBlock(a, bid);
         if ((bid & 2) == 0) {
+            const cost: u64 = @max(b.len, 64); // an empty block still costs a read
+            if (cost > budget.*) return error.Corrupt;
+            budget.* -= cost;
             try list.append(a, b);
             return;
         }
@@ -621,7 +635,7 @@ pub const Pst = struct {
         try need(b, 8, c_ent * 8);
         for (0..c_ent) |i| {
             const child = rd64(b, 8 + i * 8);
-            try self.collectBlocks(a, child, list, depth + 1);
+            try self.collectBlocks(a, child, list, budget, depth + 1);
         }
     }
 
@@ -642,7 +656,15 @@ pub const Pst = struct {
 
     /// Load the sub-node B-tree (SLBLOCK/SIBLOCK) rooted at `bid_sub`.
     pub fn readSubnodes(self: *Pst, a: Allocator, bid_sub: u64, map: *SubMap) anyerror!void {
+        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        return self.readSubnodeBlock(a, bid_sub, map, &seen, 0);
+    }
+
+    /// `seen`: blocks already read, so a tree that points back into itself ends.
+    fn readSubnodeBlock(self: *Pst, a: Allocator, bid_sub: u64, map: *SubMap, seen: *std.AutoHashMapUnmanaged(u64, void), depth: u8) anyerror!void {
         if (bid_sub == 0) return;
+        if (depth > 8) return error.Corrupt;
+        if ((try seen.getOrPut(a, bid_sub)).found_existing) return;
         const b = try self.readBlock(a, bid_sub);
         try need(b, 0, 8);
         if (b[0] != 0x02) return error.Corrupt;
@@ -657,7 +679,7 @@ pub const Pst = struct {
             }
         } else {
             try need(b, 8, c_ent * 16);
-            for (0..c_ent) |i| try self.readSubnodes(a, rd64(b, 8 + i * 16 + 8), map);
+            for (0..c_ent) |i| try self.readSubnodeBlock(a, rd64(b, 8 + i * 16 + 8), map, seen, depth + 1);
         }
     }
 
@@ -745,16 +767,22 @@ fn bthRecords(a: Allocator, heap: Heap, hid_hdr: u32, key_size: *u8, data_size: 
     data_size.* = h[2];
     var out: std.ArrayList([]const u8) = .empty;
     const root = rd32(h, 4);
-    if (root != 0) try bthCollect(a, heap, root, h[3], h[1], h[2], &out);
+    // Index levels of a real BTH: a handful. The step budget ends a tree whose index records
+    // all name the same item (level 255 of those would never finish).
+    if (h[3] > 16) return error.Corrupt;
+    var steps: usize = 1 << 20;
+    if (root != 0) try bthCollect(a, heap, root, h[3], h[1], h[2], &out, &steps);
     return out.toOwnedSlice(a);
 }
 
-fn bthCollect(a: Allocator, heap: Heap, hid: u32, level: u8, cb_key: u8, cb_ent: u8, out: *std.ArrayList([]const u8)) anyerror!void {
+fn bthCollect(a: Allocator, heap: Heap, hid: u32, level: u8, cb_key: u8, cb_ent: u8, out: *std.ArrayList([]const u8), steps: *usize) anyerror!void {
+    if (steps.* == 0) return error.Corrupt;
+    steps.* -= 1;
     const d = try heap.get(hid);
     if (level > 0) {
         const rs: usize = @as(usize, cb_key) + 4;
         var o: usize = 0;
-        while (o + rs <= d.len) : (o += rs) try bthCollect(a, heap, rd32(d, o + cb_key), level - 1, cb_key, cb_ent, out);
+        while (o + rs <= d.len) : (o += rs) try bthCollect(a, heap, rd32(d, o + cb_key), level - 1, cb_key, cb_ent, out, steps);
     } else {
         const rs: usize = @as(usize, cb_key) + cb_ent;
         if (rs == 0) return error.Corrupt;
@@ -863,6 +891,7 @@ pub const Table = struct {
         }
         var rows: std.ArrayList([]const u8) = .empty;
         if (hnid_rows != 0 and row_size > 0) {
+            if (row_size < 4) return error.Corrupt; // every row starts with its 4-byte row id
             if ((hnid_rows & 0x1F) == 0) {
                 const d = try heap.get(hnid_rows);
                 var o: usize = 0;
@@ -893,7 +922,7 @@ pub const Table = struct {
         const ci = self.colIndex(id) orelse return null;
         const c = self.cols[ci];
         const row = self.rows[r];
-        const byte = self.ceb_off + c.ibit / 8;
+        const byte = @as(usize, self.ceb_off) + c.ibit / 8;
         if (byte >= row.len) return null;
         if ((row[byte] & (@as(u8, 0x80) >> @intCast(c.ibit % 8))) == 0) return null;
         if (@as(usize, c.ib) + c.cb > row.len) return null;
@@ -1501,4 +1530,40 @@ pub fn fmtTime(buf: []u8, t: ?i64, offset_secs: i64) []const u8 {
     const v = t orelse return "";
     const d = unixToDateTime(v + offset_secs);
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ d.year, d.month, d.day, d.hour, d.minute, d.second }) catch "";
+}
+
+test "damaged heap trees end with an error instead of running on" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // One heap block: item 1 (HID 0x20) is a BTH header, item 2 (HID 0x40) four index records
+    // that all name item 2 itself.
+    var b: [54]u8 = @splat(0);
+    std.mem.writeInt(u16, b[0..2], 44, .little); // page map
+    b[2] = 0xEC;
+    b[3] = 0xBC;
+    std.mem.writeInt(u32, b[4..8], 0x20, .little);
+    b[12] = 0xB5;
+    b[13] = 2; // key size
+    b[14] = 6; // data size
+    std.mem.writeInt(u32, b[16..20], 0x40, .little); // root
+    for (0..4) |i| std.mem.writeInt(u32, b[20 + i * 6 + 2 ..][0..4], 0x40, .little);
+    std.mem.writeInt(u16, b[44..46], 2, .little); // two items: 12..20, 20..44
+    for ([_]u16{ 12, 20, 44 }, 0..) |o, i| std.mem.writeInt(u16, b[48 + i * 2 ..][0..2], o, .little);
+    var blocks = [_][]u8{&b};
+    const heap = try Heap.init(&blocks, .unicode);
+    var ks: u8 = 0;
+    var ds: u8 = 0;
+
+    b[15] = 0; // leaf level: item 2 is read as three 8-byte records
+    try std.testing.expectEqual(@as(usize, 3), (try bthRecords(a, heap, 0x20, &ks, &ds)).len);
+    b[15] = 16; // 4^16 visits without the step budget
+    try std.testing.expectError(error.Corrupt, bthRecords(a, heap, 0x20, &ks, &ds));
+    b[15] = 255;
+    try std.testing.expectError(error.Corrupt, bthRecords(a, heap, 0x20, &ks, &ds));
+    // heap ids outside the block, and an item that ends before it starts
+    try std.testing.expectError(error.Corrupt, heap.get(0x60));
+    try std.testing.expectError(error.Corrupt, heap.get(0x10020));
+    std.mem.writeInt(u16, b[50..52], 10, .little);
+    try std.testing.expectError(error.Corrupt, heap.get(0x20));
 }

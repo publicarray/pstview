@@ -7,6 +7,8 @@
 //!  3. cid: inline images are embedded from the message's attachments as data: URIs.
 //!  4. A strict Content-Security-Policy blocks all script and all network loads even if
 //!     something slipped through the sanitiser.
+//!  5. The mail cannot restyle or cover pstview's own header block (sender, dates, safe-view
+//!     note): its CSS is re-scoped to the mail container, which also clips and contains it.
 
 const std = @import("std");
 const pst = @import("pst.zig");
@@ -16,14 +18,32 @@ const List = std.ArrayList(u8);
 pub const csp = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
 
 const drop_with_content = [_][]const u8{ "script", "iframe", "object", "embed", "applet", "frame", "frameset", "svg", "math", "template", "noembed", "noframes" };
-const drop_tag_only = [_][]const u8{ "meta", "base", "link", "form", "input", "button", "textarea", "select", "option", "html", "head", "body", "title" };
+const drop_tag_only = [_][]const u8{ "meta", "base", "link", "form", "input", "button", "textarea", "select", "option", "html", "head", "title", mail_tag };
+
+/// The element the mail body is shown in. It is a direct child of <body> and the last thing in
+/// the document, and the sanitiser removes this tag name (and html / body) from the mail, so no
+/// end tag in the mail can close it: whatever the mail's markup does, it stays inside.
+const mail_tag = "pstview-mail";
+/// Stands in for the mail's own <body> inside `mail_tag` (takes its colours and `body {}` rules).
+const body_class = "pv-body";
 
 fn inList(name: []const u8, list: []const []const u8) bool {
     for (list) |n| if (std.ascii.eqlIgnoreCase(name, n)) return true;
     return false;
 }
 
-pub const SanitizeStats = struct { blocked_remote: usize = 0, removed_active: usize = 0, inlined_images: usize = 0 };
+fn dropIndex(name: []const u8) ?usize {
+    for (drop_with_content, 0..) |n, i| if (std.ascii.eqlIgnoreCase(name, n)) return i;
+    return null;
+}
+
+pub const SanitizeStats = struct {
+    blocked_remote: usize = 0,
+    removed_active: usize = 0,
+    inlined_images: usize = 0,
+    /// CSS declarations taken from the mail's <body> tag (bgcolor, text, style).
+    body_style: []const u8 = "",
+};
 
 pub fn mimeForName(name: []const u8) []const u8 {
     const ext = if (std.mem.lastIndexOfScalar(u8, name, '.')) |d| name[d + 1 ..] else "";
@@ -68,18 +88,32 @@ fn findCid(m: *const pst.Message, cid_raw: []const u8) ?*const pst.Attachment {
     return null;
 }
 
+/// A URL whose scheme is not one of the harmless ones. The value is still entity-encoded here
+/// ("&#106;avascript:", "javascript&colon;"), so a "&" where the scheme would be is refused too.
 fn isDangerousUrl(v: []const u8) bool {
     var buf: [32]u8 = undefined;
     var n: usize = 0;
     for (v) |c| {
-        if (n >= buf.len) break;
         if (c <= ' ') continue; // browsers ignore whitespace/control chars inside schemes
+        if (c == '/' or c == '?' or c == '#') return false; // relative: no scheme
+        if (c == '&') return true;
+        if (c == ':') {
+            const scheme = buf[0..n];
+            for ([_][]const u8{ "http", "https", "mailto", "tel", "ftp", "cid", "sms", "callto", "news" }) |ok| if (std.mem.eql(u8, scheme, ok)) return false;
+            if (std.mem.eql(u8, scheme, "data")) return !isImageData(v);
+            return true;
+        }
+        if (n >= buf.len) return false; // too long for a scheme
         buf[n] = std.ascii.toLower(c);
         n += 1;
     }
-    const s = buf[0..n];
-    return std.mem.startsWith(u8, s, "javascript:") or std.mem.startsWith(u8, s, "vbscript:") or
-        std.mem.startsWith(u8, s, "data:text/html") or std.mem.startsWith(u8, s, "data:image/svg");
+    return false;
+}
+
+/// "data:image/..." other than SVG (which can carry script).
+fn isImageData(v: []const u8) bool {
+    const t = std.mem.trim(u8, v, " \t\r\n");
+    return std.ascii.startsWithIgnoreCase(t, "data:image/") and !std.ascii.startsWithIgnoreCase(t, "data:image/svg");
 }
 
 fn isRemote(v: []const u8) bool {
@@ -115,7 +149,7 @@ fn cleanCss(a: Allocator, out: *List, css: []const u8, st: *SanitizeStats) !void
         if (i + 4 <= css.len and std.ascii.eqlIgnoreCase(css[i .. i + 4], "url(")) {
             const end = std.mem.indexOfScalarPos(u8, css, i, ')') orelse css.len;
             const inner = std.mem.trim(u8, css[i + 4 .. @min(end, css.len)], " '\"");
-            if (!std.ascii.startsWithIgnoreCase(inner, "data:image/")) {
+            if (!isImageData(inner)) {
                 st.blocked_remote += 1;
                 try out.appendSlice(a, "none");
             } else try out.appendSlice(a, css[i..@min(end + 1, css.len)]);
@@ -138,10 +172,265 @@ fn cleanCss(a: Allocator, out: *List, css: []const u8, st: *SanitizeStats) !void
     }
 }
 
+/// Text that is safe to copy into the stylesheet between the braces pstview writes itself:
+/// nothing in it can open or close a block, a comment or a string that runs on.
+fn plainCss(s: []const u8) bool {
+    var q: u8 = 0;
+    for (s) |c| {
+        switch (c) {
+            '{', '}', ';', '\\', '<', '\n', '\r', 0x0c => if (q != 0 or c > ' ') return false,
+            else => {},
+        }
+        if (q != 0) {
+            if (c == q) q = 0;
+        } else if (c == '"' or c == '\'') q = c;
+    }
+    return q == 0 and std.mem.indexOf(u8, s, "/*") == null;
+}
+
+/// The declarations of one rule (or of a style attribute of the mail's <body>), one by one;
+/// anything that is not a plain "name: value" is left out.
+fn cleanDeclarations(a: Allocator, out: *List, block: []const u8, st: *SanitizeStats) !void {
+    if (std.mem.indexOfAny(u8, block, "{}") != null) return; // nested rules: not in mail
+    var it = std.mem.splitScalar(u8, block, ';');
+    while (it.next()) |raw| {
+        const d = std.mem.trim(u8, raw, " \t\r\n\x0c");
+        if (d.len == 0 or std.mem.indexOfScalar(u8, d, ':') == null) continue;
+        var flat: List = .empty; // a value may be wrapped over lines
+        for (d) |c| try flat.append(a, if (c == '\n' or c == '\r' or c == 0x0c) ' ' else c);
+        if (!plainCss(flat.items)) continue;
+        if (std.ascii.findIgnoreCase(flat.items, "image-set(") != null) {
+            st.blocked_remote += 1;
+            continue;
+        }
+        try cleanCss(a, out, flat.items, st);
+        try out.append(a, ';');
+    }
+}
+
+fn isIdentChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c >= 0x80;
+}
+
+/// One selector of the mail, confined to the mail container. `html`, `body` and `:root` mean the
+/// stand-in for the mail's body. False: the selector cannot match anything (dropped).
+fn scopeSelector(a: Allocator, out: *List, sel: []const u8) !bool {
+    const start = out.items.len;
+    try out.appendSlice(a, mail_tag);
+    var i: usize = 0;
+    var first = true;
+    var prev_root = false;
+    while (i < sel.len) {
+        const cs = i;
+        while (i < sel.len and (std.ascii.isWhitespace(sel[i]) or sel[i] == '>' or sel[i] == '+' or sel[i] == '~')) i += 1;
+        const comb = std.mem.trim(u8, sel[cs..i], " \t\r\n\x0c");
+        const s = i;
+        var depth: usize = 0;
+        var q: u8 = 0;
+        while (i < sel.len) : (i += 1) {
+            const c = sel[i];
+            if (q != 0) {
+                if (c == q) q = 0;
+            } else if (c == '"' or c == '\'') {
+                q = c;
+            } else if (c == '(' or c == '[') {
+                depth += 1;
+            } else if (c == ')' or c == ']') {
+                depth -|= 1;
+            } else if (depth == 0 and (std.ascii.isWhitespace(c) or c == '>' or c == '+' or c == '~')) break;
+        }
+        var comp = sel[s..i];
+        if (comp.len == 0) continue;
+        var root = false;
+        inline for (.{ "html", "body", ":root" }) |r| {
+            if (!root and std.ascii.startsWithIgnoreCase(comp, r) and (comp.len == r.len or !isIdentChar(comp[r.len]))) {
+                root = true;
+                comp = comp[r.len..];
+            }
+        }
+        if (root) {
+            // body.dark, body#x, body[lang]: the mail's <body> attributes are not kept
+            if (comp.len > 0 and comp[0] != ':') {
+                out.shrinkRetainingCapacity(start);
+                return false;
+            }
+            if (prev_root) continue; // "html body": one element here
+        }
+        if (first or comb.len == 0) try out.append(a, ' ') else try out.appendSlice(a, comb);
+        if (root) try out.appendSlice(a, "." ++ body_class);
+        try out.appendSlice(a, comp);
+        first = false;
+        prev_root = root;
+    }
+    if (first) {
+        out.shrinkRetainingCapacity(start);
+        return false;
+    }
+    return true;
+}
+
+fn scopeRules(a: Allocator, out: *List, css: []const u8, st: *SanitizeStats, depth: usize) Allocator.Error!void {
+    var i: usize = 0;
+    while (i < css.len) {
+        const ps = i;
+        while (i < css.len and css[i] != '{' and css[i] != ';' and css[i] != '}') i += 1;
+        const prelude = std.mem.trim(u8, css[ps..i], " \t\r\n\x0c");
+        if (i >= css.len) break;
+        if (css[i] != '{') { // "@import ...;", "@charset ...;" or a stray brace
+            if (std.ascii.startsWithIgnoreCase(prelude, "@import")) st.blocked_remote += 1;
+            i += 1;
+            continue;
+        }
+        i += 1;
+        const bs = i;
+        var open: usize = 1;
+        while (i < css.len and open > 0) : (i += 1) {
+            if (css[i] == '{') open += 1 else if (css[i] == '}') open -= 1;
+        }
+        const block = css[bs..if (open == 0) i - 1 else i];
+        var flat: List = .empty; // a selector list may be wrapped over lines
+        for (prelude) |c| try flat.append(a, if (c == '\n' or c == '\r' or c == 0x0c) ' ' else c);
+        if (flat.items.len == 0 or !plainCss(flat.items)) continue;
+        if (flat.items[0] == '@') {
+            // conditional groups keep their condition; @font-face, @keyframes, @page are dropped
+            const group = std.ascii.startsWithIgnoreCase(flat.items, "@media") or std.ascii.startsWithIgnoreCase(flat.items, "@supports");
+            if (!group or depth >= 4) continue;
+            try out.appendSlice(a, flat.items);
+            try out.append(a, '{');
+            try scopeRules(a, out, block, st, depth + 1);
+            try out.append(a, '}');
+            continue;
+        }
+        var sels: List = .empty;
+        var s: usize = 0;
+        var nest: usize = 0;
+        var q: u8 = 0;
+        for (flat.items, 0..) |c, k| {
+            if (q != 0) {
+                if (c == q) q = 0;
+            } else if (c == '"' or c == '\'') {
+                q = c;
+            } else if (c == '(' or c == '[') {
+                nest += 1;
+            } else if (c == ')' or c == ']') {
+                nest -|= 1;
+            }
+            const last = k + 1 == flat.items.len;
+            if ((c == ',' and nest == 0 and q == 0) or last) {
+                const one = std.mem.trim(u8, flat.items[s..if (c == ',' and nest == 0 and q == 0) k else k + 1], " \t");
+                s = k + 1;
+                const mark = sels.items.len;
+                if (mark > 0) try sels.append(a, ',');
+                if (one.len == 0 or !try scopeSelector(a, &sels, one)) sels.shrinkRetainingCapacity(mark);
+            }
+        }
+        if (sels.items.len == 0) continue;
+        try out.appendSlice(a, sels.items);
+        try out.append(a, '{');
+        try cleanDeclarations(a, out, block, st);
+        try out.append(a, '}');
+    }
+}
+
+/// A <style> block of the mail, rewritten so that every rule applies inside the mail container
+/// only. The rules are re-serialised rule by rule and declaration by declaration, so the braces
+/// in the result are pstview's own: the mail cannot end a rule early to start an unscoped one.
+fn scopeCss(a: Allocator, out: *List, raw: []const u8, st: *SanitizeStats) !void {
+    var css: List = .empty;
+    var i: usize = 0;
+    while (i < raw.len) {
+        var skip: usize = 0;
+        if (std.mem.startsWith(u8, raw[i..], "/*")) {
+            skip = if (std.mem.indexOfPos(u8, raw, i + 2, "*/")) |e| e + 2 - i else raw.len - i;
+        } else if (std.mem.startsWith(u8, raw[i..], "<!--")) {
+            skip = 4;
+        } else if (std.mem.startsWith(u8, raw[i..], "-->")) {
+            skip = 3;
+        }
+        if (skip > 0) {
+            try css.append(a, ' ');
+            i += skip;
+        } else {
+            try css.append(a, raw[i]);
+            i += 1;
+        }
+    }
+    try scopeRules(a, out, css.items, st, 0);
+}
+
+const Attr = struct { name: []const u8, val: []const u8, has_val: bool };
+
+/// The attributes of one tag, read the lenient way browsers do.
+const AttrIter = struct {
+    s: []const u8,
+    p: usize = 0,
+
+    fn next(it: *AttrIter) ?Attr {
+        const attrs = it.s;
+        var p = it.p;
+        defer it.p = p;
+        while (p < attrs.len) {
+            while (p < attrs.len and (std.ascii.isWhitespace(attrs[p]) or attrs[p] == '/')) p += 1;
+            const an_s = p;
+            while (p < attrs.len and !std.ascii.isWhitespace(attrs[p]) and attrs[p] != '=' and attrs[p] != '>' and attrs[p] != '/') p += 1;
+            const an = attrs[an_s..p];
+            if (an.len == 0) {
+                p += 1;
+                continue;
+            }
+            while (p < attrs.len and std.ascii.isWhitespace(attrs[p])) p += 1;
+            var val: []const u8 = "";
+            var has_val = false;
+            if (p < attrs.len and attrs[p] == '=') {
+                has_val = true;
+                p += 1;
+                while (p < attrs.len and std.ascii.isWhitespace(attrs[p])) p += 1;
+                if (p < attrs.len and (attrs[p] == '"' or attrs[p] == '\'')) {
+                    const qc = attrs[p];
+                    const vs = p + 1;
+                    const ve = std.mem.indexOfScalarPos(u8, attrs, vs, qc) orelse attrs.len;
+                    val = attrs[vs..ve];
+                    p = @min(ve + 1, attrs.len);
+                } else {
+                    const vs = p;
+                    while (p < attrs.len and !std.ascii.isWhitespace(attrs[p])) p += 1;
+                    val = attrs[vs..p];
+                }
+            }
+            return .{ .name = an, .val = val, .has_val = has_val };
+        }
+        return null;
+    }
+};
+
+/// <body bgcolor=... text=... style=...> as CSS for the element that stands in for it.
+fn bodyStyle(a: Allocator, attrs: []const u8, st: *SanitizeStats) ![]const u8 {
+    var css: List = .empty;
+    var it: AttrIter = .{ .s = attrs };
+    while (it.next()) |at| {
+        const prop: []const u8 = if (std.ascii.eqlIgnoreCase(at.name, "bgcolor")) "background-color" else if (std.ascii.eqlIgnoreCase(at.name, "text")) "color" else {
+            if (std.ascii.eqlIgnoreCase(at.name, "style")) try cleanDeclarations(a, &css, at.val, st);
+            continue;
+        };
+        const v = std.mem.trim(u8, at.val, " ");
+        if (v.len == 0 or v.len > 32) continue;
+        var hex = v.len == 6 or v.len == 3;
+        var ok = true;
+        for (v) |c| {
+            if (!std.ascii.isHex(c)) hex = false;
+            if (!std.ascii.isAlphanumeric(c) and c != '#') ok = false;
+        }
+        if (!ok) continue;
+        try css.print(a, "{s}:{s}{s};", .{ prop, if (hex) "#" else "", v }); // bgcolor=FFFFFF is a colour too
+    }
+    return css.items;
+}
+
 /// Sanitise an email HTML body. `m` is used to resolve cid: images.
 pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *SanitizeStats) ![]u8 {
     var out: List = .empty;
     try out.ensureTotalCapacity(a, html.len);
+    var unclosed: [drop_with_content.len]bool = @splat(false);
     var i: usize = 0;
     while (i < html.len) {
         const c = html[i];
@@ -186,16 +475,18 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
         const attrs = html[j..tag_end];
         const next = @min(tag_end + 1, html.len);
 
-        if (inList(name, &drop_with_content)) {
+        if (dropIndex(name)) |di| {
             st.removed_active += 1;
-            if (!closing) {
-                // skip to matching close tag
+            // skip to the matching close tag; once there is none, there is none further on
+            // either (a mail of 100,000 unclosed <script> tags must not be searched 100,000 times)
+            if (!closing and !unclosed[di]) {
                 var close_buf: [24]u8 = undefined;
                 const close = std.fmt.bufPrint(&close_buf, "</{s}", .{name}) catch "";
                 if (std.ascii.findIgnoreCasePos(html, next, close)) |ce| {
                     i = (std.mem.indexOfScalarPos(u8, html, ce, '>') orelse html.len - 1) + 1;
                     continue;
                 }
+                unclosed[di] = true;
             }
             i = next;
             continue;
@@ -204,11 +495,16 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
             i = next;
             continue;
         }
+        if (std.ascii.eqlIgnoreCase(name, "body")) {
+            if (!closing and st.body_style.len == 0) st.body_style = try bodyStyle(a, attrs, st);
+            i = next;
+            continue;
+        }
         if (std.ascii.eqlIgnoreCase(name, "style") and !closing) {
             // keep inline <style> blocks but clean their CSS
             const ce = std.ascii.findIgnoreCasePos(html, next, "</style") orelse html.len;
             try out.appendSlice(a, "<style>");
-            try cleanCss(a, &out, html[next..ce], st);
+            try scopeCss(a, &out, html[next..ce], st);
             try out.appendSlice(a, "</style>");
             i = if (ce < html.len) (std.mem.indexOfScalarPos(u8, html, ce, '>') orelse html.len - 1) + 1 else html.len;
             continue;
@@ -218,36 +514,16 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
         try out.append(a, '<');
         if (closing) try out.append(a, '/');
         for (name) |ch| try out.append(a, std.ascii.toLower(ch));
-        var p: usize = 0;
-        while (p < attrs.len) {
-            while (p < attrs.len and (std.ascii.isWhitespace(attrs[p]) or attrs[p] == '/')) p += 1;
-            const an_s = p;
-            while (p < attrs.len and !std.ascii.isWhitespace(attrs[p]) and attrs[p] != '=' and attrs[p] != '>' and attrs[p] != '/') p += 1;
-            const an = attrs[an_s..p];
-            if (an.len == 0) {
-                p += 1;
-                continue;
-            }
-            while (p < attrs.len and std.ascii.isWhitespace(attrs[p])) p += 1;
-            var val: []const u8 = "";
-            var has_val = false;
-            if (p < attrs.len and attrs[p] == '=') {
-                has_val = true;
-                p += 1;
-                while (p < attrs.len and std.ascii.isWhitespace(attrs[p])) p += 1;
-                if (p < attrs.len and (attrs[p] == '"' or attrs[p] == '\'')) {
-                    const qc = attrs[p];
-                    const vs = p + 1;
-                    const ve = std.mem.indexOfScalarPos(u8, attrs, vs, qc) orelse attrs.len;
-                    val = attrs[vs..ve];
-                    p = @min(ve + 1, attrs.len);
-                } else {
-                    const vs = p;
-                    while (p < attrs.len and !std.ascii.isWhitespace(attrs[p])) p += 1;
-                    val = attrs[vs..p];
-                }
-            }
+        var it: AttrIter = .{ .s = attrs };
+        while (it.next()) |at| {
+            const an = at.name;
+            const val = at.val;
+            const has_val = at.has_val;
             // filter
+            const name_ok = for (an) |ch| {
+                if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch != ':' and ch != '.') break false;
+            } else true;
+            if (!name_ok) continue; // quotes, "<" and the like: debris of broken markup
             if (std.ascii.startsWithIgnoreCase(an, "on")) {
                 st.removed_active += 1;
                 continue;
@@ -274,11 +550,16 @@ pub fn sanitize(a: Allocator, html: []const u8, m: *const pst.Message, st: *Sani
                     try escAttr(a, &out, tv);
                     try out.append(a, '"');
                     out_val = "";
-                } else if (!std.ascii.startsWithIgnoreCase(tv, "data:image/")) out_val = "";
+                } else if (!isImageData(tv)) out_val = "";
             }
             if (std.ascii.eqlIgnoreCase(an, "style")) {
+                // quotes around font names arrive as entities; a ";" inside one would split the value
+                var plain: []const u8 = val;
+                inline for (.{ .{ "&quot;", "\"" }, .{ "&#34;", "\"" }, .{ "&#39;", "'" }, .{ "&apos;", "'" }, .{ "&amp;", "&" } }) |e| {
+                    if (std.ascii.findIgnoreCase(plain, e[0]) != null) plain = try std.mem.replaceOwned(u8, a, plain, e[0], e[1]);
+                }
                 var css: List = .empty;
-                try cleanCss(a, &css, val, st);
+                try cleanDeclarations(a, &css, plain, st);
                 out_val = css.items;
             }
             try out.append(a, ' ');
@@ -337,9 +618,9 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
         \\.atts{display:flex;flex-wrap:wrap;gap:10px;padding:10px 18px;border-bottom:1px solid #8884}
         \\.att{border:1px solid #8886;border-radius:4px;padding:6px;font-size:12px;max-width:260px}
         \\.att img{display:block;max-width:240px;max-height:180px;margin-bottom:4px}
-        \\.mail{padding:14px 18px;overflow-wrap:anywhere}
-        \\.mail.html{background:#fff;color:#000;color-scheme:light}
-        \\.mail img[data-blocked-src]{outline:1px dashed #c33;min-width:20px;min-height:12px}
+        \\.mail,.pv-body{padding:14px 18px;overflow-wrap:anywhere}
+        \\pstview-mail{display:block;background:#fff;color:#000;color-scheme:light;position:relative;contain:layout;isolation:isolate;overflow:auto}
+        \\pstview-mail img[data-blocked-src]{outline:1px dashed #c33;min-width:20px;min-height:12px}
         \\pre.plain{white-space:pre-wrap;font:13px/1.4 Consolas,ui-monospace,monospace}
         \\</style></head><body><div class="hdr"><h1>
     );
@@ -398,8 +679,139 @@ pub fn messageDocument(a: Allocator, m: *const pst.Message, fmt_time: TimeFmt) !
         }
         try out.appendSlice(a, "</div>");
     }
-    try out.appendSlice(a, if (is_html) "<div class=\"mail html\">" else "<div class=\"mail\">");
-    try out.appendSlice(a, body_html);
-    try out.appendSlice(a, "</div></body></html>\n");
+    // The mail goes last, in an element it cannot close (see `mail_tag`).
+    if (is_html) {
+        try out.appendSlice(a, "<" ++ mail_tag ++ "><div class=\"" ++ body_class ++ "\" style=\"");
+        try escAttr(a, &out, st.body_style);
+        try out.appendSlice(a, "\">");
+        try out.appendSlice(a, body_html);
+        try out.appendSlice(a, "</div></" ++ mail_tag ++ "></body></html>\n");
+    } else {
+        try out.appendSlice(a, "<div class=\"mail\">");
+        try out.appendSlice(a, body_html);
+        try out.appendSlice(a, "</div></body></html>\n");
+    }
     return out.toOwnedSlice(a);
+}
+
+const testing = std.testing;
+const no_mail: pst.Message = .{ .nid = 0, .node = null, .pc = .{ .props = &.{} }, .recipients = &.{}, .attachments = &.{} };
+
+fn testSanitize(a: Allocator, html: []const u8, st: *SanitizeStats) ![]u8 {
+    return sanitize(a, html, &no_mail, st);
+}
+
+test "mail CSS is confined to the mail container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var st: SanitizeStats = .{};
+    // the mail that showed the bug: its body colour reached pstview's own header block
+    try testing.expectEqualStrings(
+        "<style>pstview-mail .pv-body{background-color: #9999CC;}</style>",
+        try testSanitize(a, "<style type=\"text/css\">\n<!--\nbody {\n\tbackground-color: #9999CC;\n}\n-->\n</style>", &st),
+    );
+    const cases = [_][2][]const u8{
+        .{ "p{color:red}", "pstview-mail p{color:red;}" },
+        .{ "html, body { margin:0 }", "pstview-mail .pv-body,pstview-mail .pv-body{margin:0;}" },
+        .{ "html body > p.x , td{a:b}", "pstview-mail .pv-body>p.x,pstview-mail td{a:b;}" },
+        .{ ":root{--c:1}", "pstview-mail .pv-body{--c:1;}" },
+        .{ "bodyguard{a:b}", "pstview-mail bodyguard{a:b;}" },
+        .{ "body.dark{a:b}", "" }, // the mail's body classes are not kept
+        .{ "*{a:b} .hdr,.note{display:none}", "pstview-mail *{a:b;}pstview-mail .hdr,pstview-mail .note{display:none;}" },
+        .{ "a:is(.x, .y)[href=\"a,b\"]{a:b}", "pstview-mail a:is(.x, .y)[href=\"a,b\"]{a:b;}" },
+        .{ "@media (max-width:600px){ td{a:b} }", "@media (max-width:600px){pstview-mail td{a:b;}}" },
+        .{ "@import url(http://x/y.css); p{a:b}", "pstview-mail p{a:b;}" },
+        .{ "@font-face{font-family:x;src:url(http://x)} p{a:b}", "pstview-mail p{a:b;}" },
+        // attempts to end a rule early and start an unscoped one
+        .{ "p{a:b} } .hdr{display:none}", "pstview-mail p{a:b;}pstview-mail .hdr{display:none;}" },
+        .{ "p{content:\"}\"} .hdr{display:none}", "pstview-mail p{}pstview-mail .hdr{display:none;}" },
+        .{ "p{a:\"\n} .hdr{display:none} x{b:\"}", "pstview-mail p{}pstview-mail .hdr{display:none;}pstview-mail x{}" },
+        .{ "p /* {a:b} .hdr{display:none} */ {c:d}", "pstview-mail p{c:d;}" },
+        .{ "p{a:b} /* .hdr{display:none}", "pstview-mail p{a:b;}" },
+        .{ "p\\7b a:b} .hdr{c:d}", "pstview-mail .hdr{c:d;}" },
+        .{ "p{background:url(http://x/t.gif);color:red}", "pstview-mail p{background:none;color:red;}" },
+        .{ "p{background:image-set(\"http://x/t.gif\" 1x)}", "pstview-mail p{}" },
+    };
+    for (cases) |c| {
+        var out: List = .empty;
+        try scopeCss(a, &out, c[0], &st);
+        try testing.expectEqualStrings(c[1], out.items);
+        // whatever comes in, every brace in the result is balanced
+        var depth: isize = 0;
+        for (out.items) |ch| {
+            if (ch == '{') depth += 1 else if (ch == '}') depth -= 1;
+            try testing.expect(depth >= 0);
+        }
+        try testing.expectEqual(@as(isize, 0), depth);
+    }
+}
+
+test "sanitiser removes active content and remote loads" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][2][]const u8{
+        .{ "a<script>alert(1)</script>b", "ab" },
+        .{ "<p onclick=\"x()\" ONLOAD=y>t</p>", "<p>t</p>" },
+        .{ "<img src=\"http://t.example/p.gif\" width=1>", "<img data-blocked-src=\"http://t.example/p.gif\" src=\"\" width=\"1\">" },
+        .{ "<a href=\"javascript:alert(1)\">x</a>", "<a>x</a>" },
+        .{ "<a href=\" java\tscript:alert(1)\">x</a>", "<a>x</a>" },
+        .{ "<a href=\"&#106;avascript:alert(1)\">x</a>", "<a>x</a>" },
+        .{ "<a href=\"javascript&colon;alert(1)\">x</a>", "<a>x</a>" },
+        .{ "<a href=\"data:text/html,x\">x</a>", "<a>x</a>" },
+        .{ "<a href=\"https://a.example/?b=1&c=2\">x</a>", "<a href=\"https://a.example/?b=1&c=2\" rel=\"noopener noreferrer\" target=\"_blank\">x</a>" },
+        .{ "<a href=\"/rel?x=1\">x</a>", "<a href=\"/rel?x=1\" rel=\"noopener noreferrer\" target=\"_blank\">x</a>" },
+        .{ "<img src=\"data:image/svg+xml,<svg/>\">", "<img>" },
+        .{ "<img src=\"data:image/png;base64,AA==\">", "<img src=\"data:image/png;base64,AA==\">" },
+        // nothing in the mail may close, or pose as, pstview's containers
+        .{ "</pstview-mail><PSTVIEW-MAIL>x</body></html>", "x" },
+        .{ "<div style=\"font-family:&quot;A;B&quot;,serif;position:fixed\">", "<div style=\"position:fixed;\">" },
+        .{ "<div style='font-family:\"Calibri\",sans-serif;color:red'>", "<div style=\"font-family:&quot;Calibri&quot;,sans-serif;color:red;\">" },
+        .{ "<iframe src=x></iframe><object></object><form action=x><input name=q></form>ok", "ok" },
+        .{ "<!-- c --><meta http-equiv=refresh content=0><base href=x>ok", "ok" },
+    };
+    for (cases) |c| {
+        var st: SanitizeStats = .{};
+        try testing.expectEqualStrings(c[1], try testSanitize(a, c[0], &st));
+    }
+    var st: SanitizeStats = .{};
+    _ = try testSanitize(a, "<html><body bgcolor=000000 text=\"#fff\" style=\"margin:0;x:url(http://t)\" onload=x><p>t</body>", &st);
+    try testing.expectEqualStrings("background-color:#000000;color:#fff;margin:0;x:none;", st.body_style);
+    try testing.expectEqual(@as(usize, 1), st.blocked_remote);
+}
+
+test "sanitiser survives truncated and hostile markup" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    {
+        // linear in the size of the mail: this test ran for minutes when every tag searched to the end
+        var big: List = .empty;
+        for (0..150_000) |_| try big.appendSlice(a, "<script>x<svg>");
+        var st: SanitizeStats = .{};
+        _ = try testSanitize(a, big.items, &st);
+        try testing.expectEqual(@as(usize, 300_000), st.removed_active);
+    }
+    const seeds = [_][]const u8{
+        "<", "<a", "<a href=", "<a href=\"", "<style>", "<style>p{", "<script>", "<!--", "<!", "</", "<a b='c\" d>", "<body style=\"", "<style>@media x{@media y{p{a:b}",
+        "<table><tr><td style=\"background:url(\">x<img src=cid:>",
+    };
+    for (seeds) |s| {
+        var st: SanitizeStats = .{};
+        _ = try testSanitize(a, s, &st);
+        // every prefix and every single-byte damage of a longer document
+        const doc = try std.mem.concat(a, u8, &.{ "<html><style>body{color:red} @media x{p{a:url(http://x)}}</style><body bgcolor=red><a href=\"http://x\" onclick=y>l</a>", s, "<img src=\"cid:a\"></body>" });
+        for (0..doc.len) |n| {
+            _ = try testSanitize(a, doc[0..n], &st);
+            const d = try a.dupe(u8, doc);
+            for ([_]u8{ '<', '>', '"', '\'', '{', '}', 0 }) |ch| {
+                d[n] = ch;
+                const out = try testSanitize(a, d, &st);
+                try testing.expect(std.ascii.findIgnoreCase(out, "<script") == null);
+                try testing.expect(std.ascii.findIgnoreCase(out, "pstview-mail>") == null);
+                try testing.expect(std.ascii.findIgnoreCase(out, "<body") == null);
+            }
+        }
+    }
 }

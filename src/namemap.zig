@@ -86,10 +86,12 @@ pub const NameMap = struct {
                 },
             };
             var e: Named = .{ .id = @intCast(@min(0x8000 + @as(u32, idx), 0xFFFF)), .guid = g, .dispid = if (is_string) null else prop_or_off };
-            if (is_string and prop_or_off + 4 <= strings.len) {
-                const len = pst.rd32(strings, prop_or_off);
-                const s = prop_or_off + 4;
-                if (s + len <= strings.len) e.name = pst.utf16ToUtf8(a, strings[s .. s + len]) catch "";
+            // offsets and lengths come from the file: widen before adding (0xFFFFFFFF + 4)
+            const off: usize = prop_or_off;
+            if (is_string and off + 4 <= strings.len) {
+                const len: usize = pst.rd32(strings, off);
+                const s = off + 4;
+                if (len <= strings.len - s) e.name = pst.utf16ToUtf8(a, strings[s .. s + len]) catch "";
             }
             out.append(a, e) catch break;
         }

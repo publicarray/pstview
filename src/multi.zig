@@ -39,6 +39,8 @@ pub const Set = struct {
     /// ids that do not fit the packed layout
     extra: std.ArrayList(Member) = .empty,
     extra_ids: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// (part, folder) pairs already merged: a damaged part can list a folder under itself
+    merged: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     /// Open every path as a PST/OST and merge their folder trees. Paths are sorted naturally
     /// (file.pst, file_1.pst, file_2.pst, ..., file_10.pst).
@@ -95,6 +97,7 @@ pub const Set = struct {
         const kids = pst.subFolders(t, f, pst_folder) catch return;
         for (kids) |k| {
             if (k == skip) continue;
+            if ((try self.merged.getOrPut(a, (@as(u64, part) << 32) | k)).found_existing) continue;
             const info = pst.folderInfo(t, f, k) catch continue;
             var target: ?u32 = null;
             for (self.folders.items[into].children.items) |c| {

@@ -2,7 +2,7 @@
 //!
 //!   pstx tree   <pst|ost>
 //!   pstx list   <pst|ost> <folder path | 0xNID>
-//!   pstx show   <pst|ost> <message nid (hex)>
+//!   pstx show   <pst|ost> <message nid (hex)> [--html out.html]   --html: the sanitised safe view as a page
 //!   pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
 //!   pstx hash   <pst|ost>
 //!
@@ -26,7 +26,26 @@ fn fmtLocal(buf: []u8, t: ?i64) []const u8 {
     return pst.fmtTime(buf, v, platform.localOffset(v));
 }
 
-pub fn main(init: std.process.Init) !void {
+/// Exit code 0 only when the command did what was asked: scripts and CI rely on it.
+pub fn main(init: std.process.Init) u8 {
+    run(init) catch |e| switch (e) {
+        error.Reported => return 1, // the message is already on stdout
+        error.WriteFailed => return 1, // stdout was closed (pstx list ... | head)
+        else => {
+            std.debug.print("pstx: {s}\n", .{@errorName(e)});
+            return 1;
+        },
+    };
+    return 0;
+}
+
+/// Print a message for the user and fail the command.
+fn fail(out: *Io.Writer, comptime fmt: []const u8, args: anytype) error{ Reported, WriteFailed } {
+    out.print(fmt, args) catch return error.WriteFailed;
+    return error.Reported;
+}
+
+fn run(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
     const arena = init.arena.allocator();
@@ -49,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
             \\usage:
             \\  pstx tree   <pst|ost>
             \\  pstx list   <pst|ost> <folder path | 0xNID>
-            \\  pstx show   <pst|ost> <message nid (hex)>
+            \\  pstx show   <pst|ost> <message nid (hex)> [--html out.html]   --html: the sanitised safe view as a page
             \\  pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
             \\  pstx hash   <pst|ost>
             \\  pstx hidden <pst|ost>      orphaned messages/folders and hidden (FAI) items
@@ -67,20 +86,19 @@ pub fn main(init: std.process.Init) !void {
     const cmd = args[1];
     if (std.mem.eql(u8, cmd, "analyse") or std.mem.eql(u8, cmd, "analyze")) return analyseFileCmd(arena, io, out, args);
     const f = Store.open(gpa, io, args[2]) catch |e| {
-        try out.print("cannot open {s}: {s}\n", .{ args[2], store.openErrorText(e) });
-        return;
+        return fail(out, "cannot open {s}: {s}\n", .{ args[2], store.openErrorText(e) });
     };
     defer f.close();
 
     if (std.mem.eql(u8, cmd, "tree")) {
         var db: [200]u8 = undefined;
         try out.print("{s}\n", .{f.describe(&db)});
-        try printTree(arena, out, f, f.rootFolder(), 0);
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        try printTree(arena, out, f, f.rootFolder(), 0, &seen);
     } else if (std.mem.eql(u8, cmd, "list")) {
         const path = if (args.len > 3) args[3] else "";
         const nid = (try resolveFolder(arena, f, path)) orelse {
-            try out.print("folder not found: {s}\n", .{path});
-            return;
+            return fail(out, "folder not found: {s}\n", .{path});
         };
         const msgs = try f.folderMessages(arena, nid);
         var b1: [32]u8 = undefined;
@@ -98,13 +116,13 @@ pub fn main(init: std.process.Init) !void {
         try out.print("-- {d} items (times local)\n", .{msgs.len});
     } else if (std.mem.eql(u8, cmd, "hidden")) {
         const parts = try f.pstParts(arena, args[2]);
-        if (parts.len == 0) return out.print("{s}: only available for PST/OST files\n", .{cmd});
+        if (parts.len == 0) return fail(out, "{s}: only available for PST/OST files\n", .{cmd});
         for (parts) |part| {
             if (parts.len > 1) try out.print("\n######## {s}  (ids below are NIDs within this part)\n", .{part.name});
             try hiddenCmd(arena, out, part.file);
         }
     } else if (std.mem.eql(u8, cmd, "recover")) {
-        if (f == .mbox) return out.print("{s}: only available for PST/OST files (Thunderbird messages deleted but not compacted are marked in `list`)\n", .{cmd});
+        if (f == .mbox) return fail(out, "{s}: only available for PST/OST files (Thunderbird messages deleted but not compacted are marked in `list`)\n", .{cmd});
         const r = try f.recoverDeleted(arena, args[2], null);
         try out.print("Stale index pages: {d} node-tree, {d} block-tree; {d} unindexed block(s) verified intact by id and checksum.\n\n", .{ r.stale_node_pages, r.stale_block_pages, r.blocks });
         try out.print("== Recovered items no longer in the index (deleted, or moved and re-numbered): {d}\n", .{r.deleted.len});
@@ -114,8 +132,8 @@ pub fn main(init: std.process.Init) !void {
         try out.writeAll("\nThe ids above work with `pstx show`, `headers` and `props` (the file is re-scanned when an id is not in the live index).\n");
     } else if (std.mem.eql(u8, cmd, "search") or std.mem.eql(u8, cmd, "triage")) {
         const is_search = std.mem.eql(u8, cmd, "search");
-        if (args.len < (if (is_search) @as(usize, 5) else 4)) return out.writeAll("usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n");
-        const fnid = (try resolveFolder(arena, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
+        if (args.len < (if (is_search) @as(usize, 5) else 4)) return fail(out, "usage: pstx search <pst|ost> <folder|0xNID> <query>   |   pstx triage <pst|ost> <folder|0xNID>\n", .{});
+        const fnid = (try resolveFolder(arena, f, args[3])) orelse return fail(out, "folder not found: {s}\n", .{args[3]});
         const msgs = try f.folderMessages(arena, fnid);
         const mctx: ?headers.Context = if (is_search) null else search.buildMailboxContext(arena, f, null);
         const ix = search.buildIndexCtx(arena, f, msgs, null, mctx);
@@ -142,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
         }
         try out.print("-- {d} of {d} items\n", .{ order.items.len, msgs.len });
     } else if (std.mem.eql(u8, cmd, "headers")) {
-        if (args.len < 4) return out.writeAll("usage: pstx headers <pst|ost> <message nid hex> [--html out.html]\n");
+        if (args.len < 4) return fail(out, "usage: pstx headers <pst|ost> <message nid hex> [--html out.html]\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try loadAny(arena, f, args[2], nid);
         const an = headers.analyseDetailed(arena, headers.inputFromMessage(arena, &m), search.buildMailboxContext(arena, f, null));
@@ -152,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
             try out.print("\nHTML report written to {s}\n", .{path});
         }
     } else if (std.mem.eql(u8, cmd, "props")) {
-        if (args.len < 4) return out.writeAll("usage: pstx props <source> <message nid hex> [--html out.html]\n");
+        if (args.len < 4) return fail(out, "usage: pstx props <source> <message nid hex> [--html out.html]\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try loadAny(arena, f, args[2], nid);
         const propview = @import("propview.zig");
@@ -162,10 +180,10 @@ pub fn main(init: std.process.Init) !void {
             try out.print("\nHTML written to {s}\n", .{path});
         }
     } else if (std.mem.eql(u8, cmd, "locate")) {
-        if (args.len < 4) return out.writeAll("usage: pstx locate <pst|ost> <nid hex>\n");
+        if (args.len < 4) return fail(out, "usage: pstx locate <pst|ost> <nid hex>\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
-        const p = pstOnly(out, f, cmd) orelse return;
-        const e = (try p.lookupNode(nid)) orelse return out.print("node 0x{x} not in index\n", .{nid});
+        const p = pstOnly(out, f, cmd) orelse return error.Reported;
+        const e = (try p.lookupNode(nid)) orelse return fail(out, "node 0x{x} not in index\n", .{nid});
         try out.print("node 0x{x:0>8} type 0x{x:0>2} parent 0x{x:0>8} bid_data 0x{x} bid_sub 0x{x}\n", .{ e.nid, e.nid & 0x1F, e.nid_parent, e.bid_data, e.bid_sub });
         inline for (.{ .{ "data", e.bid_data }, .{ "sub", e.bid_sub } }) |kv| {
             if (kv[1] != 0) if (try p.lookupBlock(kv[1])) |b| {
@@ -176,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         }
     } else if (std.mem.eql(u8, cmd, "verify")) {
         const parts = try f.pstParts(arena, args[2]);
-        if (parts.len == 0) return out.print("{s}: only available for PST/OST files\n", .{cmd});
+        if (parts.len == 0) return fail(out, "{s}: only available for PST/OST files\n", .{cmd});
         for (parts) |part| {
             if (parts.len > 1) try out.print("\n######## {s}\n", .{part.name});
             try verifyCmd(arena, out, part.file);
@@ -189,9 +207,14 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "export")) {
         try exportCmd(arena, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
-        if (args.len < 4) return out.writeAll("usage: pstx show <pst|ost> <nid hex>\n");
+        if (args.len < 4) return fail(out, "usage: pstx show <pst|ost> <nid hex> [--html out.html]\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
         const m = try loadAny(arena, f, args[2], nid);
+        if (htmlArg(args)) |path| {
+            // the safe view of the GUI, as a self-contained page
+            try writeOut(io, path, try @import("render.zig").messageDocument(arena, &m, fmtLocal));
+            return out.print("wrote {s}\n", .{path});
+        }
         var b1: [32]u8 = undefined;
         try out.print("Subject: {s}\nFrom: {s} <{s}>\nReceived (UTC): {s}\nClass: {s}\n", .{
             try m.subject(arena),                                  try m.senderName(arena),                       try m.senderEmail(arena),
@@ -203,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
         const body = try m.bodyText(arena);
         try out.print("\n{s}\n", .{body[0..@min(body.len, 2000)]});
     } else {
-        try out.print("unknown command {s}\n", .{cmd});
+        return fail(out, "unknown command {s}\n", .{cmd});
     }
 }
 
@@ -257,7 +280,13 @@ fn verifyCmd(a: std.mem.Allocator, out: *Io.Writer, f: *pst.Pst) !void {
     if (f.issues.items.len == 0) try out.writeAll("No integrity problems found.\n");
 }
 
-fn printTree(a: std.mem.Allocator, out: *Io.Writer, f: Store, nid: u32, depth: usize) !void {
+/// `seen`: folders already printed. In a damaged file a folder can list itself or one of its
+/// parents as a sub-folder; it is shown once.
+fn printTree(a: std.mem.Allocator, out: *Io.Writer, f: Store, nid: u32, depth: usize, seen: *std.AutoHashMapUnmanaged(u32, void)) !void {
+    if ((try seen.getOrPut(a, nid)).found_existing) {
+        for (0..depth) |_| try out.writeAll("  ");
+        return out.print("(folder {x} again: listed as its own sub-folder, file is damaged)\n", .{nid});
+    }
     const info = f.folderInfo(a, nid) catch |e| {
         try out.print("{x}: error {s}\n", .{ nid, @errorName(e) });
         return;
@@ -266,7 +295,7 @@ fn printTree(a: std.mem.Allocator, out: *Io.Writer, f: Store, nid: u32, depth: u
     const msgs = f.folderMessages(a, nid) catch &.{};
     try out.print("{s}  [count={d} table={d}] nid={x}\n", .{ if (info.name.len > 0) info.name else "(root)", info.count, msgs.len, nid });
     const kids = try f.subFolders(a, nid);
-    for (kids) |k| try printTree(a, out, f, k, depth + 1);
+    for (kids) |k| try printTree(a, out, f, k, depth + 1, seen);
 }
 
 /// The PST behind `f`, or null (after printing why) for sources without PST structures.
@@ -338,8 +367,8 @@ fn writeOut(io: Io, path: []const u8, data: []const u8) !void {
 }
 
 fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []const [:0]const u8) !void {
-    if (args.len < 5) return out.writeAll("usage: pstx export <source> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n");
-    const folder = (try resolveFolder(a, f, args[3])) orelse return out.print("folder not found: {s}\n", .{args[3]});
+    if (args.len < 5) return fail(out, "usage: pstx export <source> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n", .{});
+    const folder = (try resolveFolder(a, f, args[3])) orelse return fail(out, "folder not found: {s}\n", .{args[3]});
     const dir = args[4];
     var kind: []const u8 = "msg";
     var modified: ?[]const u8 = null;
@@ -360,6 +389,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
     const msgs = try f.folderMessages(a, folder);
     var rows: std.ArrayList(exp.ReportRow) = .empty;
     var n: usize = 0;
+    var failed: usize = 0;
     var tb: [64]u8 = undefined;
     for (msgs) |s| {
         if (modified) |d| {
@@ -374,6 +404,7 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
         const ia = ia_state.allocator();
         var m = f.loadMessage(ia, s.nid) catch |e| {
             try out.print("  FAILED load 0x{x}: {s}\n", .{ s.nid, @errorName(e) });
+            failed += 1;
             continue;
         };
         const t = s.delivery_time orelse s.submit_time orelse s.modified_time;
@@ -385,9 +416,20 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
         };
         const name = try exp.safeName(a, pfx, s.subject, if (is_msg) "msg" else "eml");
         // .eml from an MBOX is the original message, byte for byte
-        const raw: ?[]const u8 = if (is_msg) null else try f.rawMessage(ia, s.nid);
-        const data = if (is_msg) try exp.buildMsg(ia, &m) else if (raw) |r| r else try exp.buildEml(ia, &m, 0);
-        try writeOut(io, try std.fs.path.join(ia, &.{ dir, name }), data);
+        // one damaged item must not end the export of the rest: it is reported and counted
+        const raw: ?[]const u8 = if (is_msg) null else f.rawMessage(ia, s.nid) catch null;
+        const built = if (is_msg) exp.buildMsg(ia, &m) else if (raw) |r| r else exp.buildEml(ia, &m, 0);
+        const data = built catch |e| {
+            if (e == error.OutOfMemory) return e;
+            try out.print("  FAILED build 0x{x}: {s}\n", .{ s.nid, @errorName(e) });
+            failed += 1;
+            continue;
+        };
+        writeOut(io, try std.fs.path.join(ia, &.{ dir, name }), data) catch |e| {
+            try out.print("  FAILED write 0x{x} {s}: {s}\n", .{ s.nid, name, @errorName(e) });
+            failed += 1;
+            continue;
+        };
         var al: std.ArrayList(u8) = .empty;
         for (m.attachments, 0..) |att, k| {
             if (k > 0) try al.appendSlice(a, "; ");
@@ -418,13 +460,15 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
         .format = f.describe(&fmt_buf),
         .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
         .generated_utc = now,
-        .tz_label = "local time",
+        .tz_label = "local time, daylight saving applied for each date",
         .tz_offset = platform.localOffset(now),
+        .offset_at = &platform.localOffset,
         .title = try std.fmt.allocPrint(a, "Export report - {s}", .{args[3]}),
     };
     try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.csv" }), try exp.reportCsv(a, rows.items, meta));
     try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.html" }), try exp.reportHtml(a, rows.items, meta));
     try out.print("-- exported {d} items to {s}\n", .{ rows.items.len, dir });
+    if (failed > 0) return fail(out, "-- {d} item(s) could NOT be exported (listed above)\n", .{failed});
 }
 
 /// Value of a "--html <path>" option.
@@ -435,8 +479,8 @@ fn htmlArg(args: []const [:0]const u8) ?[]const u8 {
 
 /// `pstx analyse <file>`: header analysis of a saved message (.eml) or a text file of pasted headers.
 fn analyseFileCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, args: []const [:0]const u8) !void {
-    if (args.len < 3) return out.writeAll("usage: pstx analyse <message.eml | headers.txt> [--html out.html]\n");
-    const data = Io.Dir.cwd().readFileAlloc(io, args[2], a, .limited(256 * 1024 * 1024)) catch |e| return out.print("cannot read {s}: {s}\n", .{ args[2], @errorName(e) });
+    if (args.len < 3) return fail(out, "usage: pstx analyse <message.eml | headers.txt> [--html out.html]\n", .{});
+    const data = Io.Dir.cwd().readFileAlloc(io, args[2], a, .limited(256 * 1024 * 1024)) catch |e| return fail(out, "cannot read {s}: {s}\n", .{ args[2], @errorName(e) });
     const an = headers.analyseDetailed(a, headers.inputFromHeaders(a, headers.headerBlock(data)), .{});
     try out.writeAll(try hreport.text(a, an, fmtLocal));
     if (htmlArg(args)) |path| {

@@ -523,6 +523,14 @@ pub const Mbox = struct {
     }
 };
 
+/// One raw message (an .eml) as a `pst.Message`, without a mailbox around it. This is the whole
+/// path untrusted mail takes on its way to the viewer, which is what the fuzz targets drive.
+pub fn messageFromRaw(a: Allocator, raw: []const u8) !pst.Message {
+    const m = try mime.parse(a, raw, 0);
+    const empty: pst.MessageSummary = .{ .nid = 0, .subject = "", .from = "", .to = "", .cc = "", .message_class = "", .delivery_time = null, .submit_time = null, .modified_time = null, .size = null, .flags = null };
+    return synthesize(a, 0, m, raw.len, empty);
+}
+
 // ================================================================ helpers
 
 fn endsWithIc(s: []const u8, suffix: []const u8) bool {

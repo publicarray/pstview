@@ -685,6 +685,9 @@ fn addHiddenBranch(a: Allocator) void {
 
 fn addFolder(a: Allocator, nid: u32, parent_path: []const u8, parent_item: ?w.HTREEITEM, depth: u32) !void {
     if (depth > 64) return;
+    // a damaged file can list a folder as its own sub-folder: each folder is shown once
+    if (depth > 0 and nid == app.file.?.rootFolder()) return;
+    for (app.folders.items) |seen| if (seen.kind == .normal and seen.nid == nid) return;
     const info = app.file.?.folderInfo(a, nid) catch return;
     const is_root = nid == app.file.?.rootFolder();
     var item = parent_item;
@@ -1099,7 +1102,7 @@ fn exportSelected(kind: ExportKind) void {
     // report
     const now: i64 = std.Io.Clock.real.now(app.io).toSeconds();
     const off = w.localOffset(now);
-    const tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time";
+    const tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time; daylight saving applied for each date)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time";
     const fpath = if (app.cur_folder) |c| app.folders.items[c].path else "";
     var fmt_buf: [128]u8 = undefined;
     const meta: exp.ReportMeta = .{
@@ -1110,6 +1113,7 @@ fn exportSelected(kind: ExportKind) void {
         .generated_utc = now,
         .tz_label = tz_label,
         .tz_offset = off,
+        .offset_at = &w.localOffset,
         .title = std.fmt.allocPrint(a, "Export report - {s}", .{fpath}) catch "Export report",
     };
     // Report times use each item's own DST-correct local offset via a per-row conversion.
@@ -1958,7 +1962,7 @@ fn mwCommand(st: *MsgWin, id: u16) void {
             const att = &st.msg.attachments[i];
             var ext: []const u8 = "";
             const data = attachmentBytes(a, att, &ext) orelse return;
-            const name = if (ext.len > 0) (exp.safeName(a, "", att.filename, ext) catch "embedded.msg") else (if (att.filename.len > 0) att.filename else "attachment.bin");
+            const name = if (ext.len > 0) (exp.safeName(a, "", att.filename, ext) catch "embedded.msg") else (exp.safeFileName(a, "", if (att.filename.len > 0) att.filename else "attachment.bin") catch "attachment.bin");
             const path = saveDialog(a, st.hwnd.?, name) orelse return;
             writePath(path, data) catch |e| {
                 _ = msgBox(@errorName(e), "Save failed", w.MB_ICONERROR);
@@ -1974,8 +1978,7 @@ fn mwCommand(st: *MsgWin, id: u16) void {
                 var pb: [8]u8 = undefined;
                 const pfx = std.fmt.bufPrint(&pb, "{d:0>2}", .{i + 1}) catch "";
                 const fname = if (att.filename.len > 0) att.filename else "attachment";
-                const dot = std.mem.lastIndexOfScalar(u8, fname, '.');
-                const name = exp.safeName(a, pfx, if (ext.len > 0) fname else (if (dot) |d| fname[0..d] else fname), if (ext.len > 0) ext else (if (dot) |d| fname[d + 1 ..] else "bin")) catch continue;
+                const name = (if (ext.len > 0) exp.safeName(a, pfx, fname, ext) else exp.safeFileName(a, pfx, fname)) catch continue;
                 writeFile(a, dir, name, data) catch continue;
                 saved += 1;
             }

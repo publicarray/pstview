@@ -13,6 +13,9 @@
   /* the ink bar and what is written on it are the same in both themes */
   --bar:#13233F; --on-bar:#F6F4EE; --primary:#13233F; --primary-hover:#1d3257; --disabled:#b3b8c2;
   --shadow:#13233f2e; --recovered:#C98F00;
+  /* syntax colours of the analysis and header text (the palette of the Windows preview) */
+  --k-lab:#606C80; --k-h:#2B4C7E; --k-ip:#6B4FA0; --k-em:#1F6F6B; --k-ok:#2E7D4F; --k-bad:#B3261E;
+  --k-warn:#A35A00; --k-sub:#9AA1AD; --k-low:#7A6A1F;
   --left:290px; --listh:45%;
   --ui:system-ui,-apple-system,"Segoe UI","Cantarell","Noto Sans",sans-serif;
   --mono:ui-monospace,Menlo,"DejaVu Sans Mono","Liberation Mono",Consolas,monospace;
@@ -23,6 +26,8 @@
   --muted:#8490A3; --white:#0F1724; --select:#22324D; --hover:#1B2637;
   --bar:#0B1422; --primary:#2F4B7C; --primary-hover:#3A5990; --disabled:#566176;
   --shadow:#00000080; --recovered:#E0A91A; color-scheme:dark;
+  --k-lab:#A3ADBD; --k-h:#8FB4F0; --k-ip:#C0A6F5; --k-em:#6FD3CC; --k-ok:#6CCB8C; --k-bad:#FF7B72;
+  --k-warn:#E3A547; --k-sub:#6E7A8E; --k-low:#D6C56A;
 }
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
@@ -98,6 +103,9 @@ svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .tab{flex:1;min-height:0;display:none;overflow:auto}
 .tab.on{display:block}
 iframe{border:0;width:100%;height:100%;display:block;background:var(--white)}
+.k-lab{color:var(--k-lab)}.k-h{color:var(--k-h)}.k-ip{color:var(--k-ip)}.k-em{color:var(--k-em)}.k-ok{color:var(--k-ok)}
+.k-bad,.k-high{color:var(--k-bad)}.k-warn,.k-med{color:var(--k-warn)}.k-sub{color:var(--k-sub)}.k-low{color:var(--k-low)}.k-dt{color:var(--k-lab)}
+pre.txt b,pre.txt .b{font-weight:600}
 pre.txt{margin:0;padding:14px 24px;font:12.5px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;-webkit-user-select:text;user-select:text;cursor:text}
 #hint{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted)}
 table.atts{border-collapse:collapse;margin:10px 24px;-webkit-user-select:text;user-select:text}
@@ -274,6 +282,44 @@ async function applyTheme() {
 }
 darkQuery.addEventListener('change', () => applyTheme());
 const themeLabel = (name, label) => () => (theme.choice === name ? '\u2713  ' : '\u2003  ') + label;
+
+// ---------------------------------------------------------------- coloured analysis text
+// The analysis and the internet headers are plain text from the mailbox. They are shown with
+// the colours of the Windows preview: severity, IP addresses, e-mail addresses, verdicts, dates.
+// Every piece of the text goes through esc(); only the <span>/<b> wrappers are markup.
+const TOKEN = /(\b\d{1,3}(?:\.\d{1,3}){3}\b)|([\w.+-]+@[\w-]+(?:\.[\w-]+)+)|\b(pass|bestguesspass)\b|\b(fail|hardfail|permerror)\b|\b(softfail|neutral|temperror)\b|\b(\d{4}-\d\d-\d\d|\d\d:\d\d:\d\d)\b/gi;
+function tokensHtml(s) {
+  let out = '', last = 0;
+  for (const m of s.matchAll(TOKEN)) {
+    const k = m[1] ? 'ip' : m[2] ? 'em' : m[3] ? 'ok' : m[4] ? 'bad b' : m[5] ? 'warn' : 'dt';
+    out += esc(s.slice(last, m.index)) + `<span class="k-${k}">${esc(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(s.slice(last));
+}
+function analysisHtml(text) {
+  return String(text || '').split(/\r?\n/).map(line => {
+    const t = line.trimStart(), ind = line.slice(0, line.length - t.length);
+    let m;
+    if (/^=+ .*Header analysis/.test(t)) {
+      const sev = /HIGH/.test(t) ? 'high' : /Medium/.test(t) ? 'med' : /Low/.test(t) ? 'low' : 'ok';
+      return ind + `<b class="k-${sev}">${esc(t)}</b>`;
+    }
+    if (t.startsWith('== ')) return ind + `<b class="k-h">${esc(t)}</b>`;
+    if ((m = /^\[(HIGH|Medium|Low|Info)\]/.exec(t))) {
+      const sev = { HIGH: 'high b', Medium: 'med', Low: 'low', Info: 'sub' }[m[1]], rest = t.slice(m[0].length);
+      return ind + `<span class="k-${sev}">${m[0]}</span>` + (m[1] === 'HIGH' ? `<span class="k-high">${esc(rest)}</span>` : tokensHtml(rest));
+    }
+    if ((m = /^([A-Za-z][A-Za-z0-9 ()\/-]{0,22}:)(.*)$/.exec(t))) return ind + `<span class="k-lab">${esc(m[1])}</span>` + tokensHtml(m[2]);
+    return ind + tokensHtml(t);
+  }).join('\n');
+}
+function headersHtml(text) {
+  return String(text).split(/\r?\n/).map(line => {
+    const m = /^([A-Za-z0-9_-]+:)(.*)$/.exec(line);
+    return m ? `<b class="k-h">${esc(m[1])}</b>` + tokensHtml(m[2]) : tokensHtml(line);
+  }).join('\n');
+}
 
 // ---------------------------------------------------------------- dialogs
 function dialog(heading, body, buttons) {
@@ -514,8 +560,9 @@ async function loadMessage(r) {
   if (m.error) { st.msg = null; $('#mailframe').srcdoc = textDoc(m.error); showTab('mail'); return; }
   st.msg = m; st.msgRow = r;
   $('#mailframe').srcdoc = m.html;
-  $('#tab-analysis pre').textContent = m.analysis;
-  $('#tab-headers pre').textContent = m.headers || 'This item has no internet headers (internal or sent item).';
+  $('#tab-analysis pre').innerHTML = analysisHtml(m.analysis);
+  if (m.headers) $('#tab-headers pre').innerHTML = headersHtml(m.headers);
+  else $('#tab-headers pre').textContent = 'This item has no internet headers (internal or sent item).';
   document.querySelector('#tabs [data-tab=analysis]').classList.toggle('alert', m.risk >= 3);
   document.querySelector('#tabs [data-tab=atts]').textContent = m.atts.length ? `Attachments (${m.atts.length})` : 'Attachments';
   $('#tab-atts').innerHTML = m.atts.length
@@ -764,6 +811,15 @@ async function selftest(r) {
     let scripted = true;
     try { scripted = !!frame.contentWindow.eval; } catch (e) { scripted = false; }
     if (scripted) throw 'message frame is not sandboxed';
+    // colouring adds markup around the text and never changes or interprets it
+    if ($('#tab-analysis pre').textContent !== st.msg.analysis.replace(/\r/g, '')) throw 'analysis text altered by colouring';
+    if (st.msg.headers && $('#tab-headers pre').textContent !== st.msg.headers.replace(/\r/g, '')) throw 'header text altered by colouring';
+    const hostile = '=== Header analysis: HIGH ===\n  [HIGH] <img src=x onerror=alert(1)> a@b.example 192.0.2.7\nFrom: "<scr' + 'ipt>x</scr' + 'ipt>" &amp; spf=fail\n== <b>';
+    for (const render of [analysisHtml, headersHtml]) {
+      const probe = document.createElement('pre');
+      probe.innerHTML = render(hostile);
+      if (probe.textContent !== hostile || probe.querySelector(':not(span):not(b)')) throw 'colouring let markup through';
+    }
     const sorted = await pv.call('sort', 4);
     if (sorted.count !== st.count) throw 'sort changed the row count';
     const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
