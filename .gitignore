@@ -13,3 +13,7 @@ test-output/
 # Python
 __pycache__/
 *.pyc
+
+# Local reference material and sample mailboxes (private, never commit)
+/*.mbox
+/*.pdf
