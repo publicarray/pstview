@@ -36,6 +36,7 @@ const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 extern "ole32" fn CoTaskMemAlloc(usize) callconv(.winapi) ?*anyopaque;
 extern "user32" fn GetDpiForSystem() callconv(.winapi) u32;
 extern "user32" fn SetForegroundWindow(w.HWND) callconv(.winapi) w.BOOL;
+extern "kernel32" fn SetEnvironmentVariableW([*:0]const u16, ?[*:0]const u16) callconv(.winapi) w.BOOL;
 extern "user32" fn PeekMessageW(*w.MSG, ?w.HWND, u32, u32, u32) callconv(.winapi) w.BOOL;
 
 const hkey_local_machine: w.HKEY = @ptrFromInt(0xFFFFFFFF80000002);
@@ -481,7 +482,6 @@ fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
             _ = method(c, 23, fn (*anyopaque) callconv(.winapi) HRESULT)(c);
         },
         w.WM_SETFOCUS => if (winOf(hwnd)) |v| focus(v),
-        w.WM_ERASEBKGND => return 1, // the web view covers the window
         WM_APP_REQUEST => {
             const ptr: [*]u8 = @ptrFromInt(@as(usize, @bitCast(lp)));
             const text = ptr[0..wp];
@@ -594,6 +594,17 @@ fn pump() void {
         _ = w.TranslateMessage(&msg);
         _ = w.DispatchMessageW(&msg);
     }
+}
+
+/// Windows is set to dark apps (Settings > Personalisation > Colours).
+fn systemDark() bool {
+    var key: ?w.HKEY = null;
+    if (w.RegOpenKeyExW(w.HKEY_CURRENT_USER, L("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), 0, w.KEY_READ, &key) != 0) return false;
+    defer _ = w.RegCloseKey(key.?);
+    var light: u32 = 1;
+    var cb: u32 = 4;
+    if (w.RegQueryValueExW(key.?, L("AppsUseLightTheme"), null, null, @ptrCast(&light), &cb) != 0) return false;
+    return light == 0;
 }
 
 fn setDark(on: bool) void {
@@ -726,12 +737,16 @@ pub fn main(init: std.process.Init) !void {
 
     webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openPath, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit }, paths.items, selftest);
 
+    // What a window shows before its page is painted: the page's ground colour, not white, in a
+    // dark session (the window's own background and the web view's, which is set by this variable).
+    dark = systemDark();
+    if (dark) _ = SetEnvironmentVariableW(L("WEBVIEW2_DEFAULT_BACKGROUND_COLOR"), L("FF0F1724"));
     const wc: w.WNDCLASSEXW = .{
         .lpfnWndProc = wndProc,
         .hInstance = hinst,
         .hCursor = w.LoadCursorW(null, w.IDC_ARROW),
         .hIcon = w.LoadIconW(hinst, 1),
-        .hbrBackground = @ptrFromInt(w.COLOR_WINDOW + 1),
+        .hbrBackground = if (dark) w.CreateSolidBrush(w.rgb(0x0F1724)) else @ptrFromInt(w.COLOR_WINDOW + 1),
         .lpszClassName = class_name,
     };
     _ = w.RegisterClassExW(&wc);
@@ -750,6 +765,11 @@ pub fn main(init: std.process.Init) !void {
         _ = w.DispatchMessageW(&msg);
     }
     webapp.deinit();
+    // message windows that are still open go with the main window
+    while (wins.pop()) |v| {
+        if (v.hwnd) |h| _ = w.DestroyWindow(h) else gpa.destroy(v);
+    }
+    wins.deinit(gpa);
     // the browser profile (best effort: the browser processes may still be closing)
     Io.Dir.cwd().deleteTree(io, profile) catch {};
     if (exit_code != 0) std.process.exit(exit_code);

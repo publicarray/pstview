@@ -12,6 +12,7 @@ const webapp = @import("webapp.zig");
 
 const P = ?*anyopaque;
 const Z = [*:0]const u8;
+const GdkRGBA = extern struct { r: f64, g: f64, b: f64, a: f64 = 1 };
 const GSList = extern struct { data: P, next: ?*GSList };
 
 /// Every library function used, looked up by its field name.
@@ -24,6 +25,8 @@ const Lib = struct {
     gtk_container_add: *const fn (P, P) callconv(.c) void,
     gtk_widget_show_all: *const fn (P) callconv(.c) void,
     gtk_widget_destroy: *const fn (P) callconv(.c) void,
+    g_timeout_add: *const fn (c_uint, *const fn (P) callconv(.c) c_int, P) callconv(.c) c_uint,
+    webkit_web_view_set_background_color: *const fn (P, *const GdkRGBA) callconv(.c) void,
     gtk_events_pending: *const fn () callconv(.c) c_int,
     gtk_main_iteration_do: *const fn (c_int) callconv(.c) c_int,
     gtk_selection_data_get_uris: *const fn (P) callconv(.c) ?[*:null]?[*:0]u8,
@@ -93,7 +96,7 @@ var window: P = null;
 var web_context: P = null;
 
 /// One window and its web view. Signal handlers get the id as their user data.
-const Win = struct { id: u32, window: P, webview: P, first_load_done: bool = false };
+const Win = struct { id: u32, window: P, webview: P, first_load_done: bool = false, shown: bool = false };
 var wins: std.ArrayList(Win) = .empty;
 var next_id: u32 = 1;
 
@@ -142,8 +145,10 @@ fn createWindow(id: u32, title: []const u8, width: c_int, height: c_int) bool {
         return false;
     };
     lib.gtk_container_add(w, view);
-    lib.gtk_widget_show_all(w);
+    // The window appears once its page has settled on light or dark (setDark), so that a dark
+    // session never sees a white window first; and in any case after a moment.
     lib.webkit_web_view_load_html(view, webapp.page_html, null);
+    _ = lib.g_timeout_add(1500, &showLater, data);
     return true;
 }
 
@@ -164,7 +169,26 @@ fn closeWindow(win: u32) void {
     if (win != 0) _ = lib.g_idle_add(&destroyLater, @ptrFromInt(win));
 }
 
-fn setDark(_: bool) void {}
+fn show(w: *Win) void {
+    if (w.shown) return;
+    w.shown = true;
+    lib.gtk_widget_show_all(w.window);
+}
+
+fn showLater(data: P) callconv(.c) c_int {
+    if (winById(idOf(data))) |w| show(w);
+    return 0; // once
+}
+
+/// A page has applied its theme: the web views get the page's ground colour (what shows before
+/// a page is painted), and windows waiting for their page appear.
+fn setDark(dark: bool) void {
+    const ground: GdkRGBA = if (dark) .{ .r = 15.0 / 255.0, .g = 23.0 / 255.0, .b = 36.0 / 255.0 } else .{ .r = 1, .g = 1, .b = 1 };
+    for (wins.items) |*w| {
+        lib.webkit_web_view_set_background_color(w.webview, &ground);
+        show(w);
+    }
+}
 
 /// Let GTK handle what is waiting (bounded: a busy display must not hold up the request).
 fn pump() void {
@@ -340,5 +364,8 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
 
     lib.gtk_main();
     webapp.deinit();
+    clearDragged();
+    dragged.deinit(gpa);
+    wins.deinit(gpa);
     return 0;
 }

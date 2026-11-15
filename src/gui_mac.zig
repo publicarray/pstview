@@ -142,6 +142,11 @@ fn createWindow(n: u32, title: []const u8, width: f64, height: f64) bool {
     send1(void, window, "setTitle:", t);
     const webview = send2(id, send0(id, if (n == 0) webViewClass() else cls("WKWebView"), "alloc"), "initWithFrame:configuration:", frame, config) orelse return false;
     wins.append(gpa, .{ .id = n, .window = window, .webview = webview }) catch return false;
+    // Until the page is painted the window's own background shows (dark in a dark session),
+    // not the web view's white.
+    const key = nsString("drawsBackground");
+    defer release(key);
+    send2(void, webview, "setValue:forKey:", send1(id, cls("NSNumber"), "numberWithBool:", no), key);
     send1(void, webview, "setNavigationDelegate:", delegate);
     send1(void, window, "setDelegate:", delegate);
     send1(void, window, "setContentView:", webview);

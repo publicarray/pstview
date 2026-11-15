@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-src about:">
 <title>pstview</title>
+<script>/* the theme before anything is painted: no light flash in a dark session */
+document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';</script>
 <style>
 /* Visual style after design/design-philosophy.md ("Sealed Signal"): ink ground, paper content,
    one amber accent where something needs attention. Flat colour, hairlines, generous spacing. */
@@ -532,8 +534,10 @@ $('#rows').onmousedown = e => {
   const r = +row.dataset.r;
   if (e.button === 2 && (st.all || st.sel.has(r))) return; // right-click inside the selection keeps it
   focusRow(r, e);
+  // Double-click opens the message in its own window. The second press is what counts: selecting
+  // redraws the rows, so the "dblclick" event that follows no longer lands on a row.
+  if (e.button === 0 && e.detail === 2 && !e.shiftKey && !modKey(e)) act('openmsg');
 };
-$('#rows').ondblclick = e => { if (e.target.closest('.row')) act('openmsg'); };
 $('#rows').oncontextmenu = e => {
   e.preventDefault();
   if (e.target.closest('.row')) popup(e.clientX, e.clientY, CONTEXT);
@@ -950,8 +954,8 @@ async function selftest(r) {
     const byNid = await pv.call('msg', st.msg.nid);
     if (byNid.error || byNid.subject !== st.msg.subject) throw 'message not found by its id';
     // a message in its own window: the window opens, shows the message, reports and is closed
-    const opened = await pv.call('openmsg', 0);
-    if (opened.error) throw opened.error;
+    for (const detail of [1, 2]) // a double-click on the first row, as the web view reports it
+      document.querySelector('.row[data-r="0"]').dispatchEvent(new MouseEvent('mousedown', {bubbles: true, button: 0, detail}));
     for (const t0 = Date.now(); ; await new Promise(ok => setTimeout(ok, 100))) {
       const w = await pv.call('selfwin');
       if (w.ok && w.open === 0) break;
