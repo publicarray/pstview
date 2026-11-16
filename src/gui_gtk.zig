@@ -196,6 +196,23 @@ fn pump() void {
     while (n < 500 and lib.gtk_events_pending() != 0) : (n += 1) _ = lib.gtk_main_iteration_do(0);
 }
 
+// ================================================================ picture of the page (--screenshot)
+
+fn onSnapshot(view: P, result: P, data: P) callconv(.c) void {
+    const path: [*:0]const u8 = @ptrCast(data.?);
+    const finish: *const fn (P, P, P) callconv(.c) P = @ptrCast(@alignCast(lookup("webkit_web_view_get_snapshot_finish") orelse return quit(1)));
+    const write_png: *const fn (P, Z) callconv(.c) c_int = @ptrCast(@alignCast(lookup("cairo_surface_write_to_png") orelse return quit(1)));
+    const surface = finish(view, result, null) orelse return quit(1);
+    quit(if (write_png(surface, path) == 0) 0 else 1);
+}
+
+fn snapshot(path: []const u8) void {
+    const w = winById(0) orelse return quit(1);
+    const get: *const fn (P, c_int, c_int, P, *const fn (P, P, P) callconv(.c) void, P) callconv(.c) void = @ptrCast(@alignCast(lookup("webkit_web_view_get_snapshot") orelse return quit(1)));
+    const z = gpa.dupeSentinel(u8, path, 0) catch return quit(1);
+    get(w.webview, 0, 0, null, &onSnapshot, @constCast(z.ptr)); // the visible part, as shown
+}
+
 // ================================================================ files dropped on the window
 
 // The web view is the drop target and gives its page the files without their paths. It asks for
@@ -356,7 +373,7 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
         std.debug.print("pstview: cannot open a display (no X11 / Wayland session). The command-line tool pstx works without one.\n", .{});
         return 1;
     }
-    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit }, start_paths, selftest);
+    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit, .snapshot = &snapshot }, start_paths, selftest);
 
     web_context = lib.webkit_web_context_new_ephemeral();
     if (!createWindow(0, "pstview", 1400, 900)) return 1;

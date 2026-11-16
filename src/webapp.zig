@@ -35,6 +35,7 @@ const mime = @import("mime.zig");
 const platform = @import("platform.zig");
 const glyph = @import("glyph.zig");
 const setup = @import("setup.zig");
+const pstwrite = @import("pstwrite.zig");
 const build_options = @import("build_options");
 
 /// What the model needs from the platform shell.
@@ -56,10 +57,24 @@ pub const Shell = struct {
     /// Handle the window events that are waiting, so that the page can show progress while a
     /// long request is being answered. Requests arriving meanwhile are queued by the model.
     pump: *const fn () void,
+    /// A native question with command links (Windows task dialog); null: the page asks itself.
+    ask: ?*const fn (a: Allocator, q: Ask) ?Answer = null,
     /// The page's theme changed: the window frame may follow.
     setDark: *const fn (dark: bool) void,
     quit: *const fn (code: u8) void,
+    /// Write a picture of the main window's page to `path` (PNG), then quit. Only where the web
+    /// view can do that; it is how docs/screenshot.png is made.
+    snapshot: ?*const fn (path: []const u8) void = null,
 };
+
+pub const Choice = struct { label: []const u8, note: []const u8 };
+pub const Ask = struct { title: []const u8, text: []const u8, choices: []const Choice, verification: []const u8 = "" };
+/// `choice`: index into `choices`, null when cancelled; `verified`: the check box.
+pub const Answer = struct { choice: ?usize, verified: bool };
+
+/// `pstview --screenshot <png> <source>`: open the source, show its riskiest message, write a
+/// picture of the page and quit.
+pub var screenshot_path: ?[]const u8 = null;
 
 pub const page_html = @embedFile("webui.html");
 pub const project_url = "https://github.com/publicarray/pstview";
@@ -228,6 +243,9 @@ fn verifyProgress(done: usize, total: usize) void {
 }
 fn indexProgress(done: usize, total: usize) void {
     progress("Reading the folder's messages\u{2026}", done, total);
+}
+fn pstProgress(done: usize, total: usize) void {
+    progress("Writing the PST\u{2026}", done, total);
 }
 fn mailboxProgress(done: usize, total: usize) void {
     progress("Reading the mailbox for the header analysis\u{2026}", done, total);
@@ -403,7 +421,21 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         app.shell.quit(0);
         return out.appendSlice(a, "{}");
     }
+    if (eq(u8, cmd, "shot")) {
+        if (app.shell.snapshot) |snap| if (screenshot_path) |path| snap(path);
+        return out.appendSlice(a, "{}");
+    }
     if (eq(u8, cmd, "setup")) return setupInfo(a, out);
+    if (eq(u8, cmd, "ask")) {
+        // title, text, check box text, then label / note pairs
+        const ask = app.shell.ask orelse return failure(a, out, "No native dialogs here.", .{});
+        var choices: std.ArrayList(Choice) = .empty;
+        var i: usize = 3;
+        while (argAt(rest, i).len > 0) : (i += 2) try choices.append(a, .{ .label = argAt(rest, i), .note = argAt(rest, i + 1) });
+        // null: the native dialog could not be shown, and the page asks itself
+        const r = ask(a, .{ .title = argAt(rest, 0), .text = argAt(rest, 1), .verification = argAt(rest, 2), .choices = choices.items }) orelse return out.appendSlice(a, "{\"fallback\":true}");
+        return out.print(a, "{{\"choice\":{d},\"verified\":{}}}", .{ if (r.choice) |c| @as(i64, @intCast(c)) else -1, r.verified });
+    }
     if (eq(u8, cmd, "install") or eq(u8, cmd, "uninstall") or eq(u8, cmd, "defaults")) {
         const r = if (eq(u8, cmd, "install")) setup.install(a, app.io, build_options.version) else if (eq(u8, cmd, "uninstall")) setup.uninstall(a, app.io) else setup.defaults(a, app.io);
         if (r.url.len > 0) app.shell.openUrl(r.url);
@@ -504,6 +536,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         return message(a, out, "{s}\n\nSize: {d} bytes\nSHA-256: {s}{s}", .{ app.file_path, app.file.?.totalSize(), shown, if (shown.len < h.len) " ... (all hashes are in the export report)" else "" });
     }
     if (eq(u8, cmd, "integrity") or eq(u8, cmd, "verify")) return integrity(a, out, eq(u8, cmd, "verify"));
+    if (eq(u8, cmd, "topst")) return exportPst(a, out);
     if (eq(u8, cmd, "recover")) return recoverDeleted(a, out);
     return failure(a, out, "Unknown command.", .{});
 }
@@ -514,6 +547,7 @@ fn ready(a: Allocator, out: *List) Error!void {
     try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else "linux");
     try kv(a, out, false, "url", project_url);
     try kv(a, out, false, "theme", app.theme_choice);
+    try out.print(a, ",\"nativeAsk\":{}", .{app.shell.ask != null});
     if (app.cur_win != 0) {
         // a message window: the page shows this one message
         for (app.msg_wins.items) |mw| if (mw.win == app.cur_win) {
@@ -521,7 +555,7 @@ fn ready(a: Allocator, out: *List) Error!void {
         };
         return out.append(a, '}');
     }
-    try out.print(a, ",\"selftest\":{},\"setup\":", .{app.selftest});
+    try out.print(a, ",\"selftest\":{},\"shot\":{},\"setup\":", .{ app.selftest, screenshot_path != null and app.shell.snapshot != null });
     try setupInfo(a, out);
     app.page_ready = true;
     if (app.start_paths.len > 0) {
@@ -536,11 +570,15 @@ fn ready(a: Allocator, out: *List) Error!void {
 /// Install state for the Help menu and the first-run offer (setup.zig).
 fn setupInfo(a: Allocator, out: *List) Error!void {
     const s = setup.info(a, app.io);
-    try out.print(a, "{{\"available\":{},\"installed\":{},\"running\":{},\"offer\":{}", .{ s.available, s.installed, s.running_installed, s.offer and !app.selftest and app.start_paths.len == 0 });
+    try out.print(a, "{{\"available\":{},\"installed\":{},\"running\":{},\"offer\":{}", .{ s.available, s.installed, s.running_installed, s.offer and !app.selftest and screenshot_path == null and app.start_paths.len == 0 });
     try kv(a, out, false, "about", s.about);
     try kv(a, out, false, "installText", s.install_text);
     try kv(a, out, false, "uninstallText", s.uninstall_text);
     try kv(a, out, false, "defaultsLabel", s.defaults_label);
+    try kv(a, out, false, "offerTitle", s.offer_title);
+    try kv(a, out, false, "installNote", s.install_note);
+    try kv(a, out, false, "portableNote", s.portable_note);
+    try kv(a, out, false, "defaultsNote", s.defaults_note);
     try out.append(a, '}');
 }
 
@@ -1169,6 +1207,38 @@ fn saveAttachments(a: Allocator, out: *List, nid: u32, which: ?usize) Error!void
         saved += 1;
     }
     return message(a, out, "Saved {d} of {d} attachment(s) to:\n{s}", .{ saved, m.attachments.len, picked[0] });
+}
+
+/// The whole mailbox as a new PST (pstwrite.zig), with the HTML / CSV report beside it.
+fn exportPst(a: Allocator, out: *List) Error!void {
+    const stem = std.fs.path.stem(app.source_name);
+    const path = app.shell.pickSave(a, "Export the whole mailbox as a new PST (Unicode, opens in Outlook)", try std.fmt.allocPrint(a, "{s}.pst", .{if (stem.len > 0) stem else "mailbox"})) orelse return out.appendSlice(a, "{\"cancelled\":true}");
+    pstwrite.checkTarget(a, app.io, app.file.?, app.file_path, path) catch |e| return failure(a, out, "{s}", .{pstwrite.targetErrorText(e)});
+    const stats = pstwrite.exportStore(app.gpa, app.io, app.file.?, path, .{
+        .display_name = if (stem.len > 0) stem else "pstview export",
+        .uid_seed = app.file_path,
+        .progress = &pstProgress,
+    }, a) catch |e| return failure(a, out, "The PST could not be written: {s}", .{@errorName(e)});
+    const out_hash = store.Store.sha256File(app.gpa, app.io, path) catch @as([64]u8, @splat('?'));
+    const now: i64 = Io.Clock.real.now(app.io).toSeconds();
+    const off = platform.localOffset(now);
+    var fmt_buf: [128]u8 = undefined;
+    const meta: exp.ReportMeta = .{
+        .pst_path = app.file_path,
+        .pst_size = app.file.?.totalSize(),
+        .format = app.file.?.describe(&fmt_buf),
+        .sha256_hex = sourceSha256(),
+        .generated_utc = now,
+        .tz_label = std.fmt.allocPrint(a, "local time (UTC{s}{d}:{d:0>2} at report time; daylight saving applied for each date)", .{ if (off >= 0) "+" else "-", @divTrunc(@abs(off), 3600), @divTrunc(@mod(@abs(off), 3600), 60) }) catch "local time",
+        .tz_offset = off,
+        .offset_at = &platform.localOffset,
+        .title = try std.fmt.allocPrint(a, "PST export - {s} ({d} bytes, SHA-256 {s})", .{ path, stats.size, &out_hash }),
+    };
+    const report = try pstwrite.reportRows(a, stats);
+    const base = path[0 .. path.len - std.fs.path.extension(path).len];
+    writePath(try std.fmt.allocPrint(a, "{s} report.csv", .{base}), exp.reportCsv(a, report, meta) catch "") catch {};
+    writePath(try std.fmt.allocPrint(a, "{s} report.html", .{base}), exp.reportHtml(a, report, meta) catch "") catch {};
+    return message(a, out, "Wrote {s}\n\n{d} folders, {d} items{s}. {d} bytes, SHA-256 {s}.\n\nThe report (HTML + CSV) is beside it.", .{ path, stats.folders, stats.messages, if (stats.failed > 0) try std.fmt.allocPrint(a, " - {d} item(s) could NOT be exported (see the report)", .{stats.failed}) else "", stats.size, &out_hash });
 }
 
 // ================================================================ integrity and recovery

@@ -15,7 +15,7 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 | Program | What it is |
 |---|---|
 | `pstview` (`pstview.exe`, `pstview.app`) | GUI, the same on every platform: folder tree, sortable / searchable message list, and a reading pane with tabs (*Message*, *Header analysis*, *Internet headers*, *Attachments*). Double-click or Enter opens a message in its own window. Open a source with *File > Open*, by dropping it on the window, from the command line, or with *Open with*. |
-| `pstx` (`pstx.exe`) | Command line: `tree`, `list`, `show`, `export`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. |
+| `pstx` (`pstx.exe`) | Command line: `tree`, `list`, `show`, `export`, `topst`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. |
 
 Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`.
 
@@ -69,12 +69,23 @@ A message-header analyser, built in and **fully offline**: no DNS, reputation or
 
 Open several PST / OST files together (multi-select in *File > Open*, drop them on the window, open their folder, or `pstx ... "a.pst;b.pst"`) and they are shown as **one mailbox**. Same-path folders are combined, each item's *Note* names its part, and items found in more than one part are flagged as duplicates, not hidden. Every part stays a separate read-only file: verification, the integrity log and SHA-256 hashes are reported per part.
 
+## Convert to PST
+
+*File > Export whole mailbox as PST* (`pstx topst <source> <out.pst>`) writes everything in the user's folders to a new Unicode PST that Outlook can open: the way to turn an OST, an MBOX export or a set of PST parts into one PST.
+
+* **Kept:** the folder tree, every message with all its properties (named properties are re-mapped to the new file's name map, so calendar, contact and task fields keep working), recipients, attachments byte for byte, and embedded messages. A top-level *Deleted Items* becomes the new file's Deleted Items.
+* **Filled in when the source lacks them:** the properties every PST item must have (message class, flags, size, status, creation and modification times, search key). MBOX messages carry no modification time; the delivery time is used.
+* **Left out:** the source file's own entry ids and keys, search folders, views and other folder-associated items, and the *[Hidden]* / *[Recovered]* branches.
+* **Safe for evidence:** the source is only read, and the target may not be one of its files. The PST is written under a temporary name and renamed when complete, so a failed export leaves no plausible-looking file. The output is deterministic (no clock, no random numbers): the same source, named by the same path, gives the same file (the path seeds the new file's provider id; the GUI uses the absolute path). `<name> report.html` / `.csv` beside it list every item with its new node id, and the SHA-256 of the source and of the new PST.
+
+The writer follows [MS-PST] (Unicode, 512-byte pages, no encryption); where the specification leaves a detail open it follows Outlook's own files. CI reads every written test file back with pstview's reader (every page and block checksum); during development the files were also checked with libpff. They have not been opened by Outlook in this project's test runs: please report any file Outlook or *scanpst.exe* complains about. Files over 2 GB contain one more kind of map page whose position [MS-PST] does not state; it follows an existing open-source PST writer and is the least-tested part.
+
 ## Formats
 
 * **PST / OST:** Unicode files, unencrypted or with "compressible" encryption, in both page sizes (512-byte pages of Outlook 2003+; 4 KiB pages with zlib-compressed blocks of Outlook 2013+ OSTs). Compressed RTF bodies are decoded. Not yet supported: ANSI (97-2002) files and "high" encryption.
 * **MBOX:** any mbox file (mboxo / mboxrd, LF or CRLF), and these layouts: a Google Takeout export (labels become folders), a Thunderbird mail folder (`.sbd` subfolders), and Apple Mail `.mbox` bundles. Messages are decoded from MIME in any charset.
 * **Item types:** mail, appointments and meetings, contacts and distribution lists, tasks, notes and journal entries, with their fields. *Message > All properties* (`pstx props`) lists every MAPI property of an item.
-* **Export:** `.msg` (written directly, no Outlook needed) and `.eml`. An `.eml` from an MBOX is the original message, byte for byte; one from a PST keeps the original internet headers and adds `X-PST-*` provenance headers.
+* **Export:** `.pst` (whole mailbox, see above), `.msg` (written directly, no Outlook needed) and `.eml`. An `.eml` from an MBOX is the original message, byte for byte; one from a PST keeps the original internet headers and adds `X-PST-*` provenance headers.
 
 Every export writes `pstview report.html` and `pstview report.csv`: source path, size, format and SHA-256, and each item's dates, sender, recipients, subject, attachments and file name. Dates are in local time with daylight saving applied per date. CSV values a spreadsheet would run as a formula get a leading apostrophe.
 
@@ -86,6 +97,7 @@ pstx list    backup.pst "Inbox"
 pstx show    backup.pst 00200044 --html msg.html    # the GUI's sanitised view, as a page
 pstx export  backup.pst "Sent Items" out eml --match "contract"
 pstx export  backup.pst 0x8462 out msg --modified 2026-11-05
+pstx topst   backup.ost converted.pst               # OST (or MBOX, or PST parts) to a new PST
 pstx hash    backup.pst
 pstx verify  backup.ost                             # close Outlook first
 pstx headers backup.pst 00200044 --html hdr.html    # header analysis of one message
@@ -110,7 +122,7 @@ zig build -Drelease -Dtarget=aarch64-macos        # any target cross-compiles fr
 
 The web view is loaded at run time on every platform, so no SDK or development package is needed. `packaging/macos/make-app.sh` wraps the macOS binaries in `pstview.app`.
 
-CI builds every push on Windows, macOS and Linux, checks that `pstx` prints identical output everywhere, and runs the GUI self-test (`pstview --selftest <source>`). Pushing a `v*` tag publishes a release with the archives and `SHA256SUMS.txt`; the tag must match `release_version` in `build.zig`.
+CI builds every push on Windows, macOS and Linux, checks that `pstx` prints identical output everywhere (including a PST written from the demo mailbox, byte for byte), and runs the GUI self-test (`pstview --selftest <source>`). Pushing a `v*` tag publishes a release with the archives and `SHA256SUMS.txt`; the tag must match `release_version` in `build.zig`.
 
 ## Source layout
 
@@ -118,7 +130,16 @@ CI builds every push on Windows, macOS and Linux, checks that `pstx` prints iden
 * `src/mbox.zig`, `mime.zig`, `multi.zig`, `store.zig`: MBOX reader, MIME parsing, merged multi-file mailboxes, one interface over all sources.
 * `src/headers.zig`, `headerreport.zig`, `search.zig`: header analysis, its reports, and search.
 * `src/render.zig`, `export.zig`: the sanitised message view; EML / MSG writers and reports.
+* `src/pstwrite.zig`: the PST writer (NDB blocks and B-trees, heaps, property and table contexts, folders and messages).
 * `src/webui.html`, `webapp.zig`: the GUI shared by all platforms (the page and the model behind it).
 * `src/gui_win.zig`, `gui_mac.zig`, `gui_gtk.zig`, `gui_posix.zig`: windows, web views and dialogs per platform.
 * `src/setup.zig`, `install.zig`: per-user install and uninstall.
 * `src/cli.zig`, `platform.zig`, `fuzz.zig`: command line, time zone and charset conversion, fuzz targets.
+
+## References
+
+[MS-PST]: Outlook Personal Folders (.pst) File Format
+https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-pst/141923d5-15ab-4ef1-a524-6dce75aae546
+
+libpff
+https://github.com/libyal/libpff

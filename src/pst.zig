@@ -1500,7 +1500,9 @@ pub fn embeddedMessage(a: Allocator, att: *Attachment) !?Message {
     var an = att.node orelse return null;
     const p = att.pc.find(Tag.attach_data) orelse return null;
     if (p.ptype != PT.object or p.hnid == 0) return null;
-    var sub = (try an.subNode(a, p.hnid)) orelse return null;
+    // the value is a heap item { sub-node NID, size } ([MS-PST] 2.3.3.5)
+    const nid = if (p.data.len >= 4) rd32(p.data, 0) else p.hnid;
+    var sub = (try an.subNode(a, nid)) orelse (try an.subNode(a, p.hnid)) orelse return null;
     return try loadMessageNode(a, an.pst, &sub);
 }
 

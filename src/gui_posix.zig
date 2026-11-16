@@ -6,12 +6,14 @@
 //!   pstview [file or folder ...]      several PST/OST parts are merged into one mailbox
 //!   pstview --version
 //!   pstview --install | --uninstall   for the current user, as Help > Install / Uninstall do
+//!   pstview --screenshot <png> <source>   write a picture of the window's page (Linux), then exit
 //!   pstview --selftest <source>       open, list and render one message, then exit 0 / 1 (for CI)
 
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const setup = @import("setup.zig");
+const webapp = @import("webapp.zig");
 const shell = if (builtin.os.tag.isDarwin()) @import("gui_mac.zig") else @import("gui_gtk.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -19,7 +21,17 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     var paths: std.ArrayList([]const u8) = .empty;
     var selftest = false;
+    var want_png = false;
     for (args[1..]) |arg| {
+        if (want_png) {
+            want_png = false;
+            webapp.screenshot_path = std.fs.path.resolve(arena, &.{ try std.process.currentPathAlloc(init.io, arena), arg }) catch arg;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--screenshot")) {
+            want_png = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--version")) {
             std.debug.print("pstview {s}\n", .{build_options.version});
             return;

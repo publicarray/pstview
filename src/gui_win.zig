@@ -607,6 +607,41 @@ fn systemDark() bool {
     return light == 0;
 }
 
+/// The native question of webapp.Shell.ask: a task dialog with command links, the app icon and
+/// an optional check box - pstview's install dialogs as they were before the windows became web
+/// pages.
+fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
+    var buttons: [8]w.TASKDIALOG_BUTTON = undefined;
+    const n = @min(q.choices.len, buttons.len);
+    for (q.choices[0..n], 0..) |c, i| {
+        // a command link: its label, then the note on a second line
+        const text = if (c.note.len > 0) std.fmt.allocPrint(a, "{s}\n{s}", .{ c.label, c.note }) catch return null else c.label;
+        buttons[i] = .{ .nButtonID = @intCast(100 + i), .pszButtonText = (toW(a, text) orelse return null).ptr };
+    }
+    const scale = @max(GetDpiForSystem(), 96);
+    const px: i32 = @intCast(@divTrunc(32 * scale, 96));
+    const icon = w.LoadImageW(hinst, 1, w.IMAGE_ICON, px, px, 0);
+    const verification = if (q.verification.len > 0) toW(a, q.verification) else null;
+    const cfg: w.TASKDIALOGCONFIG = .{
+        .hwndParent = w.GetActiveWindow() orelse mainHwnd(),
+        .dwFlags = w.TDF_USE_COMMAND_LINKS | w.TDF_ALLOW_DIALOG_CANCELLATION | w.TDF_POSITION_RELATIVE_TO_WINDOW | (if (icon != null) w.TDF_USE_HICON_MAIN else 0),
+        .dwCommonButtons = w.TDCBF_CANCEL_BUTTON,
+        .pszWindowTitle = L("pstview"),
+        .hMainIcon = icon,
+        .pszMainInstruction = (toW(a, q.title) orelse return null).ptr,
+        .pszContent = (toW(a, q.text) orelse return null).ptr,
+        .cButtons = @intCast(n),
+        .pButtons = &buttons,
+        .nDefaultButton = if (n > 0) 100 else 0,
+        .pszVerificationText = if (verification) |v| v.ptr else null,
+    };
+    var pressed: i32 = w.IDCANCEL;
+    var checked: w.BOOL = 0;
+    if (w.TaskDialogIndirect(&cfg, &pressed, null, &checked) < 0) return null; // the page asks instead
+    const choice: ?usize = if (pressed >= 100 and pressed < 100 + @as(i32, @intCast(n))) @intCast(pressed - 100) else null;
+    return .{ .choice = choice, .verified = checked != 0 };
+}
+
 fn setDark(on: bool) void {
     dark = on;
     for (wins.items) |v| if (v.hwnd) |h| paintCaption(h);
@@ -735,7 +770,7 @@ pub fn main(init: std.process.Init) !void {
     data_dir = try std.unicode.wtf8ToWtf16LeAllocZ(arena, profile);
     page_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, webapp.page_html);
 
-    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openPath, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit }, paths.items, selftest);
+    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openPath, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .ask = &ask, .setDark = &setDark, .quit = &quit }, paths.items, selftest);
 
     // What a window shows before its page is painted: the page's ground colour, not white, in a
     // dark session (the window's own background and the web view's, which is set by this variable).

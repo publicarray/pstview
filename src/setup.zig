@@ -30,6 +30,11 @@ pub const Info = struct {
     install_text: []const u8 = "",
     uninstall_text: []const u8 = "",
     defaults_label: []const u8 = "Choose default apps\u{2026}",
+    /// The install question and the notes under its choices (command links on Windows).
+    offer_title: []const u8 = "Install pstview for this user?",
+    install_note: []const u8 = "",
+    portable_note: []const u8 = "",
+    defaults_note: []const u8 = "",
 };
 
 pub const Result = struct {
@@ -92,6 +97,10 @@ const windows = struct {
             else
                 try std.fmt.allocPrint(a, "pstview is running as a portable app. Installing copies it to {s}, adds it to the Start menu and lets Explorer open .pst, .ost and .mbox files with it. No administrator rights are needed; uninstall any time from Settings > Apps.\n\nThe portable copy keeps working either way - nothing is written to this PC unless you install.", .{l.dir}),
             .uninstall_text = try std.fmt.allocPrint(a, "Removes pstview from {s}, its Start menu entry, its file handlers and its entry in Settings > Apps.\n\nMailbox files, exports and reports are not touched.", .{l.dir}),
+            .offer_title = if (installed) "Update the installed copy of pstview?" else "Install pstview on this PC?",
+            .install_note = "Start menu entry, file handlers and an uninstaller",
+            .portable_note = "Nothing is written to this PC",
+            .defaults_note = "Opens Settings > Default apps for pstview",
         };
     }
 
@@ -102,7 +111,7 @@ const windows = struct {
             error.InstallDir => failed(a, "The folder {s} could not be created.", .{l.dir}),
             else => failed(a, "Install failed: {s}", .{@errorName(e)}),
         };
-        return .{ .text = "pstview is installed.\n\nStart it from the Start menu. Explorer now offers pstview under \"Open with\" for .pst, .ost, .mbox and .mbx files; to make it the default, use Help > Choose default apps (Windows asks you to confirm there).\n\nThis portable copy is no longer needed and can be deleted." };
+        return .{ .text = "Start it from the Start menu. Explorer now offers pstview under \"Open with\" for .pst, .ost, .mbox and .mbx files; to make it the default, Windows asks you to confirm in Settings > Default apps.\n\nThis portable copy is no longer needed and can be deleted." };
     }
 
     fn uninstall(a: Allocator, _: Io) !Result {
@@ -218,6 +227,10 @@ const linux = struct {
             .install_text = try std.fmt.allocPrint(a, "{s} pstview and pstx {s} {s}, and adds a menu entry, the icon and the PST / OST file type under {s}. No root rights are needed.\n\nThe portable copy keeps working either way - nothing is written to this computer unless you install.", .{ if (installed) "Replaces" else "Copies", if (installed) "in" else "to", p.bin, std.fs.path.dirname(p.apps) orelse p.apps }),
             .uninstall_text = try std.fmt.allocPrint(a, "Removes pstview and pstx from {s}, the menu entry, the icon and the file type.\n\nMailbox files, exports and reports are not touched.", .{p.bin}),
             .defaults_label = "Make pstview the default for PST / OST / MBOX files",
+            .offer_title = if (installed) "Update the installed copy of pstview?" else "Install pstview for this user?",
+            .install_note = "Programs in ~/.local/bin, a menu entry and the PST / OST file type",
+            .portable_note = "Nothing is written to this computer",
+            .defaults_note = "Opens .pst, .ost and .mbox files with pstview",
         };
     }
 
@@ -293,6 +306,10 @@ const macos = struct {
             .install_text = try std.fmt.allocPrint(a, "{s} pstview.app {s} ~/Applications (Launchpad and Spotlight find it there) and registers it for .pst, .ost and .mbox files. No administrator rights are needed.\n\nThis copy keeps working either way.", .{ if (installed) "Replaces" else "Copies", if (installed) "in" else "to" }),
             .uninstall_text = "Removes pstview.app from ~/Applications.\n\nMailbox files, exports and reports are not touched.",
             .defaults_label = "Make pstview the default for mailbox files\u{2026}",
+            .offer_title = if (installed) "Update the installed copy of pstview?" else "Install pstview for this user?",
+            .install_note = "A copy in ~/Applications, registered for mailbox files",
+            .portable_note = "Nothing is written to this Mac",
+            .defaults_note = "Shows how to choose pstview in Finder",
         };
     }
 

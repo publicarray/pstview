@@ -151,6 +151,20 @@ body.viewing #main{visibility:hidden}
 #dialog textarea{width:560px;max-width:80vw;height:300px;font:12px/1.4 var(--mono);border:1px solid var(--hairline);background:var(--pane);color:var(--ink);border-radius:6px;padding:8px;outline:0;resize:none;-webkit-user-select:text;user-select:text}
 #dialog .buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 #dialog a{color:var(--ink)}
+/* questions with command links (as Windows task dialogs show them) */
+#dialog.ask{max-width:min(560px,90vw)}
+#dialog.ask .body{overflow-wrap:break-word}
+#dialog .askhead{display:flex;gap:14px;align-items:flex-start}
+#dialog .askhead svg{flex:none;width:36px;height:36px}
+#dialog .askhead h2{color:var(--k-h);font-size:17px;font-weight:500;margin:6px 0 8px}
+#dialog .links{display:flex;flex-direction:column;gap:2px;margin:16px 0 0 50px}
+#dialog .link{display:flex;gap:10px;align-items:flex-start;text-align:left;background:none;border:1px solid transparent;border-radius:6px;padding:8px 10px;color:var(--ink)}
+#dialog .link:hover,#dialog .link:focus-visible{background:var(--hover);border-color:var(--hairline);outline:0}
+#dialog .link i{font-style:normal;color:var(--k-ok);font-size:17px;line-height:20px}
+#dialog .link b{display:block;font-weight:500;font-size:14px;color:var(--k-h)}
+#dialog .link span{display:block;color:var(--muted);margin-top:1px}
+#dialog .askfoot{display:flex;align-items:center;justify-content:space-between;margin-top:18px;padding-top:12px;border-top:1px solid var(--hairline)}
+#dialog .askfoot label{display:flex;gap:7px;align-items:center;color:var(--ink-soft)}
 #busy{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;cursor:progress}
 #busy.on{display:flex}
 #busy div{background:var(--primary);color:var(--on-bar);padding:10px 20px;border-radius:8px;display:flex;align-items:center;gap:12px}
@@ -353,6 +367,7 @@ function headersHtml(text) {
 function dialog(heading, body, buttons) {
   return new Promise(resolve => {
     const d = $('#dialog');
+    d.className = '';
     d.innerHTML = `<h2>${esc(heading)}</h2><div class="body">${body}</div><div class="buttons"></div>`;
     (buttons || [['OK', true]]).forEach(([label, value], i) => {
       const b = document.createElement('button');
@@ -660,20 +675,19 @@ async function act(name) {
     case 'closewin': return pv.call('closewin');
     case 'openmsg': if (needRow()) { const r = await pv.call('openmsg', st.focus); if (r.error) notice(r.error); } return;
     case 'onemsg': case 'oneeml': return shown(await pv.call('exportone', name.slice(3), ref()));
-    case 'install': {
-      const s = st.setup;
-      const ok = await dialog(s.installed ? 'Update the installed copy of pstview?' : 'Install pstview for this user?', esc(s.installText),
-        [[s.installed ? 'Update' : 'Install', true], ['Cancel', false]]);
-      return ok ? setupDone(await pv.call('install')) : undefined;
-    }
+    case 'install': return offerInstall(true);
     case 'uninstall': {
-      const ok = await dialog('Uninstall pstview?', esc(st.setup.uninstallText), [['Uninstall', true], ['Keep pstview', false]]);
-      return ok ? setupDone(await pv.call('uninstall')) : undefined;
+      const r = await choose('Uninstall pstview?', st.setup.uninstallText, [
+        { label: 'Uninstall', value: 'yes' },
+        { label: 'Keep pstview', value: 'no' },
+      ]);
+      return r.value === 'yes' ? setupDone(await pv.call('uninstall')) : undefined;
     }
     case 'defaults': return setupDone(await pv.call('defaults'));
     case 'msg': case 'eml': case 'none': return shown(await pv.call('export', name, selection()));
     case 'saveatts': return shown(await pv.call('saveatts', ref()));
     case 'hash': return shown(await pv.call('hash'));
+    case 'topst': return shown(await pv.call('topst'));
     case 'selectall': if (st.count) { st.all = true; st.sel.clear(); renderRows(); } return;
     case 'expand': {
       if (!st.msg) return;
@@ -723,6 +737,37 @@ async function act(name) {
   }
 }
 
+const APP_ICON = '<svg viewBox="0 0 36 36"><rect width="36" height="36" rx="8" fill="#13233F"/><path d="M7 11h17v13H7z M7 11l8.5 7 8.5-7" fill="none" stroke="#F6F4EE" stroke-width="2.2" stroke-linejoin="round"/><circle cx="25" cy="24" r="4.6" fill="none" stroke="#F5B700" stroke-width="2.4"/><path d="M28.4 27.4l3 3" stroke="#F5B700" stroke-width="2.6" stroke-linecap="round"/></svg>';
+
+/**
+ * A question with command links, as Windows task dialogs ask it: on Windows the native task
+ * dialog, elsewhere the page draws the same. `choices`: [{label, note, value}]; `verify`: the
+ * text of a check box under them. Resolves to {value, verified}; value null when cancelled.
+ */
+async function choose(title, text, choices, verify) {
+  if (st.nativeAsk) {
+    const r = await pv.call('ask', title, text, verify || '', ...choices.flatMap(c => [c.label, c.note || '']));
+    if (!r.fallback && !r.error) return { value: r.choice >= 0 && choices[r.choice] ? choices[r.choice].value : null, verified: !!r.verified };
+  }
+  return new Promise(resolve => {
+    const d = $('#dialog');
+    d.className = 'ask';
+    d.innerHTML = `<div class="askhead">${APP_ICON}<div><h2>${esc(title)}</h2><div class="body">${esc(text)}</div></div></div><div class="links"></div>` +
+      `<div class="askfoot">${verify ? `<label><input type="checkbox" id="askverify"> ${esc(verify)}</label>` : '<span></span>'}<button class="btn" id="askcancel">Cancel</button></div>`;
+    const done = value => { $('#shade').classList.remove('on'); d.className = ''; resolve({ value, verified: !!(verify && $('#askverify') && $('#askverify').checked) }); };
+    choices.forEach(c => {
+      const b = document.createElement('button');
+      b.className = 'link';
+      b.innerHTML = `<i>&#x2192;</i><div><b>${esc(c.label)}</b>${c.note ? `<span>${esc(c.note)}</span>` : ''}</div>`;
+      b.onclick = () => done(c.value);
+      d.querySelector('.links').appendChild(b);
+    });
+    $('#askcancel').onclick = () => done(null);
+    $('#shade').classList.add('on');
+    d.querySelector('.link').focus();
+  });
+}
+
 /** After install / uninstall / default apps: say what happened, refresh the Help menu, close when told to. */
 async function setupDone(r) {
   if (r.setup) st.setup = r.setup;
@@ -730,12 +775,27 @@ async function setupDone(r) {
   if (r.message) await notice(r.message);
   if (r.quit) pv.call('quit');
 }
-/** First start of a portable copy: offer to install it (Help > Install does the same at any time). */
-async function offerInstall() {
+/** Install (or update), then offer the default-apps step, as the Windows installer did. */
+async function runInstall() {
+  const r = await pv.call('install');
+  if (r.setup) st.setup = r.setup;
+  if (r.error) return notice(r.error, 'pstview could not do that');
   const s = st.setup;
-  const choice = await dialog('Install pstview for this user?', esc(s.installText), [['Install', 'yes'], ['Keep using it portable', 'no'], ["Don't offer this again", 'never']]);
-  if (choice === 'yes') return setupDone(await pv.call('install'));
-  if (choice === 'never') { await pv.call('nooffer'); st.setup.offer = false; }
+  const next = await choose('pstview is installed', r.message || '', [
+    { label: 'Done', value: 'done' },
+    { label: s.defaultsLabel.replace(/\u2026$/, ''), note: s.defaultsNote, value: 'defaults' },
+  ]);
+  if (next.value === 'defaults') return setupDone(await pv.call('defaults'));
+}
+/** Help > Install, and the first start of a portable copy (with "Don't offer this again"). */
+async function offerInstall(asked) {
+  const s = st.setup;
+  const r = await choose(s.offerTitle, s.installText, [
+    { label: s.installed ? 'Update for this user' : 'Install for this user', note: s.installNote, value: 'install' },
+    { label: 'Keep using it portable', note: s.portableNote, value: 'keep' },
+  ], asked ? '' : "Don't offer this again");
+  if (r.value === 'install') return runInstall();
+  if (r.verified) { await pv.call('nooffer'); st.setup.offer = false; }
 }
 const canInstall = () => !!st.setup.available;
 const isInstalled = () => !!st.setup.installed;
@@ -751,6 +811,7 @@ const MENUS = [
     ['Save attachments of message…', 'saveatts', needRow],
     null,
     ['Report (HTML + CSV) of selection / folder…', 'none', need],
+    ['Export whole mailbox as PST (converts OST / MBOX)…', 'topst', need],
     ['Show SHA-256 of source file', 'hash', need],
   ]],
   ['Message', [
@@ -873,7 +934,7 @@ document.addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
   if (e.key === 'Escape') {
     if ($('.menu.open') || $('.drop.ctx')) return closeMenus();
-    if ($('#shade').classList.contains('on')) return;
+    if ($('#shade').classList.contains('on')) { const c = $('#askcancel'); if (c) c.click(); return; }
     if ($('#viewer').classList.contains('on')) return $('#vclose').click();
     if (st.single) return act('closewin');
     if ($('#listwrap').classList.contains('hidden')) return act('expand');
@@ -980,9 +1041,25 @@ async function selftest(r) {
   } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
 }
 
+/** --screenshot: the riskiest message of the start folder with its header analysis, in the light theme. */
+async function screenshot() {
+  theme.choice = 'light';
+  await applyTheme();
+  if (st.mb) {
+    resetList(await pv.call('analyse'));
+    if (st.count && await rowData(0)) {
+      focusRow(0);
+      for (let i = 0; i < 100 && !st.msg; i++) await new Promise(ok => setTimeout(ok, 50));
+      showTab('analysis');
+    }
+  }
+  await new Promise(ok => setTimeout(ok, 1200));
+  pv.call('shot');
+}
+
 (async () => {
   const r = await pv.call('ready');
-  st.version = r.version; st.url = r.url; st.setup = r.setup || {};
+  st.version = r.version; st.url = r.url; st.setup = r.setup || {}; st.nativeAsk = !!r.nativeAsk;
   if (r.theme) theme.choice = r.theme;
   if (r.standalone) {
     // a message window: only the reading pane, with its own short menu
@@ -1000,7 +1077,8 @@ async function selftest(r) {
   if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);
   if (r.opened) await showMailbox(r.opened);
   if (r.selftest) return selftest(r);
-  if (st.setup.offer) offerInstall();
+  if (r.shot) return screenshot();
+  if (st.setup.offer) offerInstall(false);
 })();
 </script>
 </body>

@@ -12,6 +12,7 @@ const std = @import("std");
 const Io = std.Io;
 const pst = @import("pst.zig");
 const exp = @import("export.zig");
+const pstwrite = @import("pstwrite.zig");
 const platform = @import("platform.zig");
 const search = @import("search.zig");
 const headers = @import("headers.zig");
@@ -70,6 +71,7 @@ fn run(init: std.process.Init) !void {
             \\  pstx list   <pst|ost> <folder path | 0xNID>
             \\  pstx show   <pst|ost> <message nid (hex)> [--html out.html]   --html: the sanitised safe view as a page
             \\  pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
+            \\  pstx topst  <source> <out.pst>   the whole mailbox as a new PST (converts OST / MBOX), with a report
             \\  pstx hash   <pst|ost>
             \\  pstx hidden <pst|ost>      orphaned messages/folders and hidden (FAI) items
             \\  pstx recover <pst|ost>     deleted items and earlier versions recovered from stale index pages
@@ -206,6 +208,8 @@ fn run(init: std.process.Init) !void {
         }
     } else if (std.mem.eql(u8, cmd, "export")) {
         try exportCmd(arena, io, out, f, args);
+    } else if (std.mem.eql(u8, cmd, "topst")) {
+        try toPstCmd(arena, gpa, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
         if (args.len < 4) return fail(out, "usage: pstx show <pst|ost> <nid hex> [--html out.html]\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
@@ -469,6 +473,38 @@ fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []co
     try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.html" }), try exp.reportHtml(a, rows.items, meta));
     try out.print("-- exported {d} items to {s}\n", .{ rows.items.len, dir });
     if (failed > 0) return fail(out, "-- {d} item(s) could NOT be exported (listed above)\n", .{failed});
+}
+
+/// `pstx topst <source> <out.pst>`: the whole mailbox as a new PST, plus the HTML / CSV report.
+fn toPstCmd(a: std.mem.Allocator, gpa: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []const [:0]const u8) !void {
+    if (args.len < 4) return fail(out, "usage: pstx topst <source> <out.pst>\n", .{});
+    const target = args[3];
+    pstwrite.checkTarget(a, io, f, args[2], target) catch |e| return fail(out, "{s}\n", .{pstwrite.targetErrorText(e)});
+    const stats = pstwrite.exportStore(gpa, io, f, target, .{
+        .display_name = std.fs.path.stem(std.fs.path.basename(args[2])),
+        .uid_seed = args[2],
+    }, a) catch |e| return fail(out, "PST export failed: {s}\n", .{@errorName(e)});
+    for (stats.items) |it| if (!it.ok) try out.print("  FAILED 0x{x} {s}: {s}\n", .{ it.nid, it.folder, it.summary.subject });
+    const out_hash = try Store.sha256File(gpa, io, target);
+    const now = Io.Clock.real.now(io).toSeconds();
+    var fmt_buf: [128]u8 = undefined;
+    const meta: exp.ReportMeta = .{
+        .pst_path = args[2],
+        .pst_size = f.totalSize(),
+        .format = f.describe(&fmt_buf),
+        .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
+        .generated_utc = now,
+        .tz_label = "local time, daylight saving applied for each date",
+        .tz_offset = platform.localOffset(now),
+        .offset_at = &platform.localOffset,
+        .title = try std.fmt.allocPrint(a, "PST export - {s} ({d} bytes, SHA-256 {s})", .{ target, stats.size, &out_hash }),
+    };
+    const rows = try pstwrite.reportRows(a, stats);
+    const stem = target[0 .. target.len - std.fs.path.extension(target).len];
+    try writeOut(io, try std.fmt.allocPrint(a, "{s} report.csv", .{stem}), try exp.reportCsv(a, rows, meta));
+    try writeOut(io, try std.fmt.allocPrint(a, "{s} report.html", .{stem}), try exp.reportHtml(a, rows, meta));
+    try out.print("-- {s}: {d} folders, {d} items, {d} bytes\n   SHA-256 {s}\n", .{ target, stats.folders, stats.messages, stats.size, &out_hash });
+    if (stats.failed > 0) return fail(out, "-- {d} item(s) could NOT be exported (listed above)\n", .{stats.failed});
 }
 
 /// Value of a "--html <path>" option.
