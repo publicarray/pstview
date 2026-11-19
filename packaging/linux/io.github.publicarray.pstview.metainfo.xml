@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata (software centres, Flatpak). The Flatpak's app id is the id here. -->
+<component type="desktop-application">
+  <id>io.github.publicarray.pstview</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>pstview</name>
+  <summary>Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes</summary>
+  <description>
+    <p>
+      pstview opens Outlook PST and OST files (including Outlook 2013+ OSTs and mailboxes exported
+      in several parts) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail, without
+      write access: nothing is written next to the source.
+    </p>
+    <ul>
+      <li>Folder tree, sortable and searchable message list, reading pane</li>
+      <li>Header analysis: SPF, DKIM, DMARC, spoofing and delivery path, offline</li>
+      <li>Export as .msg, .eml or a whole mailbox as PST, with HTML and CSV reports recording the source's SHA-256</li>
+      <li>Recovery of deleted items and block-level integrity checks</li>
+    </ul>
+    <p>
+      Messages are shown with scripts and all network access blocked.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.publicarray.pstview.desktop</launchable>
+  <url type="homepage">https://github.com/publicarray/pstview</url>
+  <url type="bugtracker">https://github.com/publicarray/pstview/issues</url>
+  <developer id="io.github.publicarray">
+    <name>publicarray</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/publicarray/pstview/main/docs/screenshot.png</image>
+      <caption>A mailbox with the header analysis of a spoofed message</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>pstview</binary>
+    <binary>pstx</binary>
+    <mediatype>application/vnd.ms-outlook-pst</mediatype>
+    <mediatype>application/mbox</mediatype>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>Email</category>
+  </categories>
+</component>

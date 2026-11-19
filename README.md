@@ -17,7 +17,10 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 | `pstview` (`pstview.exe`, `pstview.app`) | GUI, the same on every platform: folder tree, sortable / searchable message list, and a reading pane with tabs (*Message*, *Header analysis*, *Internet headers*, *Attachments*). Double-click or Enter opens a message in its own window. Open a source with *File > Open*, by dropping it on the window, from the command line, or with *Open with*. |
 | `pstx` (`pstx.exe`) | Command line: `tree`, `list`, `show`, `export`, `topst`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. |
 
-Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`.
+Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`. Linux also gets:
+
+* **AppImage** (`x86_64`, `aarch64`): one file, `chmod +x` and run; `pstview-….AppImage pstx tree a.pst` runs the command-line tool. It uses the system's GTK 4 and WebKitGTK 6.0, like the archive.
+* **Flatpak** (`x86_64`): `flatpak install --user pstview-…-x86_64.flatpak` (fetches the GNOME runtime from Flathub, so GTK and WebKitGTK need not be installed). It has no network and no file access of its own: mailboxes are opened and exports saved through the file chooser, by dropping files, or with *Open with*; Help > Install does not apply. For pstx on files outside that: `flatpak run --filesystem=home:ro --command=pstx io.github.publicarray.pstview tree ~/a.pst`.
 
 **Requirements.** `pstx` needs nothing. The GUI shows its content in the web view that is part of the operating system, so there is no bundled browser engine:
 

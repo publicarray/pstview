@@ -1,0 +1,49 @@
+# Flatpak of pstview and pstx, from the release binaries (zig build -Drelease
+# -Dtarget=x86_64-linux-gnu): the GNOME runtime has GTK 4 and WebKitGTK 6.0, which pstview
+# loads at run time. CI copies the binaries into packaging/flatpak/bin first.
+#
+#   flatpak-builder --user --install --force-clean build packaging/flatpak/io.github.publicarray.pstview.yml
+#   flatpak run io.github.publicarray.pstview [file ...]
+#   flatpak run --command=pstx io.github.publicarray.pstview tree file.pst
+#
+# No network and no file system access: mailboxes are opened, and exports saved, through the
+# desktop's file chooser (portal), by dropping files on the window, or with "Open with".
+id: io.github.publicarray.pstview
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: pstview
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+modules:
+  - name: pstview
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 -t /app/bin pstview pstx
+      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/${FLATPAK_ID}.png
+      - install -Dm644 icon-64.png /app/share/icons/hicolor/64x64/apps/${FLATPAK_ID}.png
+      - sed "s/^Icon=pstview$/Icon=${FLATPAK_ID}/" pstview.desktop > ${FLATPAK_ID}.desktop
+      - install -Dm644 -t /app/share/applications ${FLATPAK_ID}.desktop
+      - install -Dm644 pstview-mime.xml /app/share/mime/packages/${FLATPAK_ID}.xml
+      - install -Dm644 -t /app/share/metainfo ${FLATPAK_ID}.metainfo.xml
+    sources:
+      - type: file
+        path: bin/pstview
+      - type: file
+        path: bin/pstx
+      - type: file
+        path: ../../design/icon-256.png
+      - type: file
+        path: ../../design/icon-128.png
+      - type: file
+        path: ../../design/icon-64.png
+      - type: file
+        path: ../linux/pstview.desktop
+      - type: file
+        path: ../linux/pstview-mime.xml
+      - type: file
+        path: ../linux/io.github.publicarray.pstview.metainfo.xml

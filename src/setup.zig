@@ -158,23 +158,9 @@ fn remove(io: Io, path: []const u8) void {
 
 const linux = struct {
     const mime_types = [_][]const u8{ "application/vnd.ms-outlook-pst", "application/mbox" };
-    /// shared-mime-info knows *.mbox; the Outlook data files get a type of their own.
-    const mime_package =
-        \\<?xml version="1.0" encoding="UTF-8"?>
-        \\<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-        \\  <mime-type type="application/vnd.ms-outlook-pst">
-        \\    <comment>Outlook data file</comment>
-        \\    <glob pattern="*.pst"/>
-        \\    <glob pattern="*.ost"/>
-        \\    <magic priority="60"><match type="string" offset="0" value="!BDN"/></magic>
-        \\  </mime-type>
-        \\  <mime-type type="application/mbox">
-        \\    <glob pattern="*.mbox"/>
-        \\    <glob pattern="*.mbx"/>
-        \\  </mime-type>
-        \\</mime-info>
-        \\
-    ;
+    /// shared-mime-info knows *.mbox; the Outlook data files get a type of their own
+    /// (packaging/linux/pstview-mime.xml, also part of the Flatpak).
+    const mime_package = @embedFile("mime_package");
 
     const Paths = struct {
         bin: []const u8,
@@ -211,9 +197,21 @@ const linux = struct {
         };
     }
 
+    /// In a Flatpak the software manager installs, updates and removes pstview.
+    fn flatpak() ?[]const u8 {
+        return env("FLATPAK_ID");
+    }
+
+    fn inFlatpak(a: Allocator) Result {
+        return failed(a, "This pstview is a Flatpak ({s}): it is installed, updated and removed with Flatpak or the software manager, and the desktop already knows it.", .{flatpak().?});
+    }
+
     fn info(a: Allocator, io: Io) !Info {
+        if (flatpak()) |id| return .{ .about = try std.fmt.allocPrint(a, "Flatpak {s}", .{id}) };
         const p = try paths(a);
         const self = try std.process.executablePathAlloc(io, a);
+        // an AppImage runs from a temporary mount; the file the user has is $APPIMAGE
+        const appimage = env("APPIMAGE");
         const installed = exists(io, p.exe) and exists(io, p.desktop);
         const running = std.mem.eql(u8, self, p.exe);
         return .{
@@ -223,7 +221,7 @@ const linux = struct {
             .about = if (running)
                 try std.fmt.allocPrint(a, "Installed for this user in {s}", .{p.bin})
             else
-                try std.fmt.allocPrint(a, "Portable copy: {s}", .{std.fs.path.dirname(self) orelse self}),
+                if (appimage) |f| try std.fmt.allocPrint(a, "AppImage: {s}", .{f}) else try std.fmt.allocPrint(a, "Portable copy: {s}", .{std.fs.path.dirname(self) orelse self}),
             .install_text = try std.fmt.allocPrint(a, "{s} pstview and pstx {s} {s}, and adds a menu entry, the icon and the PST / OST file type under {s}. No root rights are needed.\n\nThe portable copy keeps working either way - nothing is written to this computer unless you install.", .{ if (installed) "Replaces" else "Copies", if (installed) "in" else "to", p.bin, std.fs.path.dirname(p.apps) orelse p.apps }),
             .uninstall_text = try std.fmt.allocPrint(a, "Removes pstview and pstx from {s}, the menu entry, the icon and the file type.\n\nMailbox files, exports and reports are not touched.", .{p.bin}),
             .defaults_label = "Make pstview the default for PST / OST / MBOX files",
@@ -235,6 +233,7 @@ const linux = struct {
     }
 
     fn install(a: Allocator, io: Io, _: []const u8) !Result {
+        if (flatpak() != null) return inFlatpak(a);
         const p = try paths(a);
         const cwd = Io.Dir.cwd();
         const self = try std.process.executablePathAlloc(io, a);
@@ -250,18 +249,34 @@ const linux = struct {
         try cwd.writeFile(io, .{ .sub_path = p.desktop, .data = entry });
         _ = runTool(a, io, &.{ "update-mime-database", p.mime });
         _ = runTool(a, io, &.{ "update-desktop-database", p.apps });
+        refreshIconCache(a, io, p);
         return .{ .text = try std.fmt.allocPrint(a, "pstview is installed in {s}, with an entry in the applications menu.\n\nFile managers now offer pstview under \"Open with\" for .pst, .ost and .mbox files; Help > Make pstview the default sets it as their default.\n\nThis portable copy is no longer needed and can be deleted.", .{p.bin}) };
     }
 
     fn uninstall(a: Allocator, io: Io) !Result {
+        if (flatpak() != null) return inFlatpak(a);
         const p = try paths(a);
         for ([_][]const u8{ p.exe, p.pstx, p.desktop, p.icon, p.mime_pkg }) |f| remove(io, f);
         _ = runTool(a, io, &.{ "update-mime-database", p.mime });
         _ = runTool(a, io, &.{ "update-desktop-database", p.apps });
+        refreshIconCache(a, io, p);
         return .{ .text = "pstview has been uninstalled for this user." };
     }
 
+    /// An icon cache in the user's hicolor folder (another program's installer may have made
+    /// one) is trusted while that folder itself is unchanged, and the icon is added two levels
+    /// below it: the cache is made again, else marked stale. None is made where there was none.
+    fn refreshIconCache(a: Allocator, io: Io, p: Paths) void {
+        const hicolor = std.fs.path.dirname(std.fs.path.dirname(p.icons) orelse return) orelse return;
+        const cache = std.fs.path.join(a, &.{ hicolor, "icon-theme.cache" }) catch return;
+        if (!exists(io, cache)) return;
+        for ([_][]const u8{ "gtk-update-icon-cache", "gtk4-update-icon-cache" }) |tool|
+            if (runTool(a, io, &.{ tool, "--quiet", "--force", "--ignore-theme-index", hicolor })) return;
+        _ = runTool(a, io, &.{ "touch", hicolor });
+    }
+
     fn defaults(a: Allocator, io: Io) !Result {
+        if (flatpak() != null) return inFlatpak(a);
         const p = try paths(a);
         if (!exists(io, p.desktop)) return failed(a, "Install pstview first (Help > Install pstview for this user).", .{});
         var argv: std.ArrayList([]const u8) = .empty;

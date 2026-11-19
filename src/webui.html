@@ -1054,7 +1054,8 @@ async function selftest(r) {
       probe.innerHTML = render(hostile);
       if (probe.textContent !== hostile || probe.querySelector(':not(span):not(b)')) throw 'colouring let markup through';
     }
-    if (typeof st.setup.available !== 'boolean' || !st.setup.installText) throw 'no install state';
+    // (a Flatpak cannot install itself: no install text there)
+    if (typeof st.setup.available !== 'boolean' || (st.setup.available && !st.setup.installText) || !st.setup.about) throw 'no install state';
     const byNid = await pv.call('msg', st.msg.nid);
     if (byNid.error || byNid.subject !== st.msg.subject) throw 'message not found by its id';
     // a message in its own window: the window opens, shows the message, reports and is closed

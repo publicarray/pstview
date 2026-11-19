@@ -623,8 +623,9 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
         std.debug.print("pstview needs GTK 4 and WebKitGTK 6.0 (packages libgtk-4-1 and libwebkitgtk-6.0-4 on Debian / Ubuntu, gtk4 and webkitgtk6.0 on Fedora, gtk4 and webkitgtk-6.0 on Arch).\nNot found: {s}\nThe command-line tool pstx works without them.\n", .{missing});
         return 1;
     }
-    // the Wayland app id / X11 window class, which ties the windows to pstview.desktop, and the
-    // name of the icon
+    // the Wayland app id / X11 window class, which ties the windows to pstview.desktop (in a
+    // Flatpak: <id>.desktop), and the name of the icon
+    if (std.c.getenv("FLATPAK_ID")) |id| app_id = id;
     lib.g_set_prgname(app_id);
     lib.g_set_application_name("pstview");
     if (lib.gtk_init_check() == 0) {
@@ -667,7 +668,7 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
 /// pstview.desktop only; other desktops take the window's.)
 fn provideIcon() void {
     const theme = lib.gtk_icon_theme_get_for_display(lib.gdk_display_get_default()) orelse return;
-    if (lib.gtk_icon_theme_has_icon(theme, app_id) != 0) return; // installed
+    if (lib.gtk_icon_theme_has_icon(theme, app_id) != 0) return; // installed, or the Flatpak's
     var buf: [1024]u8 = undefined;
     const dir = std.fmt.bufPrintSentinel(&buf, "{s}/pstview/icons", .{std.mem.span(lib.g_get_user_runtime_dir())}, 0) catch return;
     if (lib.g_mkdir_with_parents(dir.ptr, 0o700) != 0) return;

@@ -6,5 +6,5 @@ Comment=Read-only viewer and exporter for Outlook PST / OST files and MBOX mailb
 Exec=pstview %F
 Icon=pstview
 Terminal=false
-Categories=Office;Email;Utility;
+Categories=Office;Email;
 MimeType=application/vnd.ms-outlook-pst;application/mbox;

@@ -131,6 +131,86 @@ jobs:
           name: pstview-${{ matrix.platform }}
           path: dist/*
 
+      # the glibc builds of pstview and pstx, for the AppImage and Flatpak jobs
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux'
+        with:
+          name: linux-gui-bin
+          path: |
+            zig-out-gui/bin/
+            zig-out-gui-arm64/bin/
+
+  # One-file AppImages (x86_64, aarch64) of the same binaries. Like the release archive they use
+  # the system's GTK 4 and WebKitGTK 6.0; the x86_64 one runs the GUI self-test.
+  appimage:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-gui-bin
+          path: bins
+      - name: Build the AppImages
+        env:
+          APPIMAGETOOL_VERSION: 1.9.1
+          # runners have no FUSE: AppImages (appimagetool's too) unpack and run instead
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          ver=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "${GITHUB_SHA:0:7}")
+          chmod +x bins/*/bin/*
+          curl -fsSL -o appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          export APPIMAGETOOL="$PWD/appimagetool"
+          sh packaging/linux/make-appimage.sh bins/zig-out-gui/bin "$ver" x86_64 dist
+          sh packaging/linux/make-appimage.sh bins/zig-out-gui-arm64/bin "$ver" aarch64 dist
+          ls -l dist
+      - name: GUI self-test of the AppImage (Xvfb)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-1 libwebkitgtk-6.0-4 xvfb xauth
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          app=$(ls dist/*-x86_64.AppImage)
+          "$app" pstx tree testdata/demo-mailbox
+          timeout 180 xvfb-run -a "$app" --selftest testdata/demo-mailbox
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pstview-appimage
+          path: dist/*.AppImage
+
+  # A Flatpak bundle on the GNOME runtime (which has GTK 4 and WebKitGTK 6.0). Installing it
+  # fetches the runtime from Flathub: flatpak install --user pstview-<version>-x86_64.flatpak
+  flatpak:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-gui-bin
+          path: bins
+      - name: Binaries for the manifest
+        id: ver
+        run: |
+          mkdir -p packaging/flatpak/bin
+          install -m755 bins/zig-out-gui/bin/pstview bins/zig-out-gui/bin/pstx packaging/flatpak/bin/
+          echo "v=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "${GITHUB_SHA:0:7}")" >> "$GITHUB_OUTPUT"
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/io.github.publicarray.pstview.yml
+          bundle: pstview-${{ steps.ver.outputs.v }}-x86_64.flatpak
+          cache: false
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pstview-flatpak
+          path: pstview-*.flatpak
+
   # pstx must print the same thing on Windows, macOS and Linux
   compare:
     needs: build
@@ -148,7 +228,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, compare]
+    needs: [build, compare, appimage, flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -164,9 +244,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          sha256sum *.zip *.tar.gz *.AppImage *.flatpak > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" *.zip *.tar.gz SHA256SUMS.txt \
+          gh release create "$GITHUB_REF_NAME" *.zip *.tar.gz *.AppImage *.flatpak SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "pstview $GITHUB_REF_NAME" \
             --generate-notes

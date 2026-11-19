@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
         // what Help > Install puts in the applications menu (Linux; src/setup.zig)
         gui.root_module.addAnonymousImport("icon_png", .{ .root_source_file = b.path("design/icon-256.png") });
         gui.root_module.addAnonymousImport("desktop_entry", .{ .root_source_file = b.path("packaging/linux/pstview.desktop") });
+        gui.root_module.addAnonymousImport("mime_package", .{ .root_source_file = b.path("packaging/linux/pstview-mime.xml") });
         b.installArtifact(gui);
     }
 
