@@ -60,6 +60,27 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(gui);
     }
 
+    // The web browser version (zig build web): the model as WebAssembly in a Web Worker, beside
+    // the same page; zig-out/web is a static site (src/web.zig, web/).
+    const web_step = b.step("web", "Build the web browser version into zig-out/web");
+    const wasm = b.addExecutable(.{
+        .name = "pstview",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi }),
+            .optimize = if (optimize == .debug) .safe else optimize,
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+    wasm.root_module.addOptions("build_options", opts);
+    const web_dir: std.Build.InstallDir = .{ .custom = "web" };
+    web_step.dependOn(&b.addInstallArtifact(wasm, .{ .dest_dir = .{ .override = web_dir } }).step);
+    web_step.dependOn(&b.addInstallFileWithDir(b.path("src/webui.html"), web_dir, "index.html").step);
+    web_step.dependOn(&b.addInstallDirectory(.{ .source_dir = b.path("web"), .install_dir = web_dir, .install_subdir = "" }).step);
+    for ([_][]const u8{ "icon-256.png", "icon-512.png", "icon-192.png" }) |icon|
+        web_step.dependOn(&b.addInstallFileWithDir(b.path(b.fmt("design/{s}", .{icon})), web_dir, icon).step);
+
     // Command-line tool
     const cli = b.addExecutable(.{
         .name = "pstx",

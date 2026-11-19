@@ -22,6 +22,8 @@ Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, 
 * **AppImage** (`x86_64`, `aarch64`): one file, `chmod +x` and run; `pstview-….AppImage pstx tree a.pst` runs the command-line tool. It uses the system's GTK 4 and WebKitGTK 6.0, like the archive.
 * **Flatpak** (`x86_64`): `flatpak install --user pstview-…-x86_64.flatpak` (fetches the GNOME runtime from Flathub, so GTK and WebKitGTK need not be installed). It has no network and no file access of its own: mailboxes are opened and exports saved through the file chooser, by dropping files, or with *Open with*; Help > Install does not apply. For pstx on files outside that: `flatpak run --filesystem=home:ro --command=pstx io.github.publicarray.pstview tree ~/a.pst`.
 
+**In the web browser.** The same program also runs as a web page, built to WebAssembly: at https://publicarray.github.io/pstview/ (published with each release), or self-hosted from the release's `web.zip` (any static web server; files must be served over HTTPS or from localhost). The mailbox is read on your computer, in place and never uploaded; exports become downloads (several files: one .zip). *Help > Install pstview as an app* installs it like a desktop program where the browser can (Chrome, Edge, Safari) and it then works offline and opens mailbox files from the file manager. Message windows are not available there (*Enlarge* instead).
+
 **Requirements.** `pstx` needs nothing. The GUI shows its content in the web view that is part of the operating system, so there is no bundled browser engine:
 
 * **Windows:** the WebView2 runtime (part of Windows 11 and of up-to-date Windows 10).
@@ -135,6 +137,7 @@ CI builds every push on Windows, macOS and Linux, checks that `pstx` prints iden
 * `src/render.zig`, `export.zig`: the sanitised message view; EML / MSG writers and reports.
 * `src/pstwrite.zig`: the PST writer (NDB blocks and B-trees, heaps, property and table contexts, folders and messages).
 * `src/webui.html`, `webapp.zig`: the GUI shared by all platforms (the page and the model behind it).
+* `src/web.zig`, `web/`: the web browser version (the model as WebAssembly in a Web Worker, with its own std.Io over the user's files; `zig build web`); `testdata/web-test.mjs` tests it in Node.
 * `src/gui_win.zig`, `gui_mac.zig`, `gui_gtk.zig`, `gui_posix.zig`: windows, web views and dialogs per platform. A shell may draw the menus, status bar and dialogs natively (GTK does); the page draws whatever it leaves out, from the same menu lists.
 * `src/setup.zig`, `install.zig`: per-user install and uninstall.
 * `src/cli.zig`, `platform.zig`, `fuzz.zig`: command line, time zone and charset conversion, fuzz targets.

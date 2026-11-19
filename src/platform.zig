@@ -2,24 +2,50 @@
 //!   - the local UTC offset at a given time (DST-aware), for showing local times;
 //!   - conversion of legacy MIME charsets to UTF-8 (installed as `mime.charset_hook`).
 //! Windows uses the Win32 time-zone and code-page APIs; macOS and Linux use libc
-//! (`localtime_r` with the system zone database, and `iconv`).
+//! (`localtime_r` with the system zone database, and `iconv`); the browser build (wasm32-wasi)
+//! asks the page's JavaScript (`Date`, `TextDecoder`).
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 pub const is_windows = builtin.os.tag == .windows;
+pub const is_browser = builtin.os.tag == .wasi;
 const win = if (is_windows) @import("win.zig") else struct {};
 
 /// Seconds east of UTC in this computer's time zone at unix time `t`.
 pub fn localOffset(t: i64) i64 {
-    return if (is_windows) win.localOffset(t) else posix.localOffset(t);
+    return if (is_windows) win.localOffset(t) else if (is_browser) browser.localOffset(t) else posix.localOffset(t);
 }
 
 /// Text in MIME `charset` -> UTF-8, or null when the charset is unknown or the bytes do not
 /// decode (the caller then falls back to Windows-1252).
 pub fn charsetToUtf8(a: std.mem.Allocator, charset: []const u8, bytes: []const u8) ?[]u8 {
-    return if (is_windows) win.charsetToUtf8(a, charset, bytes) else posix.charsetToUtf8(a, charset, bytes);
+    return if (is_windows) win.charsetToUtf8(a, charset, bytes) else if (is_browser) browser.charsetToUtf8(a, charset, bytes) else posix.charsetToUtf8(a, charset, bytes);
 }
+
+/// The browser: functions the page's JavaScript provides (web/worker.js).
+const browser = struct {
+    extern "pstview" fn local_offset(t: f64) f64;
+    /// Decodes `bytes` in `charset` into `out` as UTF-8; the length, or -1 (unknown charset,
+    /// or `out` too small).
+    extern "pstview" fn decode(charset: [*]const u8, charset_len: usize, bytes: [*]const u8, len: usize, out: [*]u8, out_len: usize) isize;
+
+    fn localOffset(t: i64) i64 {
+        return @intFromFloat(local_offset(@floatFromInt(t)));
+    }
+
+    fn charsetToUtf8(a: std.mem.Allocator, charset: []const u8, bytes: []const u8) ?[]u8 {
+        if (bytes.len == 0 or charset.len == 0) return null;
+        // UTF-8 needs at most 3 bytes per UTF-16 unit TextDecoder makes of an input byte
+        const out = a.alloc(u8, bytes.len * 3 + 16) catch return null;
+        const n = decode(charset.ptr, charset.len, bytes.ptr, bytes.len, out.ptr, out.len);
+        if (n < 0) {
+            a.free(out);
+            return null;
+        }
+        return out[0..@intCast(n)];
+    }
+};
 
 const posix = struct {
     /// `struct tm` with the BSD/glibc/musl `tm_gmtoff` and `tm_zone` fields.

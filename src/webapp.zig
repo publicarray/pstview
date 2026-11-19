@@ -647,7 +647,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
 fn ready(a: Allocator, out: *List) Error!void {
     try out.append(a, '{');
     try kv(a, out, true, "version", build_options.version);
-    try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else "linux");
+    try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else if (builtin.os.tag == .wasi) "browser" else "linux");
     try kv(a, out, false, "url", project_url);
     try kv(a, out, false, "theme", app.theme_choice);
     try out.print(a, ",\"nativeAsk\":{},\"native\":{{\"menus\":{},\"status\":{},\"alert\":{},\"input\":{},\"about\":{},\"selftestCloses\":{},\"selftestChoice\":{}}}", .{

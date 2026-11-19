@@ -15,7 +15,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const os = builtin.os.tag;
-const impl = if (os == .windows) windows else if (os.isDarwin()) macos else linux;
+const impl = if (os == .windows) windows else if (os.isDarwin()) macos else if (os == .wasi) browser else linux;
 
 pub const Info = struct {
     /// This copy can be installed (or can replace the installed one).
@@ -129,6 +129,24 @@ const windows = struct {
     fn dismissOffer(a: Allocator, _: Io) void {
         inst.dismissPrompt(a);
     }
+};
+
+// ================================================================ the browser: nothing to install
+
+const browser = struct {
+    fn info(_: Allocator, _: Io) !Info {
+        return .{ .about = "Running in the web browser: the mailbox is read on this computer and is never uploaded." };
+    }
+    fn install(a: Allocator, _: Io, _: []const u8) !Result {
+        return failed(a, "pstview runs in the web browser here; there is nothing to install.", .{});
+    }
+    fn uninstall(a: Allocator, _: Io) !Result {
+        return failed(a, "pstview runs in the web browser here; there is nothing to uninstall.", .{});
+    }
+    fn defaults(a: Allocator, _: Io) !Result {
+        return failed(a, "pstview runs in the web browser here.", .{});
+    }
+    fn dismissOffer(_: Allocator, _: Io) void {}
 };
 
 // ================================================================ macOS and Linux: shared helpers

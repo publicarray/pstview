@@ -142,7 +142,7 @@ pub const Ndb = struct {
         const start = amap_first + self.sec * amap_span;
         var s = (from - start) / 64;
         const e = (from - start + len) / 64;
-        while (s < e) : (s += 1) self.bits[s / 8] |= @as(u8, 0x80) >> @intCast(s % 8);
+        while (s < e) : (s += 1) self.bits[@intCast(s / 8)] |= @as(u8, 0x80) >> @intCast(s % 8);
     }
 
     fn startSection(self: *Ndb, k: u64) void {

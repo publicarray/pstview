@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-src about:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-src about:; worker-src 'self'; manifest-src 'self'">
 <title>pstview</title>
 <script>/* the theme before anything is painted: no light flash in a dark session */
 document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';</script>
@@ -252,9 +252,13 @@ const modKey = e => mac ? e.metaKey : e.ctrlKey;
 const MOD = mac ? '⌘' : 'Ctrl+';
 
 // ---------------------------------------------------------------- bridge to the model (webapp.zig)
-// WebView2 (Windows) and WebKit (macOS, Linux) name their message channel differently
+// WebView2 (Windows) and WebKit (macOS, Linux) name their message channel differently. Without
+// either the page is the web browser version: the model runs as WebAssembly in a worker (web/).
+const inBrowser = !(window.chrome && window.chrome.webview) && !(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pstview);
+const worker = inBrowser ? new Worker('worker.js') : null;
 const post = window.chrome && window.chrome.webview
   ? s => window.chrome.webview.postMessage(s)
+  : inBrowser ? s => worker.postMessage({ t: 'msg', s })
   : s => window.webkit.messageHandlers.pstview.postMessage(s);
 const pv = {
   seq: 0, pending: new Map(), busyTimer: 0,
@@ -298,6 +302,131 @@ const pv = {
   },
 };
 window.pv = pv;
+
+// ---------------------------------------------------------------- the web browser version
+// What the worker sends: calls of the page ("pv.name(json, ...)", parsed, never evaluated), the
+// files a request wrote (downloads), a link to open, the title.
+if (worker) worker.onmessage = e => {
+  const m = e.data;
+  if (m.t === 'js') {
+    const x = /^pv\.(\w+)\(([\s\S]*)\)$/.exec(m.s);
+    if (x && typeof pv[x[1]] === 'function') pv[x[1]](...JSON.parse('[' + x[2] + ']'));
+  } else if (m.t === 'save') download(m.files);
+  else if (m.t === 'url') window.open(m.s, '_blank', 'noopener');
+  else if (m.t === 'title') document.title = m.s;
+  else if (m.t === 'error') { console.error(m.s); notice(m.s, 'pstview stopped working'); }
+};
+
+/** Files from a picker or a drop, for the worker: each named /in/<n>/<name or relative path>. */
+let picks = 0;
+function sendFiles(fileList, folder, drop) {
+  const k = ++picks, list = [...fileList].map(f => ({ file: f, path: `/in/${k}/${folder && f.webkitRelativePath || f.name}` }));
+  const top = folder && fileList[0] && (fileList[0].webkitRelativePath || '').split('/')[0];
+  worker.postMessage({ t: 'files', list, pick: folder ? [top ? `/in/${k}/${top}` : `/in/${k}`] : list.map(x => x.path), drop: !!drop });
+}
+
+/** The browser's file picker (it needs the click that asked for it); resolves to the files, or none. */
+function pickFiles(multiple, folder) {
+  return new Promise(resolve => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = multiple || folder;
+    if (folder) input.webkitdirectory = true;
+    input.onchange = () => resolve([...input.files]);
+    input.oncancel = () => resolve([]);
+    input.click();
+  });
+}
+
+/** Before a command that opens files: the picker, then the files to the worker. False: cancelled. */
+async function browserPick(name) {
+  const fs = await pickFiles(name === 'open', name === 'openfolder');
+  if (!fs.length) return false;
+  sendFiles(fs, name === 'openfolder');
+  return true;
+}
+
+/** Files a request wrote: one is downloaded as it is, several in a .zip. */
+function download(files) {
+  if (!files.length) return;
+  const one = files.length === 1;
+  const blob = one ? new Blob([files[0].data]) : zip(files);
+  const name = one ? files[0].name.split('/').pop() : 'pstview export.zip';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  status(one ? `Downloaded ${name}` : `Downloaded ${files.length} files as ${name}`);
+}
+
+/** A .zip of `files` ({name, data}), stored without compression. */
+function zip(files) {
+  const table = zip.table || (zip.table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  }));
+  const crc = d => { let c = ~0; for (let i = 0; i < d.length; i++) c = table[(c ^ d[i]) & 255] ^ (c >>> 8); return ~c >>> 0; };
+  const now = new Date();
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const enc = new TextEncoder(), parts = [], central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), sum = crc(f.data), n = f.data.length;
+    const local = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [10, time, 2], [12, date, 2], [14, sum, 4], [18, n, 4], [22, n, 4], [26, name.length, 2]]
+      .forEach(([at, v, size]) => size === 4 ? local.setUint32(at, v, true) : local.setUint16(at, v, true));
+    parts.push(local.buffer, name, f.data);
+    const entry = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [12, time, 2], [14, date, 2], [16, sum, 4], [20, n, 4], [24, n, 4], [28, name.length, 2], [42, offset, 4]]
+      .forEach(([at, v, size]) => size === 4 ? entry.setUint32(at, v, true) : entry.setUint16(at, v, true));
+    central.push(entry.buffer, name);
+    offset += 30 + name.length + n;
+  }
+  const size = central.reduce((t, p) => t + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [8, files.length, 2], [10, files.length, 2], [12, size, 4], [16, offset, 4]]
+    .forEach(([at, v, s]) => s === 4 ? end.setUint32(at, v, true) : end.setUint16(at, v, true));
+  return new Blob([...parts, ...central, end.buffer], { type: 'application/zip' });
+}
+
+// Installing (Help > Install): the browser's own prompt where there is one, else how.
+let installPrompt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; });
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+async function installApp() {
+  if (standalone()) return notice('pstview is running as an installed app.', 'Install pstview');
+  if (installPrompt) {
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    return;
+  }
+  const ua = navigator.userAgent;
+  const how = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'Tap the Share button, then "Add to Home Screen".'
+    : /Firefox\//.test(ua) ? (/Android/.test(ua) ? 'Open the Firefox menu and choose "Install".' : 'Firefox on the desktop cannot install web apps. Install pstview with Chrome, Edge or Safari, or keep using it in this tab: it works the same.')
+    : /Safari\//.test(ua) && !/Chrome|Chromium|Edg\//.test(ua) ? 'In Safari, choose File > Add to Dock.'
+    : /Edg\//.test(ua) ? 'Click the "App available" button in the address bar, or open the menu (\u2026) > Apps > Install pstview.'
+    : 'Click the install button at the right of the address bar, or open the browser menu > Cast, save and share > Install page as app.';
+  return notice(how + '\n\nInstalled, pstview opens in a window of its own, opens mailbox files from your file manager and works offline. It still reads your mailboxes only on this computer: nothing is uploaded.', 'Install pstview');
+}
+
+if (inBrowser) {
+  const link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = 'manifest.webmanifest';
+  document.head.append(link);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  // files opened with the installed app (its manifest's file handlers)
+  if (window.launchQueue) launchQueue.setConsumer(async params => {
+    const fs = await Promise.all((params.files || []).map(h => h.getFile()));
+    if (fs.length) sendFiles(fs, false, true);
+  });
+}
 
 // ---------------------------------------------------------------- state
 const COLS = [['Received',140],['Modified',140],['From',180],['To',180],['Subject',380],['Size',80,1],['Class',120],['Risk (header analysis)',320],['Note',260]];
@@ -692,13 +821,15 @@ const needRow = () => st.mb && st.focus >= 0;
 async function act(name) {
   closeMenus();
   setTimeout(syncMenus, 0);
+  // the browser: files are picked by the page first (the picker needs the click that asked)
+  if (inBrowser && (name === 'open' || name === 'openfolder' || name === 'hdrfile') && !await browserPick(name)) return;
   switch (name) {
     case 'open': case 'openfolder': return showMailbox(await pv.call(name));
     case 'close': await pv.call('close'); return closeView();
     case 'closewin': return pv.call('closewin');
-    case 'openmsg': if (needRow()) { const r = await pv.call('openmsg', st.focus); if (r.error) notice(r.error); } return;
+    case 'openmsg': if (inBrowser) { if (st.msg && !$('#listwrap').classList.contains('hidden')) act('expand'); return; } if (needRow()) { const r = await pv.call('openmsg', st.focus); if (r.error) notice(r.error); } return;
     case 'onemsg': case 'oneeml': return shown(await pv.call('exportone', name.slice(3), ref()));
-    case 'install': return offerInstall(true);
+    case 'install': return inBrowser ? installApp() : offerInstall(true);
     case 'uninstall': {
       const r = await choose('Uninstall pstview?', st.setup.uninstallText, [
         { label: 'Uninstall', value: 'yes' },
@@ -832,7 +963,7 @@ async function offerInstall(asked) {
   if (r.value === 'install') return runInstall();
   if (r.verified) { await pv.call('nooffer'); st.setup.offer = false; }
 }
-const canInstall = () => !!st.setup.available;
+const canInstall = () => inBrowser ? !standalone() : !!st.setup.available;
 const isInstalled = () => !!st.setup.installed;
 
 const MENUS = [
@@ -874,7 +1005,7 @@ const MENUS = [
     ['Verify every block (checksums)…', 'verify', need],
   ]],
   ['Help', [
-    [() => isInstalled() ? 'Update the installed copy…' : 'Install pstview for this user…', 'install', canInstall],
+    [() => inBrowser ? 'Install pstview as an app…' : isInstalled() ? 'Update the installed copy…' : 'Install pstview for this user…', 'install', canInstall],
     [() => st.setup.defaultsLabel || 'Choose default apps…', 'defaults', isInstalled],
     ['Uninstall pstview…', 'uninstall', isInstalled],
     null,
@@ -916,10 +1047,12 @@ const CONTEXT = [
 // or Cmd), checked() or nothing]. The same lists make the page's menus and the native ones.
 const itemLabel = it => typeof it[0] === 'function' ? it[0]() : it[0];
 const keyLabel = k => k ? k.replace('Mod+', MOD) : '';
-const itemsHtml = items => items.map(it => it === null ? '<hr>' :
+/** Items of this page: no message windows in the browser (one page; Enlarge instead). */
+const visibleItems = items => items.filter(it => !(inBrowser && it && it[1] === 'openmsg'));
+const itemsHtml = items => visibleItems(items).map(it => it === null ? '<hr>' :
   `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${it[4] ? (it[4]() ? '\u2713  ' : '\u2003  ') : ''}${esc(itemLabel(it))}</span>${it[3] ? `<kbd>${esc(keyLabel(it[3]))}</kbd>` : ''}</button>`).join('');
 /** Items as the native menus take them (webapp.zig MenuItem). */
-const itemsSpec = items => items.map(it => it === null ? null :
+const itemsSpec = items => visibleItems(items).map(it => it === null ? null :
   { l: itemLabel(it), a: it[1], e: !it[2] || !!it[2](), k: it[3] || '', c: it[4] ? !!it[4]() : null });
 /** Hand the menus to a native menu bar whenever their labels or states change. */
 function syncMenus() {
@@ -979,6 +1112,7 @@ document.addEventListener('drop', e => {
   const wv = window.chrome && window.chrome.webview;
   if (wv && wv.postMessageWithAdditionalObjects && !st.single && e.dataTransfer && e.dataTransfer.files.length)
     wv.postMessageWithAdditionalObjects('drop', e.dataTransfer.files);
+  if (inBrowser && e.dataTransfer && e.dataTransfer.files.length) sendFiles(e.dataTransfer.files, false, true);
 });
 
 document.addEventListener('keydown', e => {
@@ -1164,7 +1298,7 @@ async function screenshot() {
   }
   syncMenus();
   await applyTheme();
-  $('#ver').textContent = 'v' + r.version;
+  $('#ver').textContent = 'v' + r.version + (inBrowser ? ' \u00b7 runs in this browser: your mailbox is read on this computer and never uploaded' : '');
   if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);
   if (r.opened) await showMailbox(r.opened);
   if (r.selftest) return selftest(r);
