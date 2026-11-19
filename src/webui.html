@@ -279,6 +279,12 @@ const pv = {
     if (resolve) resolve(data);
     if (st.native.menus) setTimeout(syncMenus, 0);
   },
+  /** The system's light / dark, from the shell; the page follows it when the View menu says so. */
+  systemTheme(dark) {
+    const changed = dark !== theme.system;
+    theme.system = dark;
+    if (changed && theme.choice === 'system') applyTheme();
+  },
   /** An item of a native menu (menu bar or context menu) was chosen. */
   act(name) { act(name); },
   opened(mb) { pv.reply(0); showMailbox(mb); },
@@ -322,10 +328,12 @@ function status(text) {
 
 // ---------------------------------------------------------------- theme (follows the system unless chosen in View)
 const darkQuery = matchMedia('(prefers-color-scheme: dark)');
-const theme = { choice: 'system', dark: false };
+// system: the system's scheme as the shell knows it (GTK with libadwaita), else the web view's
+const theme = { choice: 'system', dark: false, system: null };
+const systemDark = () => theme.system === null ? darkQuery.matches : theme.system;
 /** Apply the theme to the page and tell the model, which themes the documents it renders. */
 async function applyTheme() {
-  const dark = theme.choice === 'system' ? darkQuery.matches : theme.choice === 'dark';
+  const dark = theme.choice === 'system' ? systemDark() : theme.choice === 'dark';
   const changed = dark !== theme.dark;
   theme.dark = dark;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
@@ -333,7 +341,7 @@ async function applyTheme() {
   if (!changed || !st.msg) return; // else re-render the open message
   if (st.single) showMessage(await pv.call('msg', st.single)); else if (st.focus >= 0) loadMessage(st.focus);
 }
-darkQuery.addEventListener('change', () => applyTheme());
+darkQuery.addEventListener('change', () => { if (theme.system === null) applyTheme(); });
 const isTheme = name => () => theme.choice === name;
 
 // ---------------------------------------------------------------- coloured analysis text
@@ -1076,7 +1084,7 @@ async function selftest(r) {
     if (!progressed) throw 'no progress text during the header analysis';
     await new Promise(ok => setTimeout(ok, 200));
     // View > Theme: light and dark are applied, and "follow the system" gives the system's back
-    const sys0 = darkQuery.matches, nap = ms => new Promise(ok => setTimeout(ok, ms));
+    const sys0 = systemDark(), nap = ms => new Promise(ok => setTimeout(ok, ms));
     let followed = true;
     for (const choice of ['light', 'dark', 'system']) {
       theme.choice = choice;
@@ -1094,7 +1102,8 @@ async function selftest(r) {
       await notice('A native message box of the self-test.', 'pstview self-test');
       const q = await choose('pstview self-test', 'A native question with command links.', [
         { label: 'First choice', note: 'With a note under it', value: 1 }, { label: 'Second choice', value: 2 }], "Don't ask again");
-      if (q.value !== null) throw 'the native question was not cancelled';
+      // (the self-test takes the first choice, as a click on it does)
+      if (q.value !== 1) throw 'the native question did not answer with the choice taken';
       const t = await pv.quiet('input', 'Analyse headers', 'Paste the internet headers of a message (or a whole message) below.', 'Analyse');
       if (!t.cancelled) throw 'the native text dialog was not cancelled';
       await pv.quiet('about', 'The About text of the self-test.');
@@ -1102,8 +1111,8 @@ async function selftest(r) {
       popup(60, 40, MENUS[0][1]);
       await nap(700);
     }
-    for (let i = 0; i < 40 && darkQuery.matches !== sys0; i++) await nap(50);
-    if (darkQuery.matches !== sys0 || theme.dark !== sys0) throw 'the system theme was not restored';
+    for (let i = 0; i < 40 && (systemDark() !== sys0 || theme.dark !== sys0); i++) await nap(50);
+    if (systemDark() !== sys0 || theme.dark !== sys0) throw 'the system theme was not restored';
     const sw = await pv.call('selfwin'), live = sw.live;
     if (st.native.menus && !sw.menus) throw 'the menus were not handed to the native menu bar';
     const sorted = await pv.call('sort', 4);

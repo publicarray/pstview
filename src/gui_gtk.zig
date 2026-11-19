@@ -4,6 +4,10 @@
 //!
 //! PSTVIEW_NATIVE=0 leaves the menus, status bar and dialogs to the page, as on Windows and macOS.
 //!
+//! On GNOME (or with PSTVIEW_ADWAITA=1) libadwaita is used where it is installed: a header bar
+//! with the menus in its main menu instead of a menu bar, and libadwaita's dialogs and style.
+//! PSTVIEW_ADWAITA=0, other desktops, or no libadwaita: plain GTK 4 with a menu bar.
+//!
 //! GTK and WebKitGTK are loaded at run time, so the program builds without their development
 //! packages (and cross-compiles); at run time it needs libgtk-4 and libwebkitgtk-6.0, which
 //! desktop distributions install by default or as one package.
@@ -118,6 +122,30 @@ const Lib = struct {
     gtk_popover_set_has_arrow: *const fn (P, c_int) callconv(.c) void,
     gtk_popover_popup: *const fn (P) callconv(.c) void,
     gtk_popover_popdown: *const fn (P) callconv(.c) void,
+    g_usleep: *const fn (c_ulong) callconv(.c) void,
+    gtk_stack_get_type: *const fn () callconv(.c) usize,
+    gtk_stack_set_hhomogeneous: *const fn (P, c_int) callconv(.c) void,
+    gtk_stack_set_interpolate_size: *const fn (P, c_int) callconv(.c) void,
+    gtk_widget_get_first_child: *const fn (P) callconv(.c) P,
+    gtk_widget_get_next_sibling: *const fn (P) callconv(.c) P,
+    g_type_check_instance_is_a: *const fn (P, usize) callconv(.c) c_int,
+    gtk_menu_button_new: *const fn () callconv(.c) P,
+    gtk_menu_button_set_icon_name: *const fn (P, Z) callconv(.c) void,
+    gtk_menu_button_set_menu_model: *const fn (P, P) callconv(.c) void,
+    gtk_menu_button_set_primary: *const fn (P, c_int) callconv(.c) void,
+    gtk_menu_button_popup: *const fn (P) callconv(.c) void,
+    gtk_menu_button_popdown: *const fn (P) callconv(.c) void,
+    gtk_menu_button_get_popover: *const fn (P) callconv(.c) P,
+    gtk_button_new_from_icon_name: *const fn (Z) callconv(.c) P,
+    gtk_actionable_set_action_name: *const fn (P, Z) callconv(.c) void,
+    gtk_widget_set_tooltip_text: *const fn (P, Z) callconv(.c) void,
+    gtk_list_box_new: *const fn () callconv(.c) P,
+    gtk_list_box_append: *const fn (P, P) callconv(.c) void,
+    gtk_list_box_set_selection_mode: *const fn (P, c_int) callconv(.c) void,
+    gtk_list_box_row_get_index: *const fn (P) callconv(.c) c_int,
+    gtk_list_box_row_set_activatable: *const fn (P, c_int) callconv(.c) void,
+    gtk_widget_activate: *const fn (P) callconv(.c) c_int,
+    gtk_image_new_from_icon_name: *const fn (Z) callconv(.c) P,
     g_cancellable_new: *const fn () callconv(.c) P,
     g_cancellable_cancel: *const fn (P) callconv(.c) void,
     gtk_widget_set_parent: *const fn (P, P) callconv(.c) void,
@@ -202,6 +230,62 @@ const Lib = struct {
 var lib: Lib = undefined;
 var handles: [2]P = .{ null, null };
 
+/// libadwaita 1.5+ (GNOME 46), when it is used.
+const Adw = struct {
+    adw_init: *const fn () callconv(.c) void,
+    adw_window_new: *const fn () callconv(.c) P,
+    adw_window_set_content: *const fn (P, P) callconv(.c) void,
+    adw_toolbar_view_new: *const fn () callconv(.c) P,
+    adw_toolbar_view_set_content: *const fn (P, P) callconv(.c) void,
+    adw_toolbar_view_add_top_bar: *const fn (P, P) callconv(.c) void,
+    adw_toolbar_view_add_bottom_bar: *const fn (P, P) callconv(.c) void,
+    adw_header_bar_new: *const fn () callconv(.c) P,
+    adw_header_bar_pack_start: *const fn (P, P) callconv(.c) void,
+    adw_header_bar_pack_end: *const fn (P, P) callconv(.c) void,
+    adw_style_manager_get_default: *const fn () callconv(.c) P,
+    adw_style_manager_set_color_scheme: *const fn (P, c_int) callconv(.c) void,
+    adw_style_manager_get_dark: *const fn (P) callconv(.c) c_int,
+    adw_alert_dialog_new: *const fn (?Z, ?Z) callconv(.c) P,
+    adw_alert_dialog_add_response: *const fn (P, Z, Z) callconv(.c) void,
+    adw_alert_dialog_set_response_appearance: *const fn (P, Z, c_int) callconv(.c) void,
+    adw_alert_dialog_set_default_response: *const fn (P, ?Z) callconv(.c) void,
+    adw_alert_dialog_set_close_response: *const fn (P, Z) callconv(.c) void,
+    adw_alert_dialog_set_extra_child: *const fn (P, P) callconv(.c) void,
+    adw_alert_dialog_set_prefer_wide_layout: *const fn (P, c_int) callconv(.c) void,
+    adw_alert_dialog_choose: *const fn (P, P, P, AsyncReady, P) callconv(.c) void,
+    adw_alert_dialog_choose_finish: *const fn (P, P) callconv(.c) ?Z,
+    adw_dialog_present: *const fn (P, P) callconv(.c) void,
+    adw_dialog_close: *const fn (P) callconv(.c) c_int,
+    adw_about_dialog_new: *const fn () callconv(.c) P,
+    adw_about_dialog_set_application_name: *const fn (P, Z) callconv(.c) void,
+    adw_about_dialog_set_application_icon: *const fn (P, Z) callconv(.c) void,
+    adw_about_dialog_set_version: *const fn (P, Z) callconv(.c) void,
+    adw_about_dialog_set_comments: *const fn (P, Z) callconv(.c) void,
+    adw_about_dialog_set_website: *const fn (P, Z) callconv(.c) void,
+    adw_action_row_new: *const fn () callconv(.c) P,
+    adw_action_row_add_suffix: *const fn (P, P) callconv(.c) void,
+    adw_action_row_set_subtitle: *const fn (P, Z) callconv(.c) void,
+    adw_preferences_row_set_title: *const fn (P, Z) callconv(.c) void,
+};
+var adw: ?Adw = null;
+
+/// libadwaita on GNOME, unless PSTVIEW_ADWAITA says otherwise (1: everywhere, 0: never).
+fn loadAdwaita() void {
+    const wanted = if (std.c.getenv("PSTVIEW_ADWAITA")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else blk: {
+        const desktop = std.mem.span(std.c.getenv("XDG_CURRENT_DESKTOP") orelse break :blk false);
+        var it = std.mem.splitScalar(u8, desktop, ':');
+        while (it.next()) |d| if (std.ascii.eqlIgnoreCase(d, "GNOME")) break :blk true;
+        break :blk false;
+    };
+    if (!wanted) return;
+    const h = std.c.dlopen("libadwaita-1.so.0", .{ .LAZY = true }) orelse return;
+    var t: Adw = undefined;
+    inline for (@typeInfo(Adw).@"struct".field_names) |name| {
+        @field(t, name) = @ptrCast(@alignCast(std.c.dlsym(h, name) orelse return)); // too old: plain GTK
+    }
+    adw = t;
+}
+
 fn lookup(name: Z) ?*anyopaque {
     for (handles) |h| if (std.c.dlsym(h, name)) |p| return p;
     return null;
@@ -269,7 +353,7 @@ fn eval(win: u32, js: []const u8) void {
 
 /// A window showing the page; requests from it arrive as script messages carrying its id.
 fn createWindow(id: u32, title: []const u8, width: c_int, height: c_int) bool {
-    const w = lib.gtk_window_new() orelse return false;
+    const w = (if (adw) |ad| ad.adw_window_new() else lib.gtk_window_new()) orelse return false;
     const data: P = @ptrFromInt(id);
     var buf: [1024]u8 = undefined;
     lib.gtk_window_set_title(w, std.fmt.bufPrintSentinel(&buf, "{s}", .{title[0..@min(title.len, 1000)]}, 0) catch "pstview");
@@ -287,7 +371,27 @@ fn createWindow(id: u32, title: []const u8, width: c_int, height: c_int) bool {
     _ = lib.g_signal_connect_data(view, "context-menu", &onContextMenu, null, null, 0);
     if (id == 0) addDropTarget(w);
     var win: Win = .{ .id = id, .window = w, .webview = view, .content = view };
-    if (native) {
+    if (native and adw != null) {
+        // header bar (Open, and the menus in the main menu: setMenus), web view, status bar
+        const ad = adw.?;
+        const view_box = ad.adw_toolbar_view_new();
+        const header = ad.adw_header_bar_new();
+        if (id == 0) {
+            const open = lib.gtk_button_new_from_icon_name("document-open-symbolic");
+            lib.gtk_actionable_set_action_name(open, "m.open");
+            lib.gtk_widget_set_tooltip_text(open, "Open PST / OST / MBOX file (Ctrl+O)");
+            ad.adw_header_bar_pack_start(header, open);
+        }
+        win.menubar = lib.gtk_menu_button_new();
+        lib.gtk_menu_button_set_icon_name(win.menubar, "open-menu-symbolic");
+        lib.gtk_menu_button_set_primary(win.menubar, 1); // F10
+        lib.gtk_widget_set_tooltip_text(win.menubar, "Main Menu");
+        ad.adw_header_bar_pack_end(header, win.menubar);
+        ad.adw_toolbar_view_add_top_bar(view_box, header);
+        ad.adw_toolbar_view_set_content(view_box, view);
+        ad.adw_toolbar_view_add_bottom_bar(view_box, statusBar(&win));
+        win.content = view_box;
+    } else if (native) {
         // menu bar (filled by the page: setMenus), web view, status bar
         const vertical = 1;
         const box = lib.gtk_box_new(vertical, 0);
@@ -302,7 +406,7 @@ fn createWindow(id: u32, title: []const u8, width: c_int, height: c_int) bool {
         lib.gtk_window_destroy(w);
         return false;
     };
-    lib.gtk_window_set_child(w, win.content);
+    if (adw) |ad| ad.adw_window_set_content(w, win.content) else lib.gtk_window_set_child(w, win.content);
     // The window appears once its page has settled on light or dark (setDark), so that a dark
     // session never sees a white window first; and in any case after a moment.
     lib.webkit_web_view_load_html(view, webapp.page_html, null);
@@ -368,9 +472,43 @@ fn onSnapshot(view: P, result: P, data: P) callconv(.c) void {
 fn snapshot(path: []const u8) void {
     const w = winById(0) orelse return quit(1);
     const z = gpa.dupeSentinel(u8, path, 0) catch return quit(1);
+    if (adw != null and shots_dir != null and !menu_pictured) {
+        // with PSTVIEW_SHOTS: first a picture of the open main menu (<folder>/menu-<theme>.png)
+        menu_pictured = true;
+        lib.gtk_menu_button_popup(w.menubar);
+        snapshot_path = z;
+        _ = lib.g_timeout_add(700, &pictureMenu, null);
+        return;
+    }
     if (!native) return lib.webkit_web_view_get_snapshot(w.webview, 0, 0, null, &onSnapshot, @constCast(z.ptr)); // the visible part, as shown
     // the window's content (menu bar and status bar included, no title bar or shadow)
-    quit(if (writePng(w.window, w.content, z.ptr)) 0 else 1);
+    quit(if (writePngSoon(w.window, w.content, z.ptr)) 0 else 1);
+}
+
+var menu_pictured = false;
+var snapshot_path: [:0]const u8 = "";
+
+fn pictureMenu(_: P) callconv(.c) c_int {
+    const w = winById(0) orelse return 0;
+    var buf: [1024]u8 = undefined;
+    if (std.fmt.bufPrintSentinel(&buf, "{s}/menu-{s}.png", .{ shots_dir.?, if (page_dark) "dark" else "light" }, 0)) |p| {
+        const popover = lib.gtk_menu_button_get_popover(w.menubar);
+        if (!writePngSoon(popover, popover, p.ptr)) std.debug.print("pstview: no picture of the main menu\n", .{});
+    } else |_| {}
+    lib.gtk_menu_button_popdown(w.menubar);
+    snapshot(snapshot_path);
+    return 0; // once
+}
+
+/// writePng, waiting for a frame: a window whose content has just changed (a dialog opened, a
+/// menu closed) has none to picture until it has been drawn again.
+fn writePngSoon(native_widget: P, part: P, path: Z) bool {
+    for (0..20) |_| {
+        if (writePng(native_widget, part, path)) return true;
+        pump();
+        lib.g_usleep(30_000);
+    }
+    return false;
 }
 
 /// Write a picture of `part` (a widget of the surface `native`, or all of it) as drawn, with the
@@ -384,7 +522,7 @@ fn writePng(native_widget: P, part: P, path: Z) bool {
     const snap = lib.gtk_snapshot_new();
     lib.gtk_snapshot_scale(snap, scale, scale);
     lib.gdk_paintable_snapshot(paintable, snap, @floatFromInt(lib.gtk_widget_get_width(native_widget)), @floatFromInt(lib.gtk_widget_get_height(native_widget)));
-    const node = lib.gtk_snapshot_free_to_node(snap) orelse return false;
+    const node = lib.gtk_snapshot_free_to_node(snap) orelse return false; // not drawn yet
     const viewport: GrapheneRect = .{ .x = bounds.x * scale, .y = bounds.y * scale, .w = bounds.w * scale, .h = bounds.h * scale };
     const texture = lib.gsk_renderer_render_texture(lib.gtk_native_get_renderer(native_widget), node, &viewport) orelse return false;
     defer lib.g_object_unref(texture);
@@ -396,21 +534,30 @@ fn writePng(native_widget: P, part: P, path: Z) bool {
 /// --selftest: every native dialog and menu the page opens closes itself after a moment, as if
 /// cancelled. With PSTVIEW_SHOTS=<folder> each is pictured first (<folder>/<name>.png).
 var selftest_mode = false;
+/// The first choice of the question being shown: the self-test takes it, as a click does.
+var selftest_choice: P = null;
+/// A question (ask) is waiting for its answer.
+var asking = false;
 var shots_dir: ?[]const u8 = null;
 
-const AutoClose = struct { kind: enum { modal, about, popover, alert }, target: P, name: []const u8 };
+const AutoClose = struct { kind: enum { modal, about, popover, alert, adw }, target: P, name: []const u8, shot: P = null };
 
 fn autoClose(kind: @TypeOf(@as(AutoClose, undefined).kind), target: P, name: []const u8) void {
+    autoCloseShot(kind, target, name, null);
+}
+
+/// `shot`: what to picture instead of the target (a libadwaita dialog is drawn in its window).
+fn autoCloseShot(kind: @TypeOf(@as(AutoClose, undefined).kind), target: P, name: []const u8, shot: P) void {
     if (!selftest_mode) return;
     const ac = gpa.create(AutoClose) catch return;
-    ac.* = .{ .kind = kind, .target = target, .name = name };
-    _ = lib.g_timeout_add(400, &onAutoClose, ac);
+    ac.* = .{ .kind = kind, .target = target, .name = name, .shot = shot };
+    _ = lib.g_timeout_add(if (kind == .adw) 700 else 400, &onAutoClose, ac); // (after its animation)
 }
 
 fn onAutoClose(data: P) callconv(.c) c_int {
     const ac: *AutoClose = @ptrCast(@alignCast(data.?));
     defer gpa.destroy(ac);
-    const widget: P = switch (ac.kind) {
+    const widget: P = ac.shot orelse switch (ac.kind) {
         .modal => @as(*Modal, @ptrCast(@alignCast(ac.target.?))).window,
         .alert => null,
         else => ac.target,
@@ -418,14 +565,29 @@ fn onAutoClose(data: P) callconv(.c) c_int {
     if (shots_dir) |dir| if (widget) |wd| {
         var buf: [1024]u8 = undefined;
         if (std.fmt.bufPrintSentinel(&buf, "{s}/{s}-{s}.png", .{ dir, ac.name, if (page_dark) "dark" else "light" }, 0)) |path| {
-            if (!writePng(wd, wd, path.ptr)) std.debug.print("pstview selftest: no picture of {s}\n", .{ac.name});
+            if (!writePngSoon(wd, wd, path.ptr)) std.debug.print("pstview selftest: no picture of {s}\n", .{ac.name});
         } else |_| {}
     };
+    if (std.mem.eql(u8, ac.name, "ask")) if (selftest_choice) |choice| {
+        selftest_choice = null;
+        _ = lib.gtk_widget_activate(choice);
+        // a choice that did not answer: closed after a moment, and the page reports it
+        const again = gpa.create(AutoClose) catch return 0;
+        again.* = .{ .kind = ac.kind, .target = ac.target, .name = "ask-unanswered" };
+        _ = lib.g_timeout_add(1000, &onAutoClose, again);
+        return 0;
+    };
+    if (std.mem.eql(u8, ac.name, "ask-unanswered")) {
+        // still open: the choice did nothing (the page then reports a cancelled question);
+        // closed and answered, the question's state has gone with it
+        if (!asking) return 0;
+    }
     switch (ac.kind) {
         .modal => @as(*Modal, @ptrCast(@alignCast(ac.target.?))).finish(null),
         .about => lib.gtk_window_destroy(ac.target),
         .popover => lib.gtk_popover_popdown(ac.target),
         .alert => lib.g_cancellable_cancel(ac.target),
+        .adw => _ = adw.?.adw_dialog_close(ac.target),
     }
     return 0; // once
 }
@@ -633,6 +795,11 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
         return 1;
     }
     if (std.c.getenv("PSTVIEW_NATIVE")) |v| native = !std.mem.eql(u8, std.mem.span(v), "0");
+    if (native) loadAdwaita();
+    if (adw) |ad| {
+        ad.adw_init();
+        _ = lib.g_signal_connect_data(ad.adw_style_manager_get_default(), "notify::dark", &onSystemDark, null, null, 0);
+    }
     provideIcon();
     var shell: webapp.Shell = .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit, .snapshot = &snapshot, .setTheme = &setTheme };
     if (native) {
@@ -688,6 +855,17 @@ fn provideIcon() void {
 /// this program, "system" gives the desktop's back. WebKit follows the same setting, so the page
 /// (prefers-color-scheme) sees the desktop's scheme again when it follows the system.
 fn setTheme(choice: []const u8) void {
+    if (adw) |ad| {
+        // (libadwaita keeps the scheme itself and warns when GtkSettings' is changed)
+        const default = 0;
+        const force_light = 1;
+        const force_dark = 4;
+        const scheme: c_int = if (std.mem.eql(u8, choice, "dark")) force_dark else if (std.mem.eql(u8, choice, "light")) force_light else default;
+        following_system = scheme == default;
+        ad.adw_style_manager_set_color_scheme(ad.adw_style_manager_get_default(), scheme);
+        if (following_system) tellSystemTheme();
+        return;
+    }
     const settings = lib.gtk_settings_get_default() orelse return;
     const class: P = @as(*const P, @ptrCast(@alignCast(settings))).*; // G_OBJECT_GET_CLASS
     const has_scheme = lib.g_object_class_find_property(class, "gtk-interface-color-scheme") != null; // GTK 4.20+
@@ -698,6 +876,21 @@ fn setTheme(choice: []const u8) void {
     const scheme_light: c_int = 3;
     const value: c_int = if (has_scheme) (if (dark) scheme_dark else scheme_light) else @intFromBool(dark);
     lib.g_object_set(settings, name, value, @as(P, null));
+}
+
+/// With libadwaita the page learns the system's scheme from its style manager (WebKit's
+/// prefers-color-scheme does not always return to it after a forced one): when the page follows
+/// the system, and whenever the system changes.
+var following_system = true;
+
+fn tellSystemTheme() void {
+    const ad = adw orelse return;
+    const js = if (ad.adw_style_manager_get_dark(ad.adw_style_manager_get_default()) != 0) "pv.systemTheme(true)" else "pv.systemTheme(false)";
+    for (wins.items) |w| eval(w.id, js);
+}
+
+fn onSystemDark(_: P, _: P, _: P) callconv(.c) void {
+    if (following_system) tellSystemTheme(); // (while forced, "dark" is the forced scheme)
 }
 
 /// The few touches of the app's own style on the native chrome: the amber "read-only" mark of the
@@ -835,13 +1028,30 @@ fn setMenus(win: u32, menus: []const webapp.Menu) void {
         lib.gtk_widget_insert_action_group(w.window, "m", group);
         lib.g_object_unref(group);
         w.actions = group; // (held by the window)
-        lib.gtk_popover_menu_bar_set_menu_model(w.menubar, bar);
+        if (adw != null) {
+            lib.gtk_menu_button_set_menu_model(w.menubar, bar);
+            fitToPage(lib.gtk_menu_button_get_popover(w.menubar));
+        } else lib.gtk_popover_menu_bar_set_menu_model(w.menubar, bar);
         lib.g_object_unref(bar);
         gpa.free(w.menu_shape);
         w.menu_shape = gpa.dupe(u8, shape.items) catch &.{};
         return;
     }
     for (menus) |m| updateActions(a, w.actions, m.items, data);
+}
+
+/// The main menu shows its submenus as pages of one popover, which GTK makes as wide as the
+/// widest page: let it take the size of the page shown instead, changing smoothly.
+fn fitToPage(widget: P) void {
+    var child = lib.gtk_widget_get_first_child(widget);
+    while (child) |c| : (child = lib.gtk_widget_get_next_sibling(c)) {
+        if (lib.g_type_check_instance_is_a(c, lib.gtk_stack_get_type()) != 0) {
+            lib.gtk_stack_set_hhomogeneous(c, 0);
+            lib.gtk_stack_set_interpolate_size(c, 1);
+            return;
+        }
+        fitToPage(c);
+    }
 }
 
 fn unparentLater(popover: P) callconv(.c) c_int {
@@ -891,6 +1101,7 @@ fn onAlertDone(dialog: P, result: P, data: P) callconv(.c) void {
 }
 
 fn alert(a: Allocator, win: u32, title: []const u8, text: []const u8) void {
+    if (adw != null) return adwAlert(a, win, title, text);
     const tz = a.dupeSentinel(u8, title, 0) catch return;
     const dz = a.dupeSentinel(u8, text, 0) catch return;
     const dlg = lib.gtk_alert_dialog_new("%s", tz.ptr) orelse return;
@@ -1004,6 +1215,7 @@ fn modalButton(a: Allocator, m: *Modal, child_or_label: union(enum) { label: Z, 
 /// The question of a Windows task dialog: command links (label and note), an optional check box
 /// and Cancel.
 fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
+    if (adw != null) return adwAsk(a, q);
     var m: Modal = .{ .a = a };
     const tz = a.dupeSentinel(u8, q.title, 0) catch return null;
     const box = modalWindow(&m, q.win, tz.ptr);
@@ -1039,13 +1251,17 @@ fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
     lib.gtk_box_append(box, foot);
     lib.gtk_window_present(m.window);
     if (first) |b| _ = lib.gtk_widget_grab_focus(b);
+    selftest_choice = first;
     autoClose(.modal, &m, "ask");
+    asking = true;
     waitFor(&m.done);
+    asking = false;
     return .{ .choice = m.choice, .verified = m.verified };
 }
 
 /// A text to paste or type (the headers of a message), with `ok` and Cancel.
 fn input(a: Allocator, win: u32, title: []const u8, prompt: []const u8, ok: []const u8) ?[]const u8 {
+    if (adw != null) return adwInput(a, win, title, prompt, ok);
     var m: Modal = .{ .a = a };
     const tz = a.dupeSentinel(u8, title, 0) catch return null;
     const box = modalWindow(&m, win, tz.ptr);
@@ -1077,6 +1293,7 @@ fn input(a: Allocator, win: u32, title: []const u8, prompt: []const u8, ok: []co
 }
 
 fn about(a: Allocator, win: u32, info: webapp.About) void {
+    if (adw != null) return adwAbout(a, win, info);
     const dlg = lib.gtk_about_dialog_new();
     lib.gtk_about_dialog_set_program_name(dlg, "pstview");
     lib.gtk_about_dialog_set_version(dlg, a.dupeSentinel(u8, info.version, 0) catch return);
@@ -1096,4 +1313,135 @@ fn about(a: Allocator, win: u32, info: webapp.About) void {
     lib.gtk_window_set_modal(dlg, 1);
     lib.gtk_window_present(dlg);
     autoClose(.about, dlg, "about");
+}
+
+// ================================================================ dialogs (libadwaita)
+
+/// An AdwAlertDialog being answered; `response` is its response id once it has closed.
+const AdwAnswer = struct {
+    done: bool = false,
+    response: []const u8 = "",
+    /// the row chosen in a question (adwAsk), its check box and text field (adwInput)
+    choice: ?usize = null,
+    check: P = null,
+    verified: bool = false,
+    dialog: P = null,
+};
+
+fn onAdwChosen(dialog: P, result: P, data: P) callconv(.c) void {
+    const st: *AdwAnswer = @ptrCast(@alignCast(data.?));
+    if (adw.?.adw_alert_dialog_choose_finish(dialog, result)) |r| st.response = std.mem.span(r);
+    st.done = true;
+}
+
+/// Show `dlg` over window `win` and wait for its answer (the self-test closes it after a picture).
+fn adwRun(dlg: P, win: u32, st: *AdwAnswer, name: []const u8) void {
+    st.dialog = dlg;
+    const parent = parentOf(win);
+    adw.?.adw_alert_dialog_choose(dlg, parent, null, &onAdwChosen, st);
+    autoCloseShot(.adw, dlg, name, parent);
+    waitFor(&st.done);
+}
+
+fn adwAlert(a: Allocator, win: u32, title: []const u8, text: []const u8) void {
+    const ad = adw.?;
+    const dlg = ad.adw_alert_dialog_new(a.dupeSentinel(u8, title, 0) catch return, a.dupeSentinel(u8, text, 0) catch return);
+    ad.adw_alert_dialog_add_response(dlg, "ok", "OK");
+    ad.adw_alert_dialog_set_default_response(dlg, "ok");
+    ad.adw_alert_dialog_set_close_response(dlg, "ok");
+    var st: AdwAnswer = .{};
+    adwRun(dlg, win, &st, "alert");
+}
+
+fn onAdwCheck(check: P, data: P) callconv(.c) void {
+    const st: *AdwAnswer = @ptrCast(@alignCast(data.?));
+    st.verified = lib.gtk_check_button_get_active(check) != 0;
+}
+
+fn onAdwRow(_: P, row: P, data: P) callconv(.c) void {
+    const st: *AdwAnswer = @ptrCast(@alignCast(data.?));
+    st.choice = @intCast(@max(lib.gtk_list_box_row_get_index(row), 0));
+    _ = adw.?.adw_dialog_close(st.dialog); // answers with the close response; the row is kept
+}
+
+/// The question with command links: a boxed list of rows (label, note), the check box, Cancel.
+fn adwAsk(a: Allocator, q: webapp.Ask) ?webapp.Answer {
+    const ad = adw.?;
+    const dlg = ad.adw_alert_dialog_new(a.dupeSentinel(u8, q.title, 0) catch return null, if (q.text.len > 0) (a.dupeSentinel(u8, q.text, 0) catch return null) else null);
+    ad.adw_alert_dialog_add_response(dlg, "cancel", "Cancel");
+    ad.adw_alert_dialog_set_close_response(dlg, "cancel");
+    ad.adw_alert_dialog_set_default_response(dlg, null);
+    var st: AdwAnswer = .{ .dialog = dlg };
+    var first_row: P = null;
+    const box = lib.gtk_box_new(1, 12);
+    const list = lib.gtk_list_box_new();
+    const selection_none = 0;
+    lib.gtk_list_box_set_selection_mode(list, selection_none);
+    lib.gtk_widget_add_css_class(list, "boxed-list");
+    for (q.choices) |c| {
+        const row = ad.adw_action_row_new();
+        ad.adw_preferences_row_set_title(row, a.dupeSentinel(u8, c.label, 0) catch return null);
+        if (c.note.len > 0) ad.adw_action_row_set_subtitle(row, a.dupeSentinel(u8, c.note, 0) catch return null);
+        ad.adw_action_row_add_suffix(row, lib.gtk_image_new_from_icon_name("go-next-symbolic"));
+        lib.gtk_list_box_row_set_activatable(row, 1); // (an AdwActionRow is not, by itself)
+        lib.gtk_list_box_append(list, row);
+        if (first_row == null) first_row = row;
+    }
+    _ = lib.g_signal_connect_data(list, "row-activated", &onAdwRow, &st, null, 0);
+    lib.gtk_box_append(box, list);
+    if (q.verification.len > 0) {
+        st.check = lib.gtk_check_button_new_with_label(a.dupeSentinel(u8, q.verification, 0) catch return null);
+        // followed as it changes: the dialog's widgets are gone once it has answered
+        _ = lib.g_signal_connect_data(st.check, "toggled", &onAdwCheck, &st, null, 0);
+        lib.gtk_box_append(box, st.check);
+    }
+    ad.adw_alert_dialog_set_extra_child(dlg, box);
+    selftest_choice = first_row;
+    asking = true;
+    adwRun(dlg, q.win, &st, "ask");
+    asking = false;
+    return .{ .choice = st.choice, .verified = st.verified };
+}
+
+fn adwInput(a: Allocator, win: u32, title: []const u8, prompt: []const u8, ok: []const u8) ?[]const u8 {
+    const ad = adw.?;
+    const dlg = ad.adw_alert_dialog_new(a.dupeSentinel(u8, title, 0) catch return null, a.dupeSentinel(u8, prompt, 0) catch return null);
+    ad.adw_alert_dialog_add_response(dlg, "cancel", "Cancel");
+    ad.adw_alert_dialog_add_response(dlg, "ok", a.dupeSentinel(u8, if (ok.len > 0) ok else "OK", 0) catch return null);
+    const suggested = 1;
+    ad.adw_alert_dialog_set_response_appearance(dlg, "ok", suggested);
+    ad.adw_alert_dialog_set_close_response(dlg, "cancel");
+    ad.adw_alert_dialog_set_prefer_wide_layout(dlg, 1);
+    const scroll = lib.gtk_scrolled_window_new();
+    lib.gtk_scrolled_window_set_min_content_width(scroll, 520);
+    lib.gtk_scrolled_window_set_min_content_height(scroll, 280);
+    lib.gtk_widget_add_css_class(scroll, "card");
+    const text_view = lib.gtk_text_view_new();
+    const wrap_word_char = 3;
+    lib.gtk_text_view_set_monospace(text_view, 1);
+    lib.gtk_text_view_set_wrap_mode(text_view, wrap_word_char);
+    lib.gtk_widget_add_css_class(text_view, "inline");
+    lib.gtk_scrolled_window_set_child(scroll, text_view);
+    ad.adw_alert_dialog_set_extra_child(dlg, scroll);
+    var st: AdwAnswer = .{};
+    adwRun(dlg, win, &st, "input");
+    if (!std.mem.eql(u8, st.response, "ok")) return null;
+    var raw: ?[*:0]u8 = null;
+    lib.g_object_get(lib.gtk_text_view_get_buffer(text_view), "text", &raw, @as(P, null));
+    const r = raw orelse return "";
+    defer lib.g_free(r);
+    return a.dupe(u8, std.mem.span(r)) catch null;
+}
+
+fn adwAbout(a: Allocator, win: u32, info: webapp.About) void {
+    const ad = adw.?;
+    const dlg = ad.adw_about_dialog_new();
+    ad.adw_about_dialog_set_application_name(dlg, "pstview");
+    ad.adw_about_dialog_set_application_icon(dlg, app_id); // (provideIcon: also before installing)
+    ad.adw_about_dialog_set_version(dlg, a.dupeSentinel(u8, info.version, 0) catch return);
+    ad.adw_about_dialog_set_comments(dlg, a.dupeSentinel(u8, info.comments, 0) catch return);
+    ad.adw_about_dialog_set_website(dlg, a.dupeSentinel(u8, info.url, 0) catch return);
+    const parent = parentOf(win);
+    ad.adw_dialog_present(dlg, parent);
+    autoCloseShot(.adw, dlg, "about", parent);
 }
