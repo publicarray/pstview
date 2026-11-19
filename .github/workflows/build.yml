@@ -217,6 +217,52 @@ jobs:
           name: pstview-flatpak
           path: pstview-*.flatpak
 
+  # The web browser version: built, its model tested in Node, packed for the release, and (on a
+  # release) published with GitHub Pages.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build (ReleaseSafe)
+        run: zig build web -Drelease
+      - name: Test the model in WebAssembly (demo mailbox)
+        run: node testdata/web-test.mjs zig-out/web/pstview.wasm testdata/demo-mailbox
+      - name: Package
+        run: |
+          ver=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "${GITHUB_SHA:0:7}")
+          mkdir -p dist stage
+          cp -R zig-out/web "stage/pstview-$ver-web"
+          (cd stage && zip -qr "../dist/pstview-$ver-web.zip" "pstview-$ver-web")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pstview-web
+          path: dist/*
+      - uses: actions/upload-pages-artifact@v3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          path: zig-out/web
+
+  # The web version of a release on GitHub Pages (Settings > Pages > Source: GitHub Actions).
+  pages:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [web, release]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
   # pstx must print the same thing on Windows, macOS and Linux
   compare:
     needs: build
@@ -234,7 +280,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, compare, appimage, flatpak]
+    needs: [build, compare, appimage, flatpak, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
