@@ -73,8 +73,9 @@ pub const Shell = struct {
     // contain is always the page's (webui.html); the shell only shows it.
 
     /// The menu bar of window `win`, as the page has it now (labels, enabled, checked). Called
-    /// whenever that changes. A chosen item: `menuAction(win, item.action)`.
-    setMenus: ?*const fn (win: u32, menus: []const Menu) void = null,
+    /// whenever that changes. A chosen item: `menuAction(win, item.action)`. Returns how many
+    /// native items the window's menus have (the self-test requires some).
+    setMenus: ?*const fn (win: u32, menus: []const Menu) usize = null,
     /// A context menu at (x, y) in page coordinates of window `win`; returns at once.
     popup: ?*const fn (win: u32, x: f64, y: f64, items: []const ?MenuItem) void = null,
     /// Status bar text of window `win`.
@@ -88,6 +89,11 @@ pub const Shell = struct {
     /// "system", "light" or "dark" was chosen in View: the native chrome follows it ("system":
     /// the desktop's setting again). setDark still follows with what the page then shows.
     setTheme: ?*const fn (choice: []const u8) void = null,
+    /// --selftest: the shell closes the native dialogs and menus it shows by itself after a
+    /// moment, so the self-test can open them; `selftest_takes_choice`: a question is answered
+    /// with its first choice (as a click would), else cancelled.
+    selftest_closes: bool = false,
+    selftest_takes_choice: bool = false,
 };
 
 /// A menu item as the page defines it. `action` is a page command name (letters and "-").
@@ -170,8 +176,8 @@ const App = struct {
     progress_pct: u64 = std.math.maxInt(u64),
     /// Self-test: a request arrived while another was being answered (the page ran meanwhile).
     saw_reentry: bool = false,
-    /// Self-test: how often the page has handed its menus to a native menu bar.
-    menus_set: usize = 0,
+    /// Self-test: the native menu items built for the page's menus, last time.
+    menu_items: usize = 0,
 };
 
 const MsgWin = struct { win: u32, nid: u32 };
@@ -480,8 +486,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         const menus = std.json.parseFromSliceLeaky([]const MenuJson, a, rest, .{ .ignore_unknown_fields = true }) catch return failure(a, out, "bad menus", .{});
         const list = try a.alloc(Menu, menus.len);
         for (menus, list) |m, *l| l.* = .{ .label = m.l, .items = try menuItems(a, m.i) };
-        set(app.cur_win, list);
-        app.menus_set += 1;
+        app.menu_items = set(app.cur_win, list);
         return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "popup")) {
@@ -557,7 +562,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         if (app.cur_win != 0) app.shell.closeWindow(app.cur_win);
         return out.appendSlice(a, "{}");
     }
-    if (eq(u8, cmd, "selfwin")) return out.print(a, "{{\"ok\":{},\"open\":{d},\"live\":{},\"menus\":{d}}}", .{ app.selftest_win, app.msg_wins.items.len, app.saw_reentry, app.menus_set });
+    if (eq(u8, cmd, "selfwin")) return out.print(a, "{{\"ok\":{},\"open\":{d},\"live\":{},\"menus\":{d}}}", .{ app.selftest_win, app.msg_wins.items.len, app.saw_reentry, app.menu_items });
     if (eq(u8, cmd, "selftest")) {
         const ok = eq(u8, argAt(rest, 0), "ok");
         std.debug.print("pstview selftest {s}: {s}\n", .{ if (ok) "passed" else "FAILED", argAt(rest, 1) });
@@ -645,11 +650,15 @@ fn ready(a: Allocator, out: *List) Error!void {
     try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else "linux");
     try kv(a, out, false, "url", project_url);
     try kv(a, out, false, "theme", app.theme_choice);
-    try out.print(a, ",\"nativeAsk\":{},\"native\":{{\"menus\":{},\"status\":{},\"dialogs\":{}}}", .{
+    try out.print(a, ",\"nativeAsk\":{},\"native\":{{\"menus\":{},\"status\":{},\"alert\":{},\"input\":{},\"about\":{},\"selftestCloses\":{},\"selftestChoice\":{}}}", .{
         app.shell.ask != null,
         app.shell.setMenus != null and app.shell.popup != null,
         app.shell.setStatus != null,
-        app.shell.alert != null and app.shell.input != null and app.shell.about != null,
+        app.shell.alert != null,
+        app.shell.input != null,
+        app.shell.about != null,
+        app.shell.selftest_closes,
+        app.shell.selftest_takes_choice,
     });
     if (app.cur_win != 0) {
         // a message window: the page shows this one message

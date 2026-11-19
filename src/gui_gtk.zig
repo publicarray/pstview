@@ -124,6 +124,8 @@ const Lib = struct {
     gtk_popover_popdown: *const fn (P) callconv(.c) void,
     g_usleep: *const fn (c_ulong) callconv(.c) void,
     gtk_stack_get_type: *const fn () callconv(.c) usize,
+    g_action_group_list_actions: *const fn (P) callconv(.c) ?[*:null]?[*:0]u8,
+    g_strfreev: *const fn (?[*:null]?[*:0]u8) callconv(.c) void,
     gtk_stack_set_hhomogeneous: *const fn (P, c_int) callconv(.c) void,
     gtk_stack_set_interpolate_size: *const fn (P, c_int) callconv(.c) void,
     gtk_widget_get_first_child: *const fn (P) callconv(.c) P,
@@ -807,6 +809,8 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
         // a selectable label (the program name in About) would open with its text selected
         lib.g_object_set(lib.gtk_settings_get_default(), "gtk-label-select-on-focus", @as(c_int, 0), @as(P, null));
         shell.setMenus = &setMenus;
+        shell.selftest_closes = true;
+        shell.selftest_takes_choice = true;
         shell.popup = &popup;
         shell.setStatus = &setStatus;
         shell.alert = &alert;
@@ -1002,8 +1006,23 @@ fn onAction(action: P, _: P, data: P) callconv(.c) void {
     webapp.menuAction(w.id, std.mem.span(name));
 }
 
-fn setMenus(win: u32, menus: []const webapp.Menu) void {
-    const w = winById(win) orelse return;
+fn setMenus(win: u32, menus: []const webapp.Menu) usize {
+    const w = winById(win) orelse return 0;
+    updateMenus(w, menus);
+    return countActions(w);
+}
+
+/// How many actions the window's menus have (the items GTK can show).
+fn countActions(w: *Win) usize {
+    const names = lib.g_action_group_list_actions(w.actions orelse return 0) orelse return 0;
+    defer lib.g_strfreev(names);
+    var n: usize = 0;
+    while (names[n] != null) n += 1;
+    return n;
+}
+
+fn updateMenus(w: *Win, menus: []const webapp.Menu) void {
+    const win = w.id;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();

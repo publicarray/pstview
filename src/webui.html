@@ -400,7 +400,7 @@ function dialog(heading, body, buttons) {
     if (first) first.focus();
   });
 }
-const notice = (text, heading) => st.native.dialogs
+const notice = (text, heading) => st.native.alert
   ? pv.quiet('alert', heading || 'pstview', String(text))
   : dialog(heading || 'pstview', esc(text));
 
@@ -730,7 +730,7 @@ async function act(name) {
     case 'paste': {
       const prompt = 'Paste the internet headers of a message (or a whole message) below.';
       let text;
-      if (st.native.dialogs) {
+      if (st.native.input) {
         const r = await pv.quiet('input', 'Analyse headers', prompt, 'Analyse');
         if (r.cancelled || r.error) return;
         text = r.text;
@@ -766,7 +766,7 @@ async function act(name) {
         'Opens PST and OST files (including Outlook 2013+ OSTs and mailboxes exported in several parts) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.',
         "Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.",
         'Messages are shown by the system web view with scripts and all network access blocked.', st.setup.about || ''].filter(p => p);
-      if (st.native.dialogs) return pv.quiet('about', paras.join('\n\n'));
+      if (st.native.about) return pv.quiet('about', paras.join('\n\n'));
       return dialog('pstview', `Version ${esc(st.version)}<br><br>${paras.map(esc).join('<br><br>')}<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
     }
   }
@@ -1093,34 +1093,37 @@ async function selftest(r) {
       if (choice !== 'system' && theme.dark !== (choice === 'dark')) throw `theme ${choice} not applied`;
       if (choice !== 'system' && darkQuery.matches !== (choice === 'dark')) followed = false;
     }
-    // native dialogs and menus open (the shell closes each one again, as if cancelled), in both themes
-    if (st.native.dialogs) for (const choice of ['light', 'dark', 'system']) {
+    // the native dialogs and menus there are open (the shell closes each one again), in both themes
+    const nat = st.native, natives = [nat.alert && 'message', st.nativeAsk && 'question', nat.input && 'text', nat.about && 'About', nat.menus && 'context menu'].filter(x => x);
+    if (nat.selftestCloses && natives.length) for (const choice of ['light', 'dark', 'system']) {
       theme.choice = choice;
       await applyTheme();
       if (choice === 'system') break;
       await nap(200);
-      await notice('A native message box of the self-test.', 'pstview self-test');
-      const q = await choose('pstview self-test', 'A native question with command links.', [
-        { label: 'First choice', note: 'With a note under it', value: 1 }, { label: 'Second choice', value: 2 }], "Don't ask again");
-      // (the self-test takes the first choice, as a click on it does)
-      if (q.value !== 1) throw 'the native question did not answer with the choice taken';
-      const t = await pv.quiet('input', 'Analyse headers', 'Paste the internet headers of a message (or a whole message) below.', 'Analyse');
-      if (!t.cancelled) throw 'the native text dialog was not cancelled';
-      await pv.quiet('about', 'The About text of the self-test.');
-      await nap(700);
-      popup(60, 40, MENUS[0][1]);
-      await nap(700);
+      if (nat.alert) await notice('A native message box of the self-test.', 'pstview self-test');
+      if (st.nativeAsk) {
+        const q = await choose('pstview self-test', 'A native question with command links.', [
+          { label: 'First choice', note: 'With a note under it', value: 1 }, { label: 'Second choice', value: 2 }], "Don't ask again");
+        // (where the shell can, it takes the first choice as a click on it does; else it cancels)
+        if (q.value !== (nat.selftestChoice ? 1 : null)) throw `the native question answered ${q.value}`;
+      }
+      if (nat.input) {
+        const t = await pv.quiet('input', 'Analyse headers', 'Paste the internet headers of a message (or a whole message) below.', 'Analyse');
+        if (!t.cancelled) throw 'the native text dialog was not cancelled';
+      }
+      if (nat.about) { await pv.quiet('about', 'The About text of the self-test.'); await nap(700); }
+      if (nat.menus) { popup(60, 40, MENUS[0][1]); await nap(700); }
     }
     for (let i = 0; i < 40 && (systemDark() !== sys0 || theme.dark !== sys0); i++) await nap(50);
     if (systemDark() !== sys0 || theme.dark !== sys0) throw 'the system theme was not restored';
     const sw = await pv.call('selfwin'), live = sw.live;
-    if (st.native.menus && !sw.menus) throw 'the menus were not handed to the native menu bar';
+    if (st.native.menus && !sw.menus) throw 'the native menu bar has no items';
     const sorted = await pv.call('sort', 4);
     if (sorted.count !== st.count) throw 'sort changed the row count';
     const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
     if (!found.count) throw 'search did not find the first message';
     clearTimeout(timer);
-    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, ${st.native.menus ? 'native' : 'page'} menus, themes switched (system ${sys0 ? 'dark' : 'light'}${followed ? ', web view follows the chrome' : ''})${st.native.dialogs ? ', native dialogs and context menu opened' : ''}, search and sort answered`);
+    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, ${st.native.menus ? `native menus (${sw.menus} items)` : 'page menus'}, themes switched (system ${sys0 ? 'dark' : 'light'}${followed ? ', web view follows the chrome' : ''})${nat.selftestCloses && natives.length ? `, native ${natives.join(', ')} opened` : ''}, search and sort answered`);
   } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
 }
 
