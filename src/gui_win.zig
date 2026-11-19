@@ -14,6 +14,10 @@
 //! nowhere. Script dialogs, host objects, dev tools and the browser's context menu are off, and
 //! the browser profile is a temp folder that is deleted on exit.
 //!
+//! The page's menus are the windows' menu bars (painted here in the dark theme), its context
+//! menu a popup menu, its status a strip under the web view, and its messages and About task
+//! dialogs; pasted headers are asked for by the page. PSTVIEW_NATIVE=0: all of it by the page.
+//!
 //!   pstview [file or folder ...]      several PST/OST parts are merged into one mailbox
 //!   pstview --version
 //!   pstview --uninstall               what Settings > Apps runs
@@ -201,7 +205,18 @@ const Win = struct {
     on_frame_navigation: Handler = .{ .vtbl = &frame_navigation_vtbl },
     on_new_window: Handler = .{ .vtbl = &new_window_vtbl },
     on_message: Handler = .{ .vtbl = &message_vtbl },
+    /// The menu bar's commands (item id - first_command) and the layout it was made for.
+    actions: std.ArrayList([]u8) = .empty,
+    shape: []u8 = &.{},
+    /// The status strip under the web view and its text.
+    status: ?w.HWND = null,
+    status_text: []u16 = &.{},
 };
+/// Menus, status strip and dialogs are native (PSTVIEW_NATIVE=0: the page's).
+var native = true;
+var selftest_mode = false;
+const first_command: usize = 1000;
+const popup_timer: usize = 77;
 
 const environment_vtbl: Handler.Vtbl = .{ .Invoke = &environmentCreated };
 const controller_vtbl: Handler.Vtbl = .{ .Invoke = &controllerCreated };
@@ -447,9 +462,14 @@ fn filesDropped(v: *Win, args: *anyopaque) void {
 }
 
 fn resize(v: *Win) void {
-    const c = v.controller orelse return;
     var rc: w.RECT = undefined;
     _ = w.GetClientRect(v.hwnd orelse return, &rc);
+    if (v.status) |st| {
+        const h = statusHeight(v.hwnd.?);
+        rc.bottom = @max(rc.top, rc.bottom - h);
+        _ = w.MoveWindow(st, 0, rc.bottom, rc.right - rc.left, h, 1);
+    }
+    const c = v.controller orelse return;
     _ = method(c, 6, fn (*anyopaque, w.RECT) callconv(.winapi) HRESULT)(c, rc); // put_Bounds
 }
 
@@ -475,7 +495,26 @@ fn paintCaption(hwnd: w.HWND) void {
 }
 
 fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI) w.LRESULT {
+    if (menuBarMessage(hwnd, msg, lp)) |r| return r;
     switch (msg) {
+        w.WM_NCPAINT, w.WM_NCACTIVATE => {
+            const r = w.DefWindowProcW(hwnd, msg, wp, lp);
+            paintMenuBarLine(hwnd);
+            return r;
+        },
+        w.WM_COMMAND => if (winOf(hwnd)) |v| {
+            // a menu bar item (HIWORD 0: a menu, not an accelerator or control)
+            const cmd = wp & 0xffff;
+            if ((wp >> 16) & 0xffff == 0 and cmd >= first_command and cmd - first_command < v.actions.items.len) {
+                webapp.menuAction(v.id, v.actions.items[cmd - first_command]);
+                return 0;
+            }
+        },
+        w.WM_TIMER => if (wp == popup_timer) {
+            _ = w.KillTimer(hwnd, popup_timer);
+            _ = w.EndMenu(); // --selftest: the context menu closes by itself
+            return 0;
+        },
         w.WM_SIZE => if (winOf(hwnd)) |v| resize(v),
         // ICoreWebView2Controller::NotifyParentWindowPositionChanged
         WM_MOVE => if (winOf(hwnd)) |v| if (v.controller) |c| {
@@ -506,6 +545,7 @@ fn wndProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI
         },
         w.WM_NCDESTROY => if (winOf(hwnd)) |v| {
             _ = w.SetWindowLongPtrW(hwnd, w.GWLP_USERDATA, 0);
+            forgetChrome(v);
             v.hwnd = null;
             for (wins.items, 0..) |x, i| if (x == v) {
                 _ = wins.swapRemove(i);
@@ -545,6 +585,13 @@ fn createWindow(id: u32, title: []const u8, width: i32, height: i32) bool {
     };
     _ = w.SetWindowLongPtrW(hwnd, w.GWLP_USERDATA, @bitCast(@intFromPtr(v)));
     paintCaption(hwnd);
+    if (native) {
+        loadDarkApi();
+        if (allow_dark_for_window) |f| _ = f(hwnd, 1);
+        v.status = w.CreateWindowExW(0, status_class, null, w.WS_CHILD | w.WS_VISIBLE, 0, 0, 0, 0, hwnd, null, hinst, null);
+        if (v.status) |st| _ = w.SetWindowLongPtrW(st, w.GWLP_USERDATA, @bitCast(@intFromPtr(v)));
+        resize(v);
+    }
     _ = w.ShowWindow(hwnd, w.SW_SHOW);
     _ = w.UpdateWindow(hwnd);
     if (environment_state == .ready) createController(v);
@@ -622,7 +669,7 @@ fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
     const px: i32 = @intCast(@divTrunc(32 * scale, 96));
     const icon = w.LoadImageW(hinst, 1, w.IMAGE_ICON, px, px, 0);
     const verification = if (q.verification.len > 0) toW(a, q.verification) else null;
-    const cfg: w.TASKDIALOGCONFIG = .{
+    var cfg: w.TASKDIALOGCONFIG = .{
         .hwndParent = w.GetActiveWindow() orelse mainHwnd(),
         .dwFlags = w.TDF_USE_COMMAND_LINKS | w.TDF_ALLOW_DIALOG_CANCELLATION | w.TDF_POSITION_RELATIVE_TO_WINDOW | (if (icon != null) w.TDF_USE_HICON_MAIN else 0),
         .dwCommonButtons = w.TDCBF_CANCEL_BUTTON,
@@ -634,7 +681,9 @@ fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
         .pButtons = &buttons,
         .nDefaultButton = if (n > 0) 100 else 0,
         .pszVerificationText = if (verification) |v| v.ptr else null,
+        .pfCallback = @ptrCast(&taskCallback),
     };
+    cfg.dwFlags |= if (selftest_mode) w.TDF_CALLBACK_TIMER else 0;
     var pressed: i32 = w.IDCANCEL;
     var checked: w.BOOL = 0;
     if (w.TaskDialogIndirect(&cfg, &pressed, null, &checked) < 0) return null; // the page asks instead
@@ -644,7 +693,11 @@ fn ask(a: Allocator, q: webapp.Ask) ?webapp.Answer {
 
 fn setDark(on: bool) void {
     dark = on;
-    for (wins.items) |v| if (v.hwnd) |h| paintCaption(h);
+    for (wins.items) |v| if (v.hwnd) |h| {
+        paintCaption(h);
+        _ = w.DrawMenuBar(h);
+        if (v.status) |st| _ = w.InvalidateRect(st, null, 1);
+    };
 }
 
 fn pickFolder(a: Allocator, title: []const u8) ?[]const []const u8 {
@@ -770,7 +823,21 @@ pub fn main(init: std.process.Init) !void {
     data_dir = try std.unicode.wtf8ToWtf16LeAllocZ(arena, profile);
     page_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, webapp.page_html);
 
-    webapp.init(gpa, io, .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openPath, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .ask = &ask, .setDark = &setDark, .quit = &quit }, paths.items, selftest);
+    selftest_mode = selftest;
+    var env_buf: [8]u16 = undefined;
+    const env_len = w.GetEnvironmentVariableW(L("PSTVIEW_NATIVE"), &env_buf, env_buf.len);
+    if (env_len == 1 and env_buf[0] == '0') native = false;
+    var shell: webapp.Shell = .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openPath, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .ask = &ask, .setDark = &setDark, .quit = &quit };
+    if (native) {
+        shell.setMenus = &setMenus;
+        shell.popup = &popup;
+        shell.setStatus = &setStatus;
+        shell.alert = &alert;
+        shell.about = &about;
+        shell.setTheme = &setTheme;
+    }
+    shell.selftest_closes = true; // (the task dialog of the question, also without the rest)
+    webapp.init(gpa, io, shell, paths.items, selftest);
 
     // What a window shows before its page is painted: the page's ground colour, not white, in a
     // dark session (the window's own background and the web view's, which is set by this variable).
@@ -785,6 +852,15 @@ pub fn main(init: std.process.Init) !void {
         .lpszClassName = class_name,
     };
     _ = w.RegisterClassExW(&wc);
+    const status_wc: w.WNDCLASSEXW = .{
+        .lpfnWndProc = statusProc,
+        .hInstance = hinst,
+        .hCursor = w.LoadCursorW(null, w.IDC_ARROW),
+        .lpszClassName = status_class,
+    };
+    _ = w.RegisterClassExW(&status_wc);
+    const px = @max(GetDpiForSystem(), 96);
+    ui_font = w.CreateFontW(-@as(i32, @intCast(@divTrunc(12 * px, 96))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, L("Segoe UI"));
 
     if (!startEnvironment()) {
         if (selftest) std.debug.print("pstview selftest FAILED: no WebView2 runtime\n", .{});
@@ -808,4 +884,349 @@ pub fn main(init: std.process.Init) !void {
     // the browser profile (best effort: the browser processes may still be closing)
     Io.Dir.cwd().deleteTree(io, profile) catch {};
     if (exit_code != 0) std.process.exit(exit_code);
+}
+
+// ================================================================ native chrome
+
+const status_class = L("pstview.status");
+var ui_font: ?*anyopaque = null;
+
+/// The page's colours (webui.html): pane ground, hairline, text, secondary text, selection.
+fn pal(light: u32, dark_: u32) u32 {
+    return w.rgb(if (dark) dark_ else light);
+}
+
+fn fill(dc: w.HDC, rc: w.RECT, color: u32) void {
+    const br = w.CreateSolidBrush(color) orelse return;
+    _ = w.FillRect(dc, &rc, br);
+    _ = w.DeleteObject(@ptrCast(br));
+}
+
+fn statusHeight(hwnd: w.HWND) i32 {
+    return @intCast(@divTrunc(26 * @max(w.GetDpiForWindow(hwnd), 96), 96));
+}
+
+fn forgetChrome(v: *Win) void {
+    for (v.actions.items) |x| gpa.free(x);
+    v.actions.deinit(gpa);
+    v.actions = .empty;
+    gpa.free(v.shape);
+    v.shape = &.{};
+    gpa.free(v.status_text);
+    v.status_text = &.{};
+}
+
+// ---------------------------------------------------------------- status strip
+
+fn statusProc(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM) callconv(w.WINAPI) w.LRESULT {
+    switch (msg) {
+        w.WM_ERASEBKGND => return 1,
+        w.WM_PAINT => {
+            var ps: w.PAINTSTRUCT = undefined;
+            const dc = w.BeginPaint(hwnd, &ps) orelse return 0;
+            defer _ = w.EndPaint(hwnd, &ps);
+            var rc: w.RECT = undefined;
+            _ = w.GetClientRect(hwnd, &rc);
+            const scale = @max(w.GetDpiForWindow(hwnd), 96);
+            const px = struct {
+                fn f(n: i32, s_: u32) i32 {
+                    return @intCast(@divTrunc(@as(u32, @intCast(n)) * s_, 96));
+                }
+            }.f;
+            fill(dc, rc, pal(0xF9F8F5, 0x161F2E));
+            fill(dc, .{ .left = rc.left, .top = rc.top, .right = rc.right, .bottom = rc.top + 1 }, pal(0xE3E1DA, 0x263247));
+            // the amber dot
+            const amber = w.rgb(0xF5B700);
+            const br = w.CreateSolidBrush(amber);
+            const pen = w.CreatePen(w.PS_SOLID, 1, amber);
+            const old_br = w.SelectObject(dc, @ptrCast(br));
+            const old_pen = w.SelectObject(dc, @ptrCast(pen));
+            const mid = @divTrunc(rc.bottom + rc.top, 2);
+            _ = w.Ellipse(dc, px(12, scale), mid - px(4, scale), px(20, scale), mid + px(4, scale));
+            _ = w.SelectObject(dc, old_br);
+            _ = w.SelectObject(dc, old_pen);
+            if (br) |b| _ = w.DeleteObject(@ptrCast(b));
+            if (pen) |p_| _ = w.DeleteObject(@ptrCast(p_));
+            if (ui_font) |f| _ = w.SelectObject(dc, f);
+            _ = w.SetBkMode(dc, w.TRANSPARENT);
+            var text_rc: w.RECT = .{ .left = px(28, scale), .top = rc.top, .right = rc.right - px(12, scale), .bottom = rc.bottom };
+            const ro = L("Read-only");
+            _ = w.SetTextColor(dc, pal(0x13233F, 0xE4E8EF));
+            var measure = text_rc;
+            _ = w.DrawTextW(dc, ro.ptr, @intCast(ro.len), &measure, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_NOPREFIX | w.DT_CALCRECT);
+            _ = w.DrawTextW(dc, ro.ptr, @intCast(ro.len), &text_rc, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_NOPREFIX);
+            const v = winOf(hwnd) orelse return 0;
+            if (v.status_text.len == 0) return 0;
+            text_rc.left = measure.right + px(14, scale);
+            _ = w.SetTextColor(dc, pal(0x606C80, 0xA3ADBD));
+            _ = w.DrawTextW(dc, v.status_text.ptr, @intCast(v.status_text.len), &text_rc, w.DT_SINGLELINE | w.DT_VCENTER | w.DT_NOPREFIX | w.DT_END_ELLIPSIS);
+            return 0;
+        },
+        else => {},
+    }
+    return w.DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+fn setStatus(win: u32, text: []const u8) void {
+    const v = winById(win) orelse return;
+    const t = std.unicode.wtf8ToWtf16LeAlloc(gpa, text) catch return;
+    gpa.free(v.status_text);
+    v.status_text = t;
+    if (v.status) |st| {
+        _ = w.InvalidateRect(st, null, 1);
+        _ = w.UpdateWindow(st); // (progress text: shown while the request is still running)
+    }
+}
+
+// ---------------------------------------------------------------- dark theme of menus
+
+// The dark visuals of menus are reached through uxtheme exports that have ordinals but no names
+// (Windows 10 1809 and later; absent on older systems, where menus stay light).
+var allow_dark_for_window: ?*const fn (w.HWND, w.BOOL) callconv(.winapi) w.BOOL = null;
+var set_preferred_app_mode: ?*const fn (c_int) callconv(.winapi) c_int = null;
+var flush_menu_themes: ?*const fn () callconv(.winapi) void = null;
+var dark_api_loaded = false;
+
+fn loadDarkApi() void {
+    if (dark_api_loaded) return;
+    dark_api_loaded = true;
+    const ux = w.LoadLibraryW(L("uxtheme.dll")) orelse return;
+    if (w.GetProcAddress(ux, @ptrFromInt(133))) |p| allow_dark_for_window = @ptrCast(@alignCast(p));
+    if (w.GetProcAddress(ux, @ptrFromInt(135))) |p| set_preferred_app_mode = @ptrCast(@alignCast(p));
+    if (w.GetProcAddress(ux, @ptrFromInt(136))) |p| flush_menu_themes = @ptrCast(@alignCast(p));
+}
+
+/// View > Theme: popup menus follow ("system": Windows' setting), and the menu bars are painted
+/// again (setDark follows with what the page shows).
+fn setTheme(choice: []const u8) void {
+    loadDarkApi();
+    const allow_dark: c_int = 1;
+    const force_dark: c_int = 2;
+    const force_light: c_int = 3;
+    const mode = if (std.mem.eql(u8, choice, "dark")) force_dark else if (std.mem.eql(u8, choice, "light")) force_light else allow_dark;
+    if (set_preferred_app_mode) |f| _ = f(mode);
+    if (flush_menu_themes) |f| f();
+}
+
+// The menu bar in the dark theme: Windows paints it light unless the window draws it itself,
+// through the undocumented WM_UAHDRAWMENU / WM_UAHDRAWMENUITEM messages (as pstview's Win32
+// GUI before 0.5 did).
+const WM_UAHDRAWMENU = 0x0091;
+const WM_UAHDRAWMENUITEM = 0x0092;
+const UahMenu = extern struct { hmenu: ?w.HMENU, hdc: ?w.HDC, flags: u32 };
+const UahDrawMenuItem = extern struct { dis: w.DRAWITEMSTRUCT, um: UahMenu, position: c_int };
+const objid_menu: i32 = -3;
+
+/// Handles the menu bar drawing messages in the dark theme; null: not handled (pass on).
+fn menuBarMessage(hwnd: w.HWND, msg: u32, lp: w.LPARAM) ?w.LRESULT {
+    if (!native or !dark or (msg != WM_UAHDRAWMENU and msg != WM_UAHDRAWMENUITEM) or lp == 0) return null;
+    if (msg == WM_UAHDRAWMENU) {
+        const um: *const UahMenu = @ptrFromInt(@as(usize, @bitCast(lp)));
+        var mbi: w.MENUBARINFO = .{};
+        var wr: w.RECT = undefined;
+        if (w.GetMenuBarInfo(hwnd, objid_menu, 0, &mbi) == 0 or w.GetWindowRect(hwnd, &wr) == 0) return null;
+        const rc: w.RECT = .{ .left = mbi.rcBar.left - wr.left, .top = mbi.rcBar.top - wr.top, .right = mbi.rcBar.right - wr.left, .bottom = mbi.rcBar.bottom - wr.top };
+        fill(um.hdc orelse return null, rc, pal(0xF9F8F5, 0x161F2E));
+        return 0;
+    }
+    const d: *const UahDrawMenuItem = @ptrFromInt(@as(usize, @bitCast(lp)));
+    const dc = d.um.hdc orelse return null;
+    var text: [128]u16 = undefined;
+    var mii: w.MENUITEMINFOW = .{ .fMask = 0x40, .dwTypeData = &text, .cch = text.len - 1 }; // MIIM_STRING
+    if (w.GetMenuItemInfoW(d.um.hmenu orelse return null, @intCast(d.position), 1, &mii) == 0) return null;
+    const state = d.dis.itemState;
+    const hot = (state & (0x40 | 0x1)) != 0; // ODS_HOTLIGHT | ODS_SELECTED
+    const off = (state & (0x2 | 0x4 | 0x80)) != 0; // ODS_GRAYED | ODS_DISABLED | ODS_INACTIVE
+    fill(dc, d.dis.rcItem, if (hot) pal(0xE4E9F2, 0x22324D) else pal(0xF9F8F5, 0x161F2E));
+    _ = w.SetBkMode(dc, w.TRANSPARENT);
+    _ = w.SetTextColor(dc, if (off) pal(0x7C8595, 0x8490A3) else pal(0x13233F, 0xE4E8EF));
+    if (ui_font) |f| _ = w.SelectObject(dc, f);
+    var rc = d.dis.rcItem;
+    const hide_prefix: u32 = if ((state & 0x100) != 0) 0x100000 else 0; // ODS_NOACCEL -> DT_HIDEPREFIX
+    _ = w.DrawTextW(dc, &text, @intCast(mii.cch), &rc, w.DT_CENTER | w.DT_SINGLELINE | w.DT_VCENTER | hide_prefix);
+    return 0;
+}
+
+/// The one-pixel line under the menu bar, which the system paints light.
+fn paintMenuBarLine(hwnd: w.HWND) void {
+    if (!native or !dark) return;
+    var mbi: w.MENUBARINFO = .{};
+    if (w.GetMenuBarInfo(hwnd, objid_menu, 0, &mbi) == 0) return;
+    var client: w.RECT = undefined;
+    var wr: w.RECT = undefined;
+    _ = w.GetClientRect(hwnd, &client);
+    _ = w.MapWindowPoints(hwnd, null, &client, 2);
+    if (w.GetWindowRect(hwnd, &wr) == 0) return;
+    const line: w.RECT = .{ .left = client.left - wr.left, .top = client.top - wr.top - 1, .right = client.right - wr.left, .bottom = client.top - wr.top };
+    const dc = w.GetWindowDC(hwnd) orelse return;
+    fill(dc, line, pal(0xF9F8F5, 0x161F2E));
+    _ = w.ReleaseDC(hwnd, dc);
+}
+
+// ---------------------------------------------------------------- menus
+
+/// "Label\tCtrl+O" ("&" doubled: it marks the access key in menus).
+fn itemText(a: Allocator, it: webapp.MenuItem) ?[:0]u16 {
+    var t: std.ArrayList(u8) = .empty;
+    for (it.label) |c| {
+        if (c == '&') t.append(a, '&') catch return null;
+        t.append(a, c) catch return null;
+    }
+    if (it.key.len > 0) {
+        t.append(a, '\t') catch return null;
+        if (std.mem.startsWith(u8, it.key, "Mod+")) t.print(a, "Ctrl+{s}", .{it.key[4..]}) catch return null else t.appendSlice(a, it.key) catch return null;
+    }
+    return toW(a, t.items);
+}
+
+fn itemFlags(it: webapp.MenuItem) u32 {
+    return w.MF_STRING | (if (it.enabled) 0 else w.MF_GRAYED) | (if (it.checked orelse false) w.MF_CHECKED else 0);
+}
+
+/// A popup menu of `items` whose ids are `first` + the item's index among the commands; the
+/// commands are appended to `actions` when given.
+fn buildPopup(a: Allocator, items: []const ?webapp.MenuItem, first: usize, actions: ?*std.ArrayList([]u8)) ?w.HMENU {
+    const menu = w.CreatePopupMenu() orelse return null;
+    var n: usize = 0;
+    for (items) |entry| {
+        const it = entry orelse {
+            _ = w.AppendMenuW(menu, w.MF_SEPARATOR, 0, null);
+            continue;
+        };
+        const text = itemText(a, it) orelse continue;
+        if (actions) |list| {
+            const action = gpa.dupe(u8, it.action) catch continue;
+            list.append(gpa, action) catch {
+                gpa.free(action);
+                continue;
+            };
+            n = list.items.len - 1;
+        }
+        _ = w.AppendMenuW(menu, itemFlags(it), first + n, text.ptr);
+        if (actions == null) n += 1;
+    }
+    return menu;
+}
+
+fn setMenus(win: u32, menus: []const webapp.Menu) usize {
+    const v = winById(win) orelse return 0;
+    const hwnd = v.hwnd orelse return 0;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The bar is made again only when its layout changes; otherwise its items are updated in
+    // place, and an open menu stays open.
+    var shape: std.ArrayList(u8) = .empty;
+    for (menus) |m| {
+        shape.print(a, "\x1e{s}", .{m.label}) catch return 0;
+        for (m.items) |entry| if (entry) |it| shape.print(a, "\x1f{s}\x1d{s}\x1d{s}", .{ it.label, it.action, it.key }) catch return 0 else shape.append(a, '|') catch return 0;
+    }
+    const current = w.GetMenu(hwnd);
+    if (current != null and std.mem.eql(u8, shape.items, v.shape)) {
+        var i: usize = 0;
+        for (menus) |m| for (m.items) |entry| if (entry) |it| {
+            const cmd: u32 = @intCast(first_command + i);
+            _ = w.EnableMenuItem(current.?, cmd, w.MF_BYCOMMAND | (if (it.enabled) w.MF_ENABLED else w.MF_GRAYED));
+            if (it.checked) |c| _ = w.CheckMenuItem(current.?, cmd, w.MF_BYCOMMAND | (if (c) w.MF_CHECKED else w.MF_UNCHECKED));
+            i += 1;
+        };
+        return v.actions.items.len;
+    }
+    for (v.actions.items) |x| gpa.free(x);
+    v.actions.clearRetainingCapacity();
+    const bar = w.CreateMenu() orelse return 0;
+    for (menus) |m| {
+        const popup_menu = buildPopup(a, m.items, first_command, &v.actions) orelse continue;
+        const title = toW(a, std.fmt.allocPrint(a, "&{s}", .{m.label}) catch continue) orelse continue;
+        _ = w.AppendMenuW(bar, w.MF_POPUP, @intFromPtr(popup_menu), title.ptr);
+    }
+    _ = w.SetMenu(hwnd, bar);
+    if (current) |old| _ = w.DestroyMenu(old);
+    _ = w.DrawMenuBar(hwnd);
+    gpa.free(v.shape);
+    v.shape = gpa.dupe(u8, shape.items) catch &.{};
+    resize(v); // the menu bar takes room from the client area
+    return v.actions.items.len;
+}
+
+/// A context menu at the pointer (where the page was right-clicked).
+fn popup(win: u32, _: f64, _: f64, items: []const ?webapp.MenuItem) void {
+    const v = winById(win) orelse return;
+    const hwnd = v.hwnd orelse return;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const menu = buildPopup(a, items, 1, null) orelse return;
+    defer _ = w.DestroyMenu(menu);
+    var pt: w.POINT = undefined;
+    if (w.GetCursorPos(&pt) == 0) return;
+    if (selftest_mode) _ = w.SetTimer(hwnd, popup_timer, 700, null);
+    const cmd = w.TrackPopupMenu(menu, w.TPM_RETURNCMD | w.TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, null);
+    _ = w.KillTimer(hwnd, popup_timer);
+    // the commands of the menu in order: 1, 2, ...
+    var n: i32 = 0;
+    for (items) |entry| if (entry) |it| {
+        n += 1;
+        if (n == cmd) return webapp.menuAction(win, it.action);
+    };
+}
+
+// ---------------------------------------------------------------- task dialogs
+
+/// The task dialogs' callback: links open in the browser; --selftest presses Cancel after a
+/// moment, so the dialog closes by itself.
+fn taskCallback(hwnd: w.HWND, msg: u32, wp: w.WPARAM, lp: w.LPARAM, _: isize) callconv(w.WINAPI) i32 {
+    if (msg == w.TDN_HYPERLINK_CLICKED and lp != 0) {
+        const url: [*:0]const u16 = @ptrFromInt(@as(usize, @bitCast(lp)));
+        _ = w.ShellExecuteW(hwnd, L("open"), url, null, null, w.SW_SHOWNORMAL);
+    } else if (msg == w.TDN_TIMER and selftest_mode and wp >= 700) {
+        _ = w.SendMessageW(hwnd, w.TDM_CLICK_BUTTON, @intCast(w.IDCANCEL), 0);
+    }
+    return S_OK;
+}
+
+fn appIcon() ?*anyopaque {
+    const scale = @max(GetDpiForSystem(), 96);
+    const px: i32 = @intCast(@divTrunc(32 * scale, 96));
+    return w.LoadImageW(hinst, 1, w.IMAGE_ICON, px, px, 0);
+}
+
+fn taskDialog(cfg: *w.TASKDIALOGCONFIG) void {
+    cfg.pfCallback = @ptrCast(&taskCallback);
+    if (selftest_mode) cfg.dwFlags |= w.TDF_CALLBACK_TIMER;
+    var pressed: i32 = 0;
+    _ = w.TaskDialogIndirect(cfg, &pressed, null, null);
+}
+
+fn alert(a: Allocator, _: u32, title: []const u8, text: []const u8) void {
+    const icon = appIcon();
+    var cfg: w.TASKDIALOGCONFIG = .{
+        .hwndParent = w.GetActiveWindow() orelse mainHwnd(),
+        .dwFlags = w.TDF_ALLOW_DIALOG_CANCELLATION | w.TDF_POSITION_RELATIVE_TO_WINDOW | (if (icon != null) w.TDF_USE_HICON_MAIN else 0),
+        .dwCommonButtons = w.TDCBF_OK_BUTTON,
+        .pszWindowTitle = L("pstview"),
+        .hMainIcon = icon,
+        .pszMainInstruction = (toW(a, title) orelse return).ptr,
+        .pszContent = (toW(a, text) orelse return).ptr,
+    };
+    taskDialog(&cfg);
+}
+
+/// Help > About: the version, the page's text and a link to the project.
+fn about(a: Allocator, _: u32, info: webapp.About) void {
+    const icon = appIcon();
+    // (the text is plain: "<" would start markup in a dialog with links)
+    const plain = std.mem.replaceOwned(u8, a, info.comments, "<", "\u{2039}") catch return;
+    const shown = if (std.mem.startsWith(u8, info.url, "https://")) info.url[8..] else info.url;
+    const text = std.fmt.allocPrint(a, "{s}\n\n<a href=\"{s}\">{s}</a>", .{ plain, info.url, shown }) catch return;
+    var cfg: w.TASKDIALOGCONFIG = .{
+        .hwndParent = w.GetActiveWindow() orelse mainHwnd(),
+        .dwFlags = w.TDF_ENABLE_HYPERLINKS | w.TDF_ALLOW_DIALOG_CANCELLATION | w.TDF_POSITION_RELATIVE_TO_WINDOW | (if (icon != null) w.TDF_USE_HICON_MAIN else 0),
+        .dwCommonButtons = w.TDCBF_OK_BUTTON,
+        .pszWindowTitle = L("About pstview"),
+        .hMainIcon = icon,
+        .pszMainInstruction = (toW(a, std.fmt.allocPrint(a, "pstview {s}", .{info.version}) catch return) orelse return).ptr,
+        .pszContent = (toW(a, text) orelse return).ptr,
+    };
+    taskDialog(&cfg);
 }

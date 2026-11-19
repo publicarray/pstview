@@ -63,7 +63,10 @@ jobs:
       # (sandboxed frame), opens it in a window of its own, searches and sorts, then exits 0.
       - name: GUI self-test (Windows, WebView2)
         if: matrix.platform == 'windows'
-        run: timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
+        run: |
+          timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
+          # the page's own menus, status bar and dialogs
+          PSTVIEW_NATIVE=0 timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
 
       - name: Install and uninstall for the user (Linux, scratch home)
         if: matrix.platform == 'linux'
@@ -92,7 +95,10 @@ jobs:
 
       - name: GUI self-test (macOS, Cocoa + WKWebView)
         if: matrix.platform == 'macos'
-        run: perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
+        run: |
+          perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
+          # the page's own menus, status line and dialogs
+          PSTVIEW_NATIVE=0 perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
 
       - uses: actions/upload-artifact@v4
         with:

@@ -748,3 +748,24 @@ pub const BS_DEFPUSHBUTTON: u32 = 0x1;
 pub const IDOK: i32 = 1;
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
+
+// ================================================================ native menus, status strip, task dialog callbacks
+
+pub extern "user32" fn GetMenu(hwnd: HWND) callconv(WINAPI) ?HMENU;
+pub extern "user32" fn CheckMenuItem(menu: HMENU, id: u32, flags: u32) callconv(WINAPI) u32;
+pub extern "user32" fn EndMenu() callconv(WINAPI) BOOL;
+pub extern "user32" fn SetTimer(hwnd: ?HWND, id: usize, ms: u32, func: ?*const anyopaque) callconv(WINAPI) usize;
+pub extern "user32" fn KillTimer(hwnd: ?HWND, id: usize) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buf: ?[*]u16, size: u32) callconv(WINAPI) u32;
+pub const MF_CHECKED: u32 = 0x8;
+pub const MF_UNCHECKED: u32 = 0x0;
+pub const WM_TIMER: u32 = 0x0113;
+pub const DT_LEFT: u32 = 0x0;
+pub const TDF_ENABLE_HYPERLINKS: u32 = 0x0001;
+pub const TDF_CALLBACK_TIMER: u32 = 0x0800;
+pub const TDCBF_OK_BUTTON: u32 = 0x1;
+pub const TDN_HYPERLINK_CLICKED: u32 = 3;
+pub const TDN_TIMER: u32 = 4;
+pub const TDM_CLICK_BUTTON: u32 = WM_USER + 102;
+/// PFTASKDIALOGCALLBACK
+pub const TaskDialogCallback = *const fn (hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, data: isize) callconv(WINAPI) i32;
