@@ -637,6 +637,8 @@ pub fn run(gpa_: Allocator, io: Io, start_paths: []const []const u8, selftest: b
     var shell: webapp.Shell = .{ .eval = &eval, .pickOpen = &pickOpen, .pickSave = &pickSave, .openPath = &openPath, .openUrl = &openUrl, .setTitle = &setTitle, .openWindow = &openWindow, .closeWindow = &closeWindow, .pump = &pump, .setDark = &setDark, .quit = &quit, .snapshot = &snapshot, .setTheme = &setTheme };
     if (native) {
         loadCss();
+        // a selectable label (the program name in About) would open with its text selected
+        lib.g_object_set(lib.gtk_settings_get_default(), "gtk-label-select-on-focus", @as(c_int, 0), @as(P, null));
         shell.setMenus = &setMenus;
         shell.popup = &popup;
         shell.setStatus = &setStatus;
