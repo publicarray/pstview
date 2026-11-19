@@ -1,5 +1,6 @@
 //! pstview - PST / OST / MBOX viewer and exporter (read-only), macOS and Linux entry point.
-//! The window is native (Cocoa or GTK); its content is shown by the system web view. See
+//! The window is native (Cocoa or GTK 4, which also draws the menus, status bar and dialogs);
+//! its content is shown by the system web view. See
 //! webapp.zig for the model, gui_mac.zig / gui_gtk.zig for the platform halves. Windows has the
 //! same page and model in gui_win.zig.
 //!

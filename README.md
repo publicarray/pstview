@@ -23,7 +23,7 @@ Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, 
 
 * **Windows:** the WebView2 runtime (part of Windows 11 and of up-to-date Windows 10).
 * **macOS:** 11 or later. The app is ad-hoc signed, not notarised: after unpacking run `xattr -dr com.apple.quarantine pstview.app pstx`, or allow it in *System Settings > Privacy & Security*.
-* **Linux:** GTK 3 and WebKitGTK, which most desktops have (`libgtk-3-0 libwebkit2gtk-4.1-0` on Debian / Ubuntu, `gtk3 webkit2gtk4.1` on Fedora, `gtk3 webkit2gtk-4.1` on Arch).
+* **Linux:** GTK 4.12 or later and WebKitGTK 6.0, which current desktops have (`libgtk-4-1 libwebkitgtk-6.0-4` on Debian 13 / Ubuntu 24.04, `gtk4 webkitgtk6.0` on Fedora, `gtk4 webkitgtk-6.0` on Arch). Menus, status bar and dialogs are native GTK; the web view shows the mailbox and the messages.
 
 pstview warns when its web view is missing.
 
@@ -132,7 +132,7 @@ CI builds every push on Windows, macOS and Linux, checks that `pstx` prints iden
 * `src/render.zig`, `export.zig`: the sanitised message view; EML / MSG writers and reports.
 * `src/pstwrite.zig`: the PST writer (NDB blocks and B-trees, heaps, property and table contexts, folders and messages).
 * `src/webui.html`, `webapp.zig`: the GUI shared by all platforms (the page and the model behind it).
-* `src/gui_win.zig`, `gui_mac.zig`, `gui_gtk.zig`, `gui_posix.zig`: windows, web views and dialogs per platform.
+* `src/gui_win.zig`, `gui_mac.zig`, `gui_gtk.zig`, `gui_posix.zig`: windows, web views and dialogs per platform. A shell may draw the menus, status bar and dialogs natively (GTK does); the page draws whatever it leaves out, from the same menu lists.
 * `src/setup.zig`, `install.zig`: per-user install and uninstall.
 * `src/cli.zig`, `platform.zig`, `fuzz.zig`: command line, time zone and charset conversion, fuzz targets.
 

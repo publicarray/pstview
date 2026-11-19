@@ -179,6 +179,8 @@ body.single #left,body.single #vsplit,body.single #searchbar,body.single #listwr
 body.single #welcome,body.single #expand{display:none!important}
 body.single #main{display:flex!important}
 .hidden{display:none!important}
+/* the shell draws these natively */
+body.nmenus #bar,body.nstatus #status{display:none}
 </style>
 </head>
 <body>
@@ -256,11 +258,14 @@ const post = window.chrome && window.chrome.webview
   : s => window.webkit.messageHandlers.pstview.postMessage(s);
 const pv = {
   seq: 0, pending: new Map(), busyTimer: 0,
-  call(cmd, ...args) {
+  call(cmd, ...args) { return pv.send(false, cmd, args); },
+  /** A request that waits on the user (a native dialog) or is instant: no "Working" overlay. */
+  quiet(cmd, ...args) { return pv.send(true, cmd, args); },
+  send(quiet, cmd, args) {
     return new Promise(resolve => {
       const id = ++pv.seq;
       pv.pending.set(id, resolve);
-      if (!pv.busyTimer) pv.busyTimer = setTimeout(() => $('#busy').classList.add('on'), 250);
+      if (!quiet && !pv.busyTimer) pv.busyTimer = setTimeout(() => $('#busy').classList.add('on'), 250);
       post([id, cmd, ...args].join('\x1f'));
     });
   },
@@ -272,13 +277,16 @@ const pv = {
       if (pv.before !== null) { status(pv.before); pv.before = null; $('#busy span').textContent = 'Working\u2026'; }
     }
     if (resolve) resolve(data);
+    if (st.native.menus) setTimeout(syncMenus, 0);
   },
+  /** An item of a native menu (menu bar or context menu) was chosen. */
+  act(name) { act(name); },
   opened(mb) { pv.reply(0); showMailbox(mb); },
   /** Progress of the request being answered: status text, restored when the answer is in. */
   before: null,
   progress(text) {
     if (pv.before === null) pv.before = $('#stext').textContent;
-    status(text);
+    $('#stext').textContent = text; // (a native status bar has been set by the model)
     $('#busy span').textContent = text; // (the overlay itself appears when a request takes long)
     if (pv.onprogress) pv.onprogress(text);
   },
@@ -290,7 +298,7 @@ const COLS = [['Received',140],['Modified',140],['From',180],['To',180],['Subjec
 const ROW = 28, CHUNK = 200;
 const st = { mb: null, folder: -1, count: 0, total: 0, col: 0, desc: true, gen: 0, cache: new Map(), asked: new Set(),
   sel: new Set(), all: false, focus: -1, anchor: -1, msg: null, msgRow: -1, tab: 'mail', version: '', url: '',
-  single: '', setup: {} };
+  single: '', setup: {}, native: {} };
 /** The message a command is about, as the model expects it: this window's message, or the focused row. */
 const ref = () => st.single || st.focus;
 
@@ -307,7 +315,10 @@ const GLYPH = {
 };
 const glyph = g => `<svg class="g" viewBox="0 0 16 16"><path d="${GLYPH[g] || GLYPH.folder}"/></svg>`;
 
-function status(text) { $('#stext').textContent = text || ''; }
+function status(text) {
+  $('#stext').textContent = text || '';
+  if (st.native.status) pv.quiet('status', text || '');
+}
 
 // ---------------------------------------------------------------- theme (follows the system unless chosen in View)
 const darkQuery = matchMedia('(prefers-color-scheme: dark)');
@@ -323,7 +334,7 @@ async function applyTheme() {
   if (st.single) showMessage(await pv.call('msg', st.single)); else if (st.focus >= 0) loadMessage(st.focus);
 }
 darkQuery.addEventListener('change', () => applyTheme());
-const themeLabel = (name, label) => () => (theme.choice === name ? '\u2713  ' : '\u2003  ') + label;
+const isTheme = name => () => theme.choice === name;
 
 // ---------------------------------------------------------------- coloured analysis text
 // The analysis and the internet headers are plain text from the mailbox. They are shown with
@@ -381,7 +392,9 @@ function dialog(heading, body, buttons) {
     if (first) first.focus();
   });
 }
-const notice = (text, heading) => dialog(heading || 'pstview', esc(text));
+const notice = (text, heading) => st.native.dialogs
+  ? pv.quiet('alert', heading || 'pstview', String(text))
+  : dialog(heading || 'pstview', esc(text));
 
 /** Show what a request answered: an error or a message in a dialog. Returns false when it failed or was cancelled. */
 async function shown(r) {
@@ -535,6 +548,7 @@ function focusRow(r, e) {
     st.anchor = r;
   } else { st.all = false; st.sel.clear(); st.sel.add(r); st.anchor = r; }
   st.focus = r;
+  syncMenus();
   const box = $('#rows');
   if (r * ROW < box.scrollTop) box.scrollTop = r * ROW;
   else if ((r + 1) * ROW > box.scrollTop + box.clientHeight) box.scrollTop = (r + 1) * ROW - box.clientHeight;
@@ -669,6 +683,7 @@ const needRow = () => st.mb && st.focus >= 0;
 
 async function act(name) {
   closeMenus();
+  setTimeout(syncMenus, 0);
   switch (name) {
     case 'open': case 'openfolder': return showMailbox(await pv.call(name));
     case 'close': await pv.call('close'); return closeView();
@@ -705,9 +720,18 @@ async function act(name) {
     case 'analyse': return resetList(await pv.call('analyse'));
     case 'theme-system': case 'theme-light': case 'theme-dark': theme.choice = name.slice(6); return applyTheme();
     case 'paste': {
-      const ok = await dialog('Analyse headers', '<div style="margin-bottom:10px">Paste the internet headers of a message (or a whole message) below.</div><textarea id="pasted" spellcheck="false"></textarea>', [['Analyse', true], ['Cancel', false]]);
-      const text = $('#pasted').value;
-      if (!ok || !text.trim()) return;
+      const prompt = 'Paste the internet headers of a message (or a whole message) below.';
+      let text;
+      if (st.native.dialogs) {
+        const r = await pv.quiet('input', 'Analyse headers', prompt, 'Analyse');
+        if (r.cancelled || r.error) return;
+        text = r.text;
+      } else {
+        const ok = await dialog('Analyse headers', `<div style="margin-bottom:10px">${esc(prompt)}</div><textarea id="pasted" spellcheck="false"></textarea>`, [['Analyse', true], ['Cancel', false]]);
+        text = $('#pasted').value;
+        if (!ok) return;
+      }
+      if (!text.trim()) return;
       const r = await pv.call('hdrtext', text);
       if (r.error) return notice(r.error, 'Analyse headers');
       return viewer(r.title, r.html, true);
@@ -729,11 +753,14 @@ async function act(name) {
       status(r.status);
       return viewer(r.title, textDoc(r.text), false);
     }
-    case 'about':
-      return dialog('pstview', `Version ${esc(st.version)}<br><br>Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.<br><br>` +
-        `Opens PST and OST files (including Outlook 2013+ OSTs and mailboxes exported in several parts) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.<br><br>` +
-        `Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.<br><br>` +
-        `Messages are shown by the system web view with scripts and all network access blocked.<br><br>${esc(st.setup.about || '')}<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
+    case 'about': {
+      const paras = ['Read-only viewer and exporter for Outlook PST / OST and MBOX mailboxes.',
+        'Opens PST and OST files (including Outlook 2013+ OSTs and mailboxes exported in several parts) and MBOX mailboxes from Google Takeout, Thunderbird and Apple Mail without write access - nothing is written next to the source.',
+        "Exports .msg and .eml with HTML and CSV reports that record the source's SHA-256. Times are shown in this computer's time zone (daylight-saving aware) and in UTC.",
+        'Messages are shown by the system web view with scripts and all network access blocked.', st.setup.about || ''].filter(p => p);
+      if (st.native.dialogs) return pv.quiet('about', paras.join('\n\n'));
+      return dialog('pstview', `Version ${esc(st.version)}<br><br>${paras.map(esc).join('<br><br>')}<br><br><a href="#" id="site">${esc(st.url.replace('https://', ''))}</a>`);
+    }
   }
 }
 
@@ -746,7 +773,7 @@ const APP_ICON = '<svg viewBox="0 0 36 36"><rect width="36" height="36" rx="8" f
  */
 async function choose(title, text, choices, verify) {
   if (st.nativeAsk) {
-    const r = await pv.call('ask', title, text, verify || '', ...choices.flatMap(c => [c.label, c.note || '']));
+    const r = await pv.quiet('ask', title, text, verify || '', ...choices.flatMap(c => [c.label, c.note || '']));
     if (!r.fallback && !r.error) return { value: r.choice >= 0 && choices[r.choice] ? choices[r.choice].value : null, verified: !!r.verified };
   }
   return new Promise(resolve => {
@@ -802,7 +829,7 @@ const isInstalled = () => !!st.setup.installed;
 
 const MENUS = [
   ['File', [
-    ['Open PST / OST / MBOX file…', 'open', null, MOD + 'O'],
+    ['Open PST / OST / MBOX file…', 'open', null, 'Mod+O'],
     ['Open folder (Thunderbird / Apple Mail / PST parts)…', 'openfolder'],
     ['Close mailbox', 'close', need],
     null,
@@ -817,19 +844,19 @@ const MENUS = [
   ['Message', [
     ['Open message in its own window', 'openmsg', needRow, 'Enter'],
     ['Enlarge reading pane / back to list', 'expand', needRow],
-    ['Header analysis report', 'hdrreport', needRow, MOD + 'I'],
+    ['Header analysis report', 'hdrreport', needRow, 'Mod+I'],
     ['All properties (MAPI, incl. named)', 'props', needRow],
     null,
-    ['Select all', 'selectall', need, MOD + 'A'],
+    ['Select all', 'selectall', need, 'Mod+A'],
   ]],
   ['View', [
-    [themeLabel('system', 'Theme: follow the system'), 'theme-system'],
-    [themeLabel('light', 'Theme: light'), 'theme-light'],
-    [themeLabel('dark', 'Theme: dark'), 'theme-dark'],
+    ['Theme: follow the system', 'theme-system', null, null, isTheme('system')],
+    ['Theme: light', 'theme-light', null, null, isTheme('light')],
+    ['Theme: dark', 'theme-dark', null, null, isTheme('dark')],
   ]],
   ['Tools', [
-    ['Analyse headers in this folder (risk, spoofing)', 'analyse', need, MOD + 'R'],
-    ['Header analysis report for selected message', 'hdrreport', needRow, MOD + 'I'],
+    ['Analyse headers in this folder (risk, spoofing)', 'analyse', need, 'Mod+R'],
+    ['Header analysis report for selected message', 'hdrreport', needRow, 'Mod+I'],
     ['Analyse pasted headers…', 'paste'],
     ['Analyse headers from .eml / .txt file…', 'hdrfile'],
     null,
@@ -849,7 +876,7 @@ const MENUS = [
 /** Menus of a message window. */
 const MENUS_SINGLE = [
   ['Message', [
-    ['Header analysis report', 'hdrreport', null, MOD + 'I'],
+    ['Header analysis report', 'hdrreport', null, 'Mod+I'],
     ['All properties (MAPI, incl. named)', 'props'],
     null,
     ['Export as .msg…', 'onemsg'],
@@ -859,9 +886,9 @@ const MENUS_SINGLE = [
     ['Close', 'closewin', null, 'Esc'],
   ]],
   ['View', [
-    [themeLabel('system', 'Theme: follow the system'), 'theme-system'],
-    [themeLabel('light', 'Theme: light'), 'theme-light'],
-    [themeLabel('dark', 'Theme: dark'), 'theme-dark'],
+    ['Theme: follow the system', 'theme-system', null, null, isTheme('system')],
+    ['Theme: light', 'theme-light', null, null, isTheme('light')],
+    ['Theme: dark', 'theme-dark', null, null, isTheme('dark')],
   ]],
 ];
 const CONTEXT = [
@@ -877,8 +904,23 @@ const CONTEXT = [
   ['Report (HTML + CSV) of selection…', 'none', need],
   ['Select all', 'selectall', need],
 ];
+// An item: [label (or a function giving it), command, enabled() or null, shortcut ("Mod+O": Ctrl
+// or Cmd), checked() or nothing]. The same lists make the page's menus and the native ones.
+const itemLabel = it => typeof it[0] === 'function' ? it[0]() : it[0];
+const keyLabel = k => k ? k.replace('Mod+', MOD) : '';
 const itemsHtml = items => items.map(it => it === null ? '<hr>' :
-  `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${esc(typeof it[0] === 'function' ? it[0]() : it[0])}</span>${it[3] ? `<kbd>${esc(it[3])}</kbd>` : ''}</button>`).join('');
+  `<button data-act="${it[1]}"${it[2] && !it[2]() ? ' disabled' : ''}><span>${it[4] ? (it[4]() ? '\u2713  ' : '\u2003  ') : ''}${esc(itemLabel(it))}</span>${it[3] ? `<kbd>${esc(keyLabel(it[3]))}</kbd>` : ''}</button>`).join('');
+/** Items as the native menus take them (webapp.zig MenuItem). */
+const itemsSpec = items => items.map(it => it === null ? null :
+  { l: itemLabel(it), a: it[1], e: !it[2] || !!it[2](), k: it[3] || '', c: it[4] ? !!it[4]() : null });
+/** Hand the menus to a native menu bar whenever their labels or states change. */
+function syncMenus() {
+  if (!st.native.menus) return;
+  const spec = JSON.stringify(menus.map(m => ({ l: m[0], i: itemsSpec(m[1]) })));
+  if (spec === syncMenus.last) return;
+  syncMenus.last = spec;
+  pv.quiet('menus', spec);
+}
 
 let menus = MENUS;
 function buildMenus() {
@@ -906,6 +948,7 @@ $('#menus').addEventListener('mouseover', e => {
 });
 function popup(x, y, items) {
   closeMenus();
+  if (st.native.menus) return pv.quiet('popup', Math.round(x), Math.round(y), JSON.stringify(itemsSpec(items)));
   const d = document.createElement('div');
   d.className = 'drop ctx';
   d.innerHTML = itemsHtml(items);
@@ -1031,13 +1074,43 @@ async function selftest(r) {
     if (analysed.error) throw analysed.error;
     if (!progressed) throw 'no progress text during the header analysis';
     await new Promise(ok => setTimeout(ok, 200));
-    const live = (await pv.call('selfwin')).live;
+    // View > Theme: light and dark are applied, and "follow the system" gives the system's back
+    const sys0 = darkQuery.matches, nap = ms => new Promise(ok => setTimeout(ok, ms));
+    let followed = true;
+    for (const choice of ['light', 'dark', 'system']) {
+      theme.choice = choice;
+      await applyTheme();
+      await nap(300);
+      if (choice !== 'system' && theme.dark !== (choice === 'dark')) throw `theme ${choice} not applied`;
+      if (choice !== 'system' && darkQuery.matches !== (choice === 'dark')) followed = false;
+    }
+    // native dialogs and menus open (the shell closes each one again, as if cancelled), in both themes
+    if (st.native.dialogs) for (const choice of ['light', 'dark', 'system']) {
+      theme.choice = choice;
+      await applyTheme();
+      if (choice === 'system') break;
+      await nap(200);
+      await notice('A native message box of the self-test.', 'pstview self-test');
+      const q = await choose('pstview self-test', 'A native question with command links.', [
+        { label: 'First choice', note: 'With a note under it', value: 1 }, { label: 'Second choice', value: 2 }], "Don't ask again");
+      if (q.value !== null) throw 'the native question was not cancelled';
+      const t = await pv.quiet('input', 'Analyse headers', 'Paste the internet headers of a message (or a whole message) below.', 'Analyse');
+      if (!t.cancelled) throw 'the native text dialog was not cancelled';
+      await pv.quiet('about', 'The About text of the self-test.');
+      await nap(700);
+      popup(60, 40, MENUS[0][1]);
+      await nap(700);
+    }
+    for (let i = 0; i < 40 && darkQuery.matches !== sys0; i++) await nap(50);
+    if (darkQuery.matches !== sys0 || theme.dark !== sys0) throw 'the system theme was not restored';
+    const sw = await pv.call('selfwin'), live = sw.live;
+    if (st.native.menus && !sw.menus) throw 'the menus were not handed to the native menu bar';
     const sorted = await pv.call('sort', 4);
     if (sorted.count !== st.count) throw 'sort changed the row count';
     const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
     if (!found.count) throw 'search did not find the first message';
     clearTimeout(timer);
-    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, search and sort answered`);
+    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, ${st.native.menus ? 'native' : 'page'} menus, themes switched (system ${sys0 ? 'dark' : 'light'}${followed ? ', web view follows the chrome' : ''})${st.native.dialogs ? ', native dialogs and context menu opened' : ''}, search and sort answered`);
   } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
 }
 
@@ -1060,6 +1133,9 @@ async function screenshot() {
 (async () => {
   const r = await pv.call('ready');
   st.version = r.version; st.url = r.url; st.setup = r.setup || {}; st.nativeAsk = !!r.nativeAsk;
+  st.native = r.native || {};
+  document.body.classList.toggle('nmenus', !!st.native.menus);
+  document.body.classList.toggle('nstatus', !!st.native.status);
   if (r.theme) theme.choice = r.theme;
   if (r.standalone) {
     // a message window: only the reading pane, with its own short menu
@@ -1067,11 +1143,13 @@ async function screenshot() {
     document.body.classList.add('single');
     menus = MENUS_SINGLE;
     buildMenus();
+    syncMenus();
     await applyTheme();
     showMessage(await pv.call('msg', st.single));
     if (r.selftest) pv.call('selftest', 'win', st.msg && $('#mailframe').srcdoc === st.msg.html ? st.msg.nid : '');
     return;
   }
+  syncMenus();
   await applyTheme();
   $('#ver').textContent = 'v' + r.version;
   if (r.selftest && (!r.opened || r.opened.error)) return selftest(r);

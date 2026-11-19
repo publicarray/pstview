@@ -4,7 +4,9 @@
 //! (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux). This file is the model behind
 //! that page: it opens the source read-only, answers the page's requests with JSON and runs
 //! exports and reports. The platform shells (gui_win.zig, gui_mac.zig, gui_gtk.zig) provide the
-//! windows, the web views and the dialogs.
+//! windows, the web views and the dialogs, and may draw the page's menus, status bar and
+//! message dialogs natively (Shell.setMenus and the fields after it); the page draws what a
+//! shell leaves out.
 //!
 //! Window 0 is the main window. A message opened on its own (double-click, Enter) gets a further
 //! window showing the same page, which then shows only that message.
@@ -65,10 +67,38 @@ pub const Shell = struct {
     /// Write a picture of the main window's page to `path` (PNG), then quit. Only where the web
     /// view can do that; it is how docs/screenshot.png is made.
     snapshot: ?*const fn (path: []const u8) void = null,
+
+    // Native chrome. Each one the shell provides replaces the page's own drawing of it; where it
+    // is null the page draws it (menu bar, context menu, status bar, dialogs). What the menus
+    // contain is always the page's (webui.html); the shell only shows it.
+
+    /// The menu bar of window `win`, as the page has it now (labels, enabled, checked). Called
+    /// whenever that changes. A chosen item: `menuAction(win, item.action)`.
+    setMenus: ?*const fn (win: u32, menus: []const Menu) void = null,
+    /// A context menu at (x, y) in page coordinates of window `win`; returns at once.
+    popup: ?*const fn (win: u32, x: f64, y: f64, items: []const ?MenuItem) void = null,
+    /// Status bar text of window `win`.
+    setStatus: ?*const fn (win: u32, text: []const u8) void = null,
+    /// A message with an OK button, over window `win`; returns when it is closed.
+    alert: ?*const fn (a: Allocator, win: u32, title: []const u8, text: []const u8) void = null,
+    /// A multi-line text to type or paste; null when cancelled.
+    input: ?*const fn (a: Allocator, win: u32, title: []const u8, prompt: []const u8, ok: []const u8) ?[]const u8 = null,
+    /// Help > About.
+    about: ?*const fn (a: Allocator, win: u32, info: About) void = null,
+    /// "system", "light" or "dark" was chosen in View: the native chrome follows it ("system":
+    /// the desktop's setting again). setDark still follows with what the page then shows.
+    setTheme: ?*const fn (choice: []const u8) void = null,
 };
 
+/// A menu item as the page defines it. `action` is a page command name (letters and "-").
+pub const MenuItem = struct { label: []const u8, action: []const u8, enabled: bool = true, key: []const u8 = "", checked: ?bool = null };
+/// A menu of the menu bar; null items are separators.
+pub const Menu = struct { label: []const u8, items: []const ?MenuItem };
+pub const About = struct { version: []const u8, comments: []const u8, url: []const u8 };
+
 pub const Choice = struct { label: []const u8, note: []const u8 };
-pub const Ask = struct { title: []const u8, text: []const u8, choices: []const Choice, verification: []const u8 = "" };
+/// `win`: the window the question is about (its parent).
+pub const Ask = struct { title: []const u8, text: []const u8, choices: []const Choice, verification: []const u8 = "", win: u32 = 0 };
 /// `choice`: index into `choices`, null when cancelled; `verified`: the check box.
 pub const Answer = struct { choice: ?usize, verified: bool };
 
@@ -140,6 +170,8 @@ const App = struct {
     progress_pct: u64 = std.math.maxInt(u64),
     /// Self-test: a request arrived while another was being answered (the page ran meanwhile).
     saw_reentry: bool = false,
+    /// Self-test: how often the page has handed its menus to a native menu bar.
+    menus_set: usize = 0,
 };
 
 const MsgWin = struct { win: u32, nid: u32 };
@@ -227,8 +259,11 @@ fn progress(label: []const u8, done: u64, total: u64) void {
     if (n == app.progress_pct and label.ptr == app.progress_label.ptr) return;
     app.progress_pct = n;
     app.progress_label = label;
-    var buf: [200]u8 = undefined;
-    app.shell.eval(0, std.fmt.bufPrint(&buf, "pv.progress(\"{s} {d}{s}\")", .{ label, n, if (total > 0) "%" else "" }) catch return);
+    var buf: [400]u8 = undefined;
+    const text = std.fmt.bufPrint(buf[200..], "{s} {d}{s}", .{ label, n, if (total > 0) "%" else "" }) catch return;
+    // a native status bar is set here: the page's request for it would wait for this one
+    if (app.shell.setStatus) |set| set(0, text);
+    app.shell.eval(0, std.fmt.bufPrint(buf[0..200], "pv.progress(\"{s}\")", .{text}) catch return);
     app.shell.pump();
 }
 
@@ -361,6 +396,32 @@ fn handle(win: u32, text: []const u8) void {
     app.shell.eval(win, out.items);
 }
 
+// ================================================================ native menus
+
+/// The page's menus as it sends them (short keys keep the request small).
+const ItemJson = struct { l: []const u8, a: []const u8, e: bool = true, k: []const u8 = "", c: ?bool = null };
+const MenuJson = struct { l: []const u8, i: []const ?ItemJson };
+
+/// A page command name: what a menu item may carry, and all that goes back into the page.
+fn isAction(s: []const u8) bool {
+    if (s.len == 0 or s.len > 40) return false;
+    for (s) |c| if (!std.ascii.isLower(c) and c != '-') return false;
+    return true;
+}
+
+fn menuItems(a: Allocator, items: []const ?ItemJson) Error![]const ?MenuItem {
+    const list = try a.alloc(?MenuItem, items.len);
+    for (items, list) |it, *l| l.* = if (it) |i| (if (isAction(i.a)) MenuItem{ .label = i.l, .action = i.a, .enabled = i.e, .key = i.k, .checked = i.c } else null) else null;
+    return list;
+}
+
+/// A native menu item was chosen in window `win`: the page runs it as if its own menu had.
+pub fn menuAction(win: u32, action: []const u8) void {
+    if (!isAction(action)) return;
+    var buf: [80]u8 = undefined;
+    app.shell.eval(win, std.fmt.bufPrint(&buf, "pv.act(\"{s}\")", .{action}) catch return);
+}
+
 fn argAt(rest: []const u8, n: usize) []const u8 {
     var it = std.mem.splitScalar(u8, rest, 0x1f);
     var i: usize = 0;
@@ -410,7 +471,44 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         for ([_][]const u8{ "system", "light", "dark" }) |c| if (eq(u8, argAt(rest, 1), c)) {
             app.theme_choice = c;
         };
+        if (app.shell.setTheme) |set| set(app.theme_choice);
         app.shell.setDark(app.dark);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "menus")) {
+        const set = app.shell.setMenus orelse return out.appendSlice(a, "{}");
+        const menus = std.json.parseFromSliceLeaky([]const MenuJson, a, rest, .{ .ignore_unknown_fields = true }) catch return failure(a, out, "bad menus", .{});
+        const list = try a.alloc(Menu, menus.len);
+        for (menus, list) |m, *l| l.* = .{ .label = m.l, .items = try menuItems(a, m.i) };
+        set(app.cur_win, list);
+        app.menus_set += 1;
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "popup")) {
+        const show = app.shell.popup orelse return out.appendSlice(a, "{}");
+        const items = std.json.parseFromSliceLeaky([]const ?ItemJson, a, argAt(rest, 2), .{ .ignore_unknown_fields = true }) catch return failure(a, out, "bad menu", .{});
+        const x = std.fmt.parseFloat(f64, argAt(rest, 0)) catch 0;
+        const y = std.fmt.parseFloat(f64, argAt(rest, 1)) catch 0;
+        show(app.cur_win, x, y, try menuItems(a, items));
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "status")) {
+        if (app.shell.setStatus) |set| set(app.cur_win, rest);
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "alert")) {
+        if (app.shell.alert) |show| show(a, app.cur_win, argAt(rest, 0), argAt(rest, 1));
+        return out.appendSlice(a, "{}");
+    }
+    if (eq(u8, cmd, "input")) {
+        const ask = app.shell.input orelse return failure(a, out, "No native dialogs here.", .{});
+        const text = ask(a, app.cur_win, argAt(rest, 0), argAt(rest, 1), argAt(rest, 2)) orelse return out.appendSlice(a, "{\"cancelled\":true}");
+        try out.append(a, '{');
+        try kv(a, out, true, "text", text);
+        return out.append(a, '}');
+    }
+    if (eq(u8, cmd, "about")) {
+        if (app.shell.about) |show| show(a, app.cur_win, .{ .version = build_options.version, .comments = rest, .url = project_url });
         return out.appendSlice(a, "{}");
     }
     if (eq(u8, cmd, "closewin")) {
@@ -433,7 +531,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         var i: usize = 3;
         while (argAt(rest, i).len > 0) : (i += 2) try choices.append(a, .{ .label = argAt(rest, i), .note = argAt(rest, i + 1) });
         // null: the native dialog could not be shown, and the page asks itself
-        const r = ask(a, .{ .title = argAt(rest, 0), .text = argAt(rest, 1), .verification = argAt(rest, 2), .choices = choices.items }) orelse return out.appendSlice(a, "{\"fallback\":true}");
+        const r = ask(a, .{ .title = argAt(rest, 0), .text = argAt(rest, 1), .verification = argAt(rest, 2), .choices = choices.items, .win = app.cur_win }) orelse return out.appendSlice(a, "{\"fallback\":true}");
         return out.print(a, "{{\"choice\":{d},\"verified\":{}}}", .{ if (r.choice) |c| @as(i64, @intCast(c)) else -1, r.verified });
     }
     if (eq(u8, cmd, "install") or eq(u8, cmd, "uninstall") or eq(u8, cmd, "defaults")) {
@@ -459,7 +557,7 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         if (app.cur_win != 0) app.shell.closeWindow(app.cur_win);
         return out.appendSlice(a, "{}");
     }
-    if (eq(u8, cmd, "selfwin")) return out.print(a, "{{\"ok\":{},\"open\":{d},\"live\":{}}}", .{ app.selftest_win, app.msg_wins.items.len, app.saw_reentry });
+    if (eq(u8, cmd, "selfwin")) return out.print(a, "{{\"ok\":{},\"open\":{d},\"live\":{},\"menus\":{d}}}", .{ app.selftest_win, app.msg_wins.items.len, app.saw_reentry, app.menus_set });
     if (eq(u8, cmd, "selftest")) {
         const ok = eq(u8, argAt(rest, 0), "ok");
         std.debug.print("pstview selftest {s}: {s}\n", .{ if (ok) "passed" else "FAILED", argAt(rest, 1) });
@@ -547,7 +645,12 @@ fn ready(a: Allocator, out: *List) Error!void {
     try kv(a, out, false, "os", if (builtin.os.tag == .windows) "windows" else if (builtin.os.tag.isDarwin()) "macos" else "linux");
     try kv(a, out, false, "url", project_url);
     try kv(a, out, false, "theme", app.theme_choice);
-    try out.print(a, ",\"nativeAsk\":{}", .{app.shell.ask != null});
+    try out.print(a, ",\"nativeAsk\":{},\"native\":{{\"menus\":{},\"status\":{},\"dialogs\":{}}}", .{
+        app.shell.ask != null,
+        app.shell.setMenus != null and app.shell.popup != null,
+        app.shell.setStatus != null,
+        app.shell.alert != null and app.shell.input != null and app.shell.about != null,
+    });
     if (app.cur_win != 0) {
         // a message window: the page shows this one message
         for (app.msg_wins.items) |mw| if (mw.win == app.cur_win) {

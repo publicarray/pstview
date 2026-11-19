@@ -19,7 +19,7 @@ jobs:
           # pstview.exe (Win32 window + WebView2) + pstx.exe
           - os: windows-latest
             platform: windows
-          # pstx static (musl), so it runs on any distribution; pstview (GTK + WebKitGTK, loaded
+          # pstx static (musl), so it runs on any distribution; pstview (GTK 4 + WebKitGTK 6.0, loaded
           # at run time) against glibc
           - os: ubuntu-latest
             platform: linux
@@ -78,15 +78,17 @@ jobs:
           "$HOME/.local/bin/pstview" --uninstall
           test ! -e "$HOME/.local/bin/pstview" -a ! -e "$HOME/.local/share/applications/pstview.desktop"
 
-      - name: GUI self-test (Linux, GTK + WebKitGTK under Xvfb)
+      - name: GUI self-test (Linux, GTK 4 + WebKitGTK 6.0 under Xvfb)
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-0 libwebkit2gtk-4.1-0 xvfb xauth
+          sudo apt-get install -y --no-install-recommends libgtk-4-1 libwebkitgtk-6.0-4 xvfb xauth
           # WebKit starts its web process in a bubblewrap sandbox, which needs unprivileged user
           # namespaces; Ubuntu 24.04 runners restrict them by default
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/demo-mailbox
+          # the page's own menus, status bar and dialogs, as Windows and macOS show them
+          PSTVIEW_NATIVE=0 timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/demo-mailbox
 
       - name: GUI self-test (macOS, Cocoa + WKWebView)
         if: matrix.platform == 'macos'
