@@ -419,7 +419,11 @@ if (inBrowser) {
   const link = document.createElement('link');
   link.rel = 'manifest';
   link.href = 'manifest.webmanifest';
-  document.head.append(link);
+  const icon = document.createElement('link');
+  icon.rel = 'icon';
+  icon.type = 'image/png';
+  icon.href = 'icon-192.png';
+  document.head.append(link, icon);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   // files opened with the installed app (its manifest's file handlers)
   if (window.launchQueue) launchQueue.setConsumer(async params => {
