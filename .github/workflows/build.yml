@@ -244,13 +244,17 @@ jobs:
           name: pstview-web
           path: dist/*
       - uses: actions/upload-pages-artifact@v3
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         with:
           path: zig-out/web
 
-  # The web version of a release on GitHub Pages (Settings > Pages > Source: GitHub Actions).
+  # The web version on GitHub Pages (Settings > Pages > Source: GitHub Actions): with each release,
+  # and from main by running the workflow by hand (Actions > Build > Run workflow), no release needed.
   pages:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() && needs.web.result == 'success' &&
+      ((startsWith(github.ref, 'refs/tags/v') && needs.release.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     needs: [web, release]
     runs-on: ubuntu-latest
     permissions:
