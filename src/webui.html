@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-src about:; worker-src 'self'; manifest-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: 'self'; frame-src about:; worker-src 'self'; manifest-src 'self'">
 <title>pstview</title>
 <script>/* the theme before anything is painted: no light flash in a dark session */
 document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';</script>
@@ -738,7 +738,20 @@ function clearReader() {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
   $('#hint').classList.remove('hidden');
   $('#hint').textContent = st.count ? 'Select a message to read it.' : '';
-  $('#mailframe').srcdoc = '';
+  setMail('');
+}
+
+/**
+ * Show a document in the reading pane: a new sandboxed frame each time, its srcdoc set before it
+ * is in the page. Reassigning srcdoc of the frame there could leave it on about:blank (Brave).
+ */
+function setMail(html) {
+  const f = document.createElement('iframe');
+  f.id = 'mailframe';
+  f.setAttribute('sandbox', '');
+  f.title = 'Message';
+  f.srcdoc = html;
+  $('#mailframe').replaceWith(f);
 }
 
 function showTab(name) {
@@ -759,9 +772,9 @@ async function loadMessage(r) {
 function showMessage(m) {
   $('#hint').classList.add('hidden');
   $('#tabs').classList.remove('hidden');
-  if (m.error) { st.msg = null; $('#mailframe').srcdoc = textDoc(m.error); showTab('mail'); return; }
+  if (m.error) { st.msg = null; setMail(textDoc(m.error)); showTab('mail'); return; }
   st.msg = m;
-  $('#mailframe').srcdoc = m.html;
+  setMail(m.html);
   $('#tab-analysis pre').innerHTML = analysisHtml(m.analysis);
   if (m.headers) $('#tab-headers pre').innerHTML = headersHtml(m.headers);
   else $('#tab-headers pre').textContent = 'This item has no internet headers (internal or sent item).';
@@ -1174,10 +1187,9 @@ async function selftest(r) {
     if (!first || first.length !== 10) throw 'bad row data';
     if (!document.querySelector('.row')) throw 'no rows rendered';
     focusRow(0);
-    const frame = $('#mailframe');
     await new Promise((ok, no) => {
       const t0 = Date.now(), poll = setInterval(() => {
-        if (st.msg && frame.srcdoc === st.msg.html) { clearInterval(poll); ok(); }
+        if (st.msg && $('#mailframe').srcdoc === st.msg.html) { clearInterval(poll); ok(); }
         else if (Date.now() - t0 > 15000) { clearInterval(poll); no('message did not load'); }
       }, 50);
     });
@@ -1185,7 +1197,7 @@ async function selftest(r) {
     if (/color-scheme:light dark/.test(st.msg.html)) throw 'message document was not themed';
     await new Promise(ok => setTimeout(ok, 400));
     let scripted = true;
-    try { scripted = !!frame.contentWindow.eval; } catch (e) { scripted = false; }
+    try { scripted = !!$('#mailframe').contentWindow.eval; } catch (e) { scripted = false; }
     if (scripted) throw 'message frame is not sandboxed';
     // colouring adds markup around the text and never changes or interprets it
     if ($('#tab-analysis pre').textContent !== st.msg.analysis.replace(/\r/g, '')) throw 'analysis text altered by colouring';
