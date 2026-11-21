@@ -4,75 +4,45 @@
 
 A small, read-only viewer and exporter for Outlook `.pst` / `.ost` files and MBOX mailboxes, with offline header analysis and recovery of deleted items. Written in Zig with no third-party dependencies; the GUI and the command-line tool run on Windows, macOS and Linux.
 
-Built for evidence work: sources are opened **read-only** and never written to, and nothing (no index or cache file) is created next to them. Outlook, by contrast, modifies a data file as soon as it opens one, and locks its OSTs while running: close Outlook or work on a copy.
+Sources are opened **read-only**: nothing is written to them or created next to them. (Outlook changes a data file as soon as it opens it, so close Outlook or work on a copy.)
 
 ![pstview with the demo mailbox open: folder tree, message list and a phishing example flagged by the header analysis](docs/screenshot.png)
 
-*The fictional demo mailbox in [`testdata/demo-mailbox`](testdata/demo-mailbox); all names, domains and addresses are made up.*
+*The fictional demo mailbox in [`testdata/demo-mailbox`](testdata/demo-mailbox).*
 
-## Programs
+## Download
 
-| Program | What it is |
-|---|---|
-| `pstview` (`pstview.exe`, `pstview.app`) | GUI, the same on every platform: folder tree, sortable / searchable message list, and a reading pane with tabs (*Message*, *Header analysis*, *Internet headers*, *Attachments*). Double-click or Enter opens a message in its own window. Open a source with *File > Open*, by dropping it on the window, from the command line, or with *Open with*. |
-| `pstx` (`pstx.exe`) | Command line, for reading and reporting: `tree`, `list`, `show`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. It does not export. |
+From [Releases](https://github.com/publicarray/pstview/releases): archives for Windows, macOS and Linux, plus an AppImage and a Flatpak. Each holds two programs:
 
-Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`. Linux also gets:
+* **`pstview`:** the app: folder tree, message list, reading pane with header analysis and attachments.
+* **`pstx`:** a command-line tool for reading and reporting (`tree`, `list`, `show`, `search`, `triage`, `headers`, `props`, `hash`, `verify`, `hidden`, `recover`, `analyse`). It does not export.
 
-* **AppImage** (`x86_64`, `aarch64`): one file, `chmod +x` and run; `pstview-….AppImage pstx tree a.pst` runs the command-line tool. It uses the system's GTK 4 and WebKitGTK 6.0, like the archive.
-* **Flatpak** (`x86_64`): `flatpak install --user pstview-…-x86_64.flatpak` (fetches the GNOME runtime from Flathub, so GTK and WebKitGTK need not be installed). It has no network and no file access of its own: mailboxes are opened and exports saved through the file chooser, by dropping files, or with *Open with*; Help > Install does not apply. For pstx on files outside that: `flatpak run --filesystem=home:ro --command=pstx io.github.publicarray.pstview tree ~/a.pst`.
+Or use it **in the browser** at https://publicarray.github.io/pstview/: the mailbox is read on your computer and never uploaded, and *Help > Install* adds it as an offline app.
 
-**In the web browser.** The same program also runs as a web page, built to WebAssembly: at https://publicarray.github.io/pstview/ (published with each release), or self-hosted from the release's `web.zip` (any static web server; files must be served over HTTPS or from localhost). The mailbox is read on your computer, in place and never uploaded; exports become downloads (several files: one .zip). *Help > Install pstview as an app* installs it like a desktop program where the browser can (Chrome, Edge, Safari) and it then works offline and opens mailbox files from the file manager. Message windows are not available there (*Enlarge* instead).
+**Requirements:**
 
-**Requirements.** `pstx` needs nothing. The GUI shows its content in the web view that is part of the operating system, so there is no bundled browser engine:
+* **Windows:** the WebView2 runtime (built into Windows 11 and current Windows 10).
+* **macOS:** 11 or later. The app is not notarised: run `xattr -dr com.apple.quarantine pstview.app pstx` after unpacking.
+* **Linux:** GTK 4.12+ and WebKitGTK 6.0 (`libgtk-4-1 libwebkitgtk-6.0-4` on Debian / Ubuntu, `gtk4 webkitgtk6.0` on Fedora, `gtk4 webkitgtk-6.0` on Arch). The Flatpak brings its own.
 
-* **Windows:** the WebView2 runtime (part of Windows 11 and of up-to-date Windows 10).
-* **macOS:** 11 or later. The app is ad-hoc signed, not notarised: after unpacking run `xattr -dr com.apple.quarantine pstview.app pstx`, or allow it in *System Settings > Privacy & Security*.
-* **Linux:** GTK 4.12 or later and WebKitGTK 6.0, which current desktops have (`libgtk-4-1 libwebkitgtk-6.0-4` on Debian 13 / Ubuntu 24.04, `gtk4 webkitgtk6.0` on Fedora, `gtk4 webkitgtk-6.0` on Arch). Menus, status bar and dialogs are native GTK; the web view shows the mailbox and the messages.
-
-pstview warns when its web view is missing.
-
-## Portable or installed
-
-pstview runs from the release archive. *Help > Install pstview for this user* installs it, *Help > Uninstall pstview* removes itself. No administrator or root rights are needed.
-
-* **Windows:** `%LOCALAPPDATA%\Programs\pstview`, a Start menu shortcut, *Open with* handlers for `.pst`, `.ost`, `.mbox`, `.mbx`, and an entry in *Settings > Apps*; everything per user under `HKCU`. A portable copy offers to install when it starts; *Don't offer this again* stores only that choice.
-* **Linux:** `~/.local/bin`, plus a menu entry, the icon and a file type for `.pst` / `.ost` under `~/.local/share`. Also `pstview --install` and `pstview --uninstall`.
-* **macOS:** a copy of `pstview.app` in `~/Applications`. The default app is chosen in Finder (*Get Info > Open with > Change All*).
+pstview runs straight from the archive; *Help > Install pstview* installs it for the current user (no admin rights) and *Help > Uninstall* removes it.
 
 ## Safe viewing
 
-* The HTML is sanitised: scripts, frames, forms, event handlers and `javascript:` URLs are removed.
-* Remote images and CSS are replaced and counted, so no tracking pixel is fetched; `cid:` images are embedded from the attachments.
-* A Content-Security-Policy forbids scripts and network access, and the message sits in a sandboxed frame where no script runs.
-* The mail's own CSS is confined to the mail, so a message can neither restyle nor cover the header block above it.
-* Every navigation and new window is refused (a link in a message leads nowhere), and the web view keeps no profile.
-* Attachments are never opened. Text and PNG / JPEG / GIF / BMP / WebP images can be viewed in place; anything else can only be saved.
-
-pstview follows the system's light or dark setting, and *View > Theme* switches it for the session. HTML mail is always laid out on white, as emails are not usually desiged for dark backgrounds.
+Messages are shown with scripts, network access and remote images blocked, so nothing runs and no tracking pixel loads. Links lead nowhere, and attachments are never opened: text and images can be previewed, anything else only saved.
 
 ## Header analysis
 
-A message-header analyser, built in and **fully offline**: no DNS, reputation or geo-IP lookups. Use the *Header analysis* tab, *Message > Header analysis report* (Ctrl+I) for the full report, or *Tools > Analyse pasted headers / headers from .eml or .txt file* for headers copied from anywhere. The report shows:
+A built-in, fully **offline** analysis of a message's headers (the *Header analysis* tab, or Ctrl+I for the full report): spoofing and lookalike domains, SPF / DKIM / DMARC results, the delivery path with delays, spam-filter verdicts, and every IP, domain and address found. *Tools > Analyse headers in this folder* (Ctrl+R) ranks a whole folder by risk; headers pasted from anywhere can be analysed too.
 
-* **Verdict and findings:** spoofing, impersonation of internal users, lookalike domains, Reply-To diversion, failed authentication, phishing / spam verdicts of the receiving service, delays and clock skew.
-* **Authentication:** SPF, DKIM and DMARC as recorded on first arrival in the receiving organisation (mail gateways re-inject mail, and later re-checks fail by design), SPF and DKIM alignment with the From domain, pstview's own DMARC evaluation, and every authentication result, DKIM signature and ARC chain.
-* **Delivery path:** every hop with host, IP, protocol, TLS version, per-hop delay, and negative delays flagged as clock skew.
-* **Filtering:** anti-spam and filtering headers of the common mail services and gateways, decoded and explained.
-* **Indicators:** all IP addresses, hosts, domains, e-mail addresses and URLs in the headers, with the header each came from.
+## Hidden and deleted items
 
-*Tools > Analyse headers in this folder* (Ctrl+R) runs the triage part over a whole folder and sorts by risk.
+* **Hidden items** (shown automatically, `pstx hidden`): messages no folder lists, rules and views, unreachable folders.
+* **Recover deleted items** (*Tools* menu, `pstx recover`): deleted items and earlier versions that still sit in the file, recovered only when their data passes its checksums. The method follows libpff's `pffrecover`.
 
-## Hidden, deleted and recovered items
+## Several PST files as one
 
-* **Hidden-item scan** (automatic, *[Hidden items]* branch, `pstx hidden`): messages that no folder lists, folder-associated items such as rules and views, and folders not reachable from the tree.
-* **Recover deleted items** (*Tools > Recover deleted items*, `pstx recover`): Outlook writes changed index pages elsewhere and frees the old ones, which usually stay in the file. pstview finds the valid stale pages and recovers what they list: items **no longer indexed** (deleted or moved) and **earlier versions** of existing items. An item is recovered only when its data blocks still pass their checksums. Each item's *Note* names the stale page and the folder it was in. The approach follows libpff's `pffrecover` (*Personal Folder File forensics*, J. Metz).
-* **Server-side deletions:** a *Recoverable Items* folder (present in eDiscovery and server exports) is labelled in the tree.
-* **Thunderbird:** messages flagged as deleted but not yet compacted are listed and marked.
-
-## Multi-file PST sets
-
-Open several PST / OST files together (multi-select in *File > Open*, drop them on the window, open their folder, or `pstx ... "a.pst;b.pst"`) and they are shown as **one mailbox**. Same-path folders are combined, each item's *Note* names its part, and items found in more than one part are flagged as duplicates, not hidden. Every part stays a separate read-only file: verification, the integrity log and SHA-256 hashes are reported per part.
+Open several PST / OST parts together (multi-select, drop, or open their folder) and they are shown as one mailbox, with duplicates flagged. Each part stays a separate read-only file.
 
 ## Convert to PST
 
