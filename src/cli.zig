@@ -3,16 +3,15 @@
 //!   pstx tree   <pst|ost>
 //!   pstx list   <pst|ost> <folder path | 0xNID>
 //!   pstx show   <pst|ost> <message nid (hex)> [--html out.html]   --html: the sanitised safe view as a page
-//!   pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
 //!   pstx hash   <pst|ost>
 //!
-//! Dates for --modified are in this computer's local time zone.
+//! pstx reads and reports; it does not export. It cannot write .msg, .eml, .pst or attachment
+//! files (the export code is not part of it); those exports are made in pstview, where each one
+//! asks where to save.
 
 const std = @import("std");
 const Io = std.Io;
 const pst = @import("pst.zig");
-const exp = @import("export.zig");
-const pstwrite = @import("pstwrite.zig");
 const platform = @import("platform.zig");
 const search = @import("search.zig");
 const headers = @import("headers.zig");
@@ -70,8 +69,6 @@ fn run(init: std.process.Init) !void {
             \\  pstx tree   <pst|ost>
             \\  pstx list   <pst|ost> <folder path | 0xNID>
             \\  pstx show   <pst|ost> <message nid (hex)> [--html out.html]   --html: the sanitised safe view as a page
-            \\  pstx export <pst|ost> <folder path | 0xNID> <out dir> [msg|eml] [--modified YYYY-MM-DD] [--match text]
-            \\  pstx topst  <source> <out.pst>   the whole mailbox as a new PST (converts OST / MBOX), with a report
             \\  pstx hash   <pst|ost>
             \\  pstx hidden <pst|ost>      orphaned messages/folders and hidden (FAI) items
             \\  pstx recover <pst|ost>     deleted items and earlier versions recovered from stale index pages
@@ -82,10 +79,14 @@ fn run(init: std.process.Init) !void {
             \\  pstx props   <pst|ost> <message nid> [--html out.html]      every MAPI property (incl. named) of one item
             \\  pstx analyse <message.eml | headers.txt> [--html out.html]  analyse headers without a mailbox
             \\
+            \\Exports (.msg, .eml, attachments, PST) are made in pstview, which asks where to save each one.
+            \\
         );
         return;
     }
     const cmd = args[1];
+    if (std.mem.eql(u8, cmd, "export") or std.mem.eql(u8, cmd, "topst"))
+        return fail(out, "pstx does not export. Use pstview: File > Export ... asks where to save.\n", .{});
     if (std.mem.eql(u8, cmd, "analyse") or std.mem.eql(u8, cmd, "analyze")) return analyseFileCmd(arena, io, out, args);
     const f = Store.open(gpa, io, args[2]) catch |e| {
         return fail(out, "cannot open {s}: {s}\n", .{ args[2], store.openErrorText(e) });
@@ -206,10 +207,6 @@ fn run(init: std.process.Init) !void {
             const h = try Store.sha256File(gpa, io, sf.path);
             try out.print("{s}  {s}  ({d} bytes)\n", .{ &h, sf.path, sf.size });
         }
-    } else if (std.mem.eql(u8, cmd, "export")) {
-        try exportCmd(arena, io, out, f, args);
-    } else if (std.mem.eql(u8, cmd, "topst")) {
-        try toPstCmd(arena, gpa, io, out, f, args);
     } else if (std.mem.eql(u8, cmd, "show")) {
         if (args.len < 4) return fail(out, "usage: pstx show <pst|ost> <nid hex> [--html out.html]\n", .{});
         const nid = try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, args[3], "0x")) args[3][2..] else args[3], 16);
@@ -355,156 +352,10 @@ pub fn resolveFolder(a: std.mem.Allocator, f: Store, path: []const u8) !?u32 {
     return findFolder(a, f, path);
 }
 
-/// SHA-256 of the source: one hash, or "path: hash" per file for multi-file sources.
-fn sourceHash(a: std.mem.Allocator, gpa: std.mem.Allocator, io: Io, f: Store, path: []const u8) ![]const u8 {
-    const files = try f.sourceFiles(a, path);
-    if (files.len == 1) return try a.dupe(u8, &(try Store.sha256File(gpa, io, files[0].path)));
-    var out: std.ArrayList(u8) = .empty;
-    for (files) |sf| try out.print(a, "{s}: {s}; ", .{ sf.path, &(try Store.sha256File(gpa, io, sf.path)) });
-    return out.items;
-}
-
 fn writeOut(io: Io, path: []const u8, data: []const u8) !void {
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
     try file.writeStreamingAll(io, data);
-}
-
-fn exportCmd(a: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []const [:0]const u8) !void {
-    if (args.len < 5) return fail(out, "usage: pstx export <source> <folder|0xNID> <outdir> [msg|eml] [--modified YYYY-MM-DD] [--match text]\n", .{});
-    const folder = (try resolveFolder(a, f, args[3])) orelse return fail(out, "folder not found: {s}\n", .{args[3]});
-    const dir = args[4];
-    var kind: []const u8 = "msg";
-    var modified: ?[]const u8 = null;
-    var match: ?[]const u8 = null;
-    var i: usize = 5;
-    while (i < args.len) : (i += 1) {
-        const v = args[i];
-        if (std.mem.eql(u8, v, "--modified") and i + 1 < args.len) {
-            i += 1;
-            modified = args[i];
-        } else if (std.mem.eql(u8, v, "--match") and i + 1 < args.len) {
-            i += 1;
-            match = args[i];
-        } else kind = v;
-    }
-    const is_msg = std.mem.eql(u8, kind, "msg");
-    try Io.Dir.cwd().createDirPath(io, dir);
-    const msgs = try f.folderMessages(a, folder);
-    var rows: std.ArrayList(exp.ReportRow) = .empty;
-    var n: usize = 0;
-    var failed: usize = 0;
-    var tb: [64]u8 = undefined;
-    for (msgs) |s| {
-        if (modified) |d| {
-            const t = s.modified_time orelse continue;
-            const loc = pst.fmtTime(&tb, t, platform.localOffset(t));
-            if (!std.mem.startsWith(u8, loc, d)) continue;
-        }
-        if (match) |q| if (std.ascii.findIgnoreCase(s.subject, q) == null) continue;
-        n += 1;
-        var ia_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer ia_state.deinit();
-        const ia = ia_state.allocator();
-        var m = f.loadMessage(ia, s.nid) catch |e| {
-            try out.print("  FAILED load 0x{x}: {s}\n", .{ s.nid, @errorName(e) });
-            failed += 1;
-            continue;
-        };
-        const t = s.delivery_time orelse s.submit_time orelse s.modified_time;
-        const loc = pst.fmtTime(&tb, t, if (t) |tv| platform.localOffset(tv) else 0);
-        var pfx_buf: [64]u8 = undefined;
-        const pfx = try std.fmt.bufPrint(&pfx_buf, "{d:0>3} {s}", .{ n, if (loc.len >= 16) loc[0..16] else loc });
-        for (pfx) |*c| if (c.* == ':') {
-            c.* = '-';
-        };
-        const name = try exp.safeName(a, pfx, s.subject, if (is_msg) "msg" else "eml");
-        // .eml from an MBOX is the original message, byte for byte
-        // one damaged item must not end the export of the rest: it is reported and counted
-        const raw: ?[]const u8 = if (is_msg) null else f.rawMessage(ia, s.nid) catch null;
-        const built = if (is_msg) exp.buildMsg(ia, &m) else if (raw) |r| r else exp.buildEml(ia, &m, 0);
-        const data = built catch |e| {
-            if (e == error.OutOfMemory) return e;
-            try out.print("  FAILED build 0x{x}: {s}\n", .{ s.nid, @errorName(e) });
-            failed += 1;
-            continue;
-        };
-        writeOut(io, try std.fs.path.join(ia, &.{ dir, name }), data) catch |e| {
-            try out.print("  FAILED write 0x{x} {s}: {s}\n", .{ s.nid, name, @errorName(e) });
-            failed += 1;
-            continue;
-        };
-        var al: std.ArrayList(u8) = .empty;
-        for (m.attachments, 0..) |att, k| {
-            if (k > 0) try al.appendSlice(a, "; ");
-            try al.appendSlice(a, if (att.filename.len > 0) att.filename else "(embedded item)");
-        }
-        try rows.append(a, .{
-            .folder = args[3],
-            .nid = s.nid,
-            .received = s.delivery_time,
-            .sent = s.submit_time,
-            .modified = s.modified_time,
-            .from = s.from,
-            .to = s.to,
-            .cc = s.cc,
-            .subject = s.subject,
-            .class = s.message_class,
-            .size = s.size,
-            .attachments = al.items,
-            .export_file = name,
-        });
-        try out.print("  {s}  ({d} bytes)\n", .{ name, data.len });
-    }
-    const now = Io.Clock.real.now(io).toSeconds();
-    var fmt_buf: [128]u8 = undefined;
-    const meta: exp.ReportMeta = .{
-        .pst_path = args[2],
-        .pst_size = f.totalSize(),
-        .format = f.describe(&fmt_buf),
-        .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
-        .generated_utc = now,
-        .tz_label = "local time, daylight saving applied for each date",
-        .tz_offset = platform.localOffset(now),
-        .offset_at = &platform.localOffset,
-        .title = try std.fmt.allocPrint(a, "Export report - {s}", .{args[3]}),
-    };
-    try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.csv" }), try exp.reportCsv(a, rows.items, meta));
-    try writeOut(io, try std.fs.path.join(a, &.{ dir, "pstview report.html" }), try exp.reportHtml(a, rows.items, meta));
-    try out.print("-- exported {d} items to {s}\n", .{ rows.items.len, dir });
-    if (failed > 0) return fail(out, "-- {d} item(s) could NOT be exported (listed above)\n", .{failed});
-}
-
-/// `pstx topst <source> <out.pst>`: the whole mailbox as a new PST, plus the HTML / CSV report.
-fn toPstCmd(a: std.mem.Allocator, gpa: std.mem.Allocator, io: Io, out: *Io.Writer, f: Store, args: []const [:0]const u8) !void {
-    if (args.len < 4) return fail(out, "usage: pstx topst <source> <out.pst>\n", .{});
-    const target = args[3];
-    pstwrite.checkTarget(a, io, f, args[2], target) catch |e| return fail(out, "{s}\n", .{pstwrite.targetErrorText(e)});
-    const stats = pstwrite.exportStore(gpa, io, f, target, .{
-        .display_name = std.fs.path.stem(std.fs.path.basename(args[2])),
-        .uid_seed = args[2],
-    }, a) catch |e| return fail(out, "PST export failed: {s}\n", .{@errorName(e)});
-    for (stats.items) |it| if (!it.ok) try out.print("  FAILED 0x{x} {s}: {s}\n", .{ it.nid, it.folder, it.summary.subject });
-    const out_hash = try Store.sha256File(gpa, io, target);
-    const now = Io.Clock.real.now(io).toSeconds();
-    var fmt_buf: [128]u8 = undefined;
-    const meta: exp.ReportMeta = .{
-        .pst_path = args[2],
-        .pst_size = f.totalSize(),
-        .format = f.describe(&fmt_buf),
-        .sha256_hex = try sourceHash(a, std.heap.page_allocator, io, f, args[2]),
-        .generated_utc = now,
-        .tz_label = "local time, daylight saving applied for each date",
-        .tz_offset = platform.localOffset(now),
-        .offset_at = &platform.localOffset,
-        .title = try std.fmt.allocPrint(a, "PST export - {s} ({d} bytes, SHA-256 {s})", .{ target, stats.size, &out_hash }),
-    };
-    const rows = try pstwrite.reportRows(a, stats);
-    const stem = target[0 .. target.len - std.fs.path.extension(target).len];
-    try writeOut(io, try std.fmt.allocPrint(a, "{s} report.csv", .{stem}), try exp.reportCsv(a, rows, meta));
-    try writeOut(io, try std.fmt.allocPrint(a, "{s} report.html", .{stem}), try exp.reportHtml(a, rows, meta));
-    try out.print("-- {s}: {d} folders, {d} items, {d} bytes\n   SHA-256 {s}\n", .{ target, stats.folders, stats.messages, stats.size, &out_hash });
-    if (stats.failed > 0) return fail(out, "-- {d} item(s) could NOT be exported (listed above)\n", .{stats.failed});
 }
 
 /// Value of a "--html <path>" option.

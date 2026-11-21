@@ -15,7 +15,7 @@ Built for evidence work: sources are opened **read-only** and never written to, 
 | Program | What it is |
 |---|---|
 | `pstview` (`pstview.exe`, `pstview.app`) | GUI, the same on every platform: folder tree, sortable / searchable message list, and a reading pane with tabs (*Message*, *Header analysis*, *Internet headers*, *Attachments*). Double-click or Enter opens a message in its own window. Open a source with *File > Open*, by dropping it on the window, from the command line, or with *Open with*. |
-| `pstx` (`pstx.exe`) | Command line: `tree`, `list`, `show`, `export`, `topst`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. |
+| `pstx` (`pstx.exe`) | Command line, for reading and reporting: `tree`, `list`, `show`, `hash`, `hidden`, `verify`, `search`, `triage`, `headers`, `props`, `recover`, `analyse`. It does not export (see [Export](#formats)). |
 
 Release archives hold both programs: `windows-x64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`. Linux also gets:
 
@@ -76,7 +76,7 @@ Open several PST / OST files together (multi-select in *File > Open*, drop them 
 
 ## Convert to PST
 
-*File > Export whole mailbox as PST* (`pstx topst <source> <out.pst>`) writes everything in the user's folders to a new Unicode PST that Outlook can open: the way to turn an OST, an MBOX export or a set of PST parts into one PST.
+*File > Export whole mailbox as PST* writes everything in the user's folders to a new Unicode PST that Outlook can open: the way to turn an OST, an MBOX export or a set of PST parts into one PST.
 
 * **Kept:** the folder tree, every message with all its properties (named properties are re-mapped to the new file's name map, so calendar, contact and task fields keep working), recipients, attachments byte for byte, and embedded messages. A top-level *Deleted Items* becomes the new file's Deleted Items.
 * **Filled in when the source lacks them:** the properties every PST item must have (message class, flags, size, status, creation and modification times, search key). MBOX messages carry no modification time; the delivery time is used.
@@ -92,6 +92,8 @@ The writer follows [MS-PST] (Unicode, 512-byte pages, no encryption); where the 
 * **Item types:** mail, appointments and meetings, contacts and distribution lists, tasks, notes and journal entries, with their fields. *Message > All properties* (`pstx props`) lists every MAPI property of an item.
 * **Export:** `.pst` (whole mailbox, see above), `.msg` (written directly, no Outlook needed) and `.eml`. An `.eml` from an MBOX is the original message, byte for byte; one from a PST keeps the original internet headers and adds `X-PST-*` provenance headers.
 
+Exports are made in pstview, and on the desktop each one asks where to save it. pstx has no export commands: it cannot write .msg, .eml, .pst or attachment files, and the export code is not part of it. (It still prints a message, or saves its safe view, header report or property list as HTML, one item at a time.)
+
 Every export writes `pstview report.html` and `pstview report.csv`: source path, size, format and SHA-256, and each item's dates, sender, recipients, subject, attachments and file name. Dates are in local time with daylight saving applied per date. CSV values a spreadsheet would run as a formula get a leading apostrophe.
 
 ## pstx examples
@@ -100,9 +102,6 @@ Every export writes `pstview report.html` and `pstview report.csv`: source path,
 pstx tree    backup.pst
 pstx list    backup.pst "Inbox"
 pstx show    backup.pst 00200044 --html msg.html    # the GUI's sanitised view, as a page
-pstx export  backup.pst "Sent Items" out eml --match "contract"
-pstx export  backup.pst 0x8462 out msg --modified 2026-11-05
-pstx topst   backup.ost converted.pst               # OST (or MBOX, or PST parts) to a new PST
 pstx hash    backup.pst
 pstx verify  backup.ost                             # close Outlook first
 pstx headers backup.pst 00200044 --html hdr.html    # header analysis of one message

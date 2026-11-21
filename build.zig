@@ -111,6 +111,20 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+    // The exporters on the demo mailbox, byte for byte (src/exportcheck.zig): they read testdata/
+    // relative to the repository root, and charsets come from libc as in pstx.
+    const export_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/exportcheck.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = os != .windows,
+        }),
+    });
+    const run_export_tests = b.addRunArtifact(export_tests);
+    run_export_tests.setCwd(b.path("."));
+    run_export_tests.has_side_effects = true; // (reads testdata/: never a cached result)
+    test_step.dependOn(&run_export_tests.step);
 
     // Fuzz targets for untrusted content (src/fuzz.zig): once over the seed inputs as part of
     // `zig build test`; `zig build fuzz --fuzz` keeps mutating them, guided by coverage.

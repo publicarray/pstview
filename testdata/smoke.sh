@@ -19,23 +19,10 @@ run headers "$demo" 0x4
 run triage "$demo" Inbox
 run search "$demo" Inbox "from:*harbourline*"
 
-# export: MBOX items are written byte for byte, so the hashes match everywhere
-out=$(mktemp -d)
-"$pstx" export "$demo" Inbox "$out" eml > /dev/null
-echo "== pstx export $demo Inbox <dir> eml"
-if command -v sha256sum > /dev/null; then sum() { sha256sum "$1" | cut -d' ' -f1; }; else sum() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
-(cd "$out" && for f in *.eml; do echo "$(sum "$f")  $f"; done | LC_ALL=C sort -k2)
-rm -rf "$out"
-
-# a new PST from the demo mailbox, read back: the writer is deterministic (no clock, no random
-# numbers), so the file is byte-identical on every platform
-# (a relative path, so that the output is the same everywhere)
-out=smoke-pst.tmp
-rm -rf "$out" && mkdir "$out"
-run topst "$demo" "$out/demo.pst" | grep -v SHA-256
-echo "$(sum "$out/demo.pst")  demo.pst"
-run verify "$out/demo.pst"
-run tree "$out/demo.pst"
-run list "$out/demo.pst" 0x80c2
-run show "$out/demo.pst" 0x2000a4
-rm -rf "$out"
+# a PST that pstview wrote from the demo mailbox (byte for byte the same on every platform:
+# `zig build test` checks the writer against it), read back
+pst="testdata/demo.pst"
+run verify "$pst"
+run tree "$pst"
+run list "$pst" 0x80c2
+run show "$pst" 0x2000a4

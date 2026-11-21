@@ -218,24 +218,12 @@ Organisation domain detected: northwind.example
 00000003  2026-10-21 09:14:05          | Liam Chen | Q3 freight schedule - revised | 
 00000004  2026-10-22 02:41:19  HIGH    | Accounts Payable | URGENT: Invoice INV-20431 overdue - payment details changed | DMARC failed for harbourline.example - sender not authorised to use this domain
 -- 2 of 8 items
-== pstx export testdata/demo-mailbox Inbox <dir> eml
-506a4572c5067cd43752bbda0b147d0952bc857c4cb2c26ab8c02e077a9fa1d8  001 2026-10-21 09-14 Q3 freight schedule - revised.eml
-d7e77f8c5d85915811a34029eb06ff9096e1d83acd4d600104447955e031e37e  002 2026-10-22 02-41 URGENT_ Invoice INV-20431 overdue - payment details changed.eml
-5d711381c9c1cdfbd512fe556c8d6341a79a6caac7b3c4aa5f66ae3e2c03c22d  003 2026-10-22 18-05 Wareneingang bestätigt - Lieferung 4471.eml
-303d5bd572893741198930df4e482ba6bea800255b4643b321a1974a461e603b  004 2026-10-23 11-20 Отчёт о поставках за октябрь.eml
-0bbc1b1f128060f4b528210124ff80f792baa8bd669ac2ec006e69ef79661b08  005 2026-10-26 13-02 納品書の送付について.eml
-b9e3f36a74167e7c102dfefc07fa2c6fab4f4362b4f4a3b99c56ab3fa8ddbb8c  006 2026-10-27 19-47 Dokumenty celne_ odprawa w Gdańsku.eml
-b1effd24756e82c05686fea3e820caaf7475afbfd36889de3905822f01074652  007 2026-10-28 10-12 Lunch on Friday_.eml
-8ecf052e801119444fdbd4a5a6156291da8c630c7760c423c683c3dc0357bef2  008 2026-10-29 08-30 Carrier review - agenda for Monday.eml
-== pstx topst testdata/demo-mailbox smoke-pst.tmp/demo.pst
--- smoke-pst.tmp/demo.pst: 5 folders, 15 items, 271360 bytes
-ecf873f6c0774deae91e85c672682ec1843f8c573e3e33d00207acd4ce673c06  demo.pst
-== pstx verify smoke-pst.tmp/demo.pst
+== pstx verify testdata/demo.pst
 Checked 63 nodes, 26 sub-nodes, 87 data blocks (0 MB) with checksum verification.
 
 == Integrity log: 0 issue(s)
 No integrity problems found.
-== pstx tree smoke-pst.tmp/demo.pst
+== pstx tree testdata/demo.pst
 PST, Unicode (512-byte pages), not encrypted
 (root)  [count=0 table=0] nid=122
   Top of Personal Folders  [count=0 table=0] nid=8022
@@ -247,7 +235,7 @@ PST, Unicode (512-byte pages), not encrypted
     Sent  [count=2 table=2] nid=8102
   Search Root  [count=0 table=0] nid=8042
   SPAM Search Folder 2  [count=0 table=0] nid=2223
-== pstx list smoke-pst.tmp/demo.pst 0x80c2
+== pstx list testdata/demo.pst 0x80c2
 00200084	2026-10-21 09:14:05	2026-10-21 09:14:05	Liam Chen	Q3 freight schedule - revised
 002000a4	2026-10-22 02:41:19	2026-10-22 02:41:19	Accounts Payable	URGENT: Invoice INV-20431 overdue - payment details changed
 002000c4	2026-10-22 18:05:44	2026-10-22 18:05:44	Jonas Weber	Wareneingang bestätigt - Lieferung 4471
@@ -257,7 +245,7 @@ PST, Unicode (512-byte pages), not encrypted
 00200144	2026-10-28 10:12:40	2026-10-28 10:12:40	Noah Patel	Lunch on Friday?
 00200164	2026-10-29 08:30:12	2026-10-29 08:30:12	Mia Rossi	Carrier review - agenda for Monday
 -- 8 items (times local)
-== pstx show smoke-pst.tmp/demo.pst 0x2000a4
+== pstx show testdata/demo.pst 0x2000a4
 Subject: URGENT: Invoice INV-20431 overdue - payment details changed
 From: Accounts Payable <accounts@harbourline.example>
 Received (UTC): 2026-10-21 15:41:19

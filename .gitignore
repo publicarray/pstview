@@ -6,6 +6,7 @@ zig-out/
 # Exported case data / test output (never commit evidence)
 test-output/
 *.pst
+!testdata/demo.pst
 *.ost
 *.msg
 *.eml
@@ -17,5 +18,4 @@ __pycache__/
 # Local reference material and sample mailboxes (private, never commit)
 /*.mbox
 /*.pdf
-smoke-pst.tmp/
 packaging/flatpak/bin/
