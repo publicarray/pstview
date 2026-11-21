@@ -14,7 +14,7 @@ Sources are opened **read-only**: nothing is written to them or created next to 
 
 From [Releases](https://github.com/publicarray/pstview/releases): archives for Windows, macOS and Linux, plus an AppImage and a Flatpak. Each holds two programs:
 
-* **`pstview`:** the app: folder tree, message list, reading pane with header analysis and attachments.
+* **`pstview`:** the app: folder tree, message list (calendars also as a month grid, recurring appointments included), reading pane with header analysis and attachments.
 * **`pstx`:** a command-line tool for reading and reporting (`tree`, `list`, `show`, `search`, `triage`, `headers`, `props`, `hash`, `verify`, `hidden`, `recover`, `analyse`). It does not export.
 
 Or use it **in the browser** at https://publicarray.github.io/pstview/: the mailbox is read on your computer and never uploaded, and *Help > Install* adds it as an offline app.

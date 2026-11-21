@@ -65,6 +65,7 @@ jobs:
         if: matrix.platform == 'windows'
         run: |
           timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
+          timeout 180 zig-out/bin/pstview.exe --selftest testdata/calendar.pst
           # the page's own menus, status bar and dialogs
           PSTVIEW_NATIVE=0 timeout 180 zig-out/bin/pstview.exe --selftest testdata/demo-mailbox
 
@@ -90,6 +91,7 @@ jobs:
           # namespaces; Ubuntu 24.04 runners restrict them by default
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/demo-mailbox
+          timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/calendar.pst
           # the page's own menus, status bar and dialogs, as Windows and macOS show them
           PSTVIEW_NATIVE=0 timeout 180 xvfb-run -a zig-out-gui/bin/pstview --selftest testdata/demo-mailbox
 
@@ -97,6 +99,7 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
+          perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/calendar.pst
           # the page's own menus, status line and dialogs
           PSTVIEW_NATIVE=0 perl -e 'alarm 180; exec @ARGV' zig-out/bin/pstview --selftest testdata/demo-mailbox
 

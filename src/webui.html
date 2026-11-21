@@ -94,6 +94,31 @@ svg.g{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-widt
 .risk4:before,.risk3:before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);margin-right:7px}
 #empty{position:absolute;left:0;right:0;top:48%;text-align:center;color:var(--muted);pointer-events:none}
 #hsplit{flex:none;height:5px;margin-top:-3px;cursor:row-resize;z-index:5}
+/* calendar view of a calendar folder: a month grid in place of the list */
+#searchbar{display:flex;gap:8px;align-items:center}
+#pill{flex:1;min-width:0}
+#viewsw{display:flex;flex:none;height:32px;border:1px solid var(--hairline);border-radius:8px;overflow:hidden}
+#viewsw button{background:var(--pane);border:0;padding:0 12px;color:var(--ink-soft)}
+#viewsw button.on{background:var(--select);color:var(--ink);font-weight:600}
+#listwrap.calmode>#head,#listwrap.calmode>#rows,#listwrap.calmode>#empty{display:none}
+#cal{display:none;flex:1;min-height:0;flex-direction:column}
+#listwrap.calmode>#cal{display:flex}
+#calbar{flex:none;display:flex;align-items:center;gap:6px;padding:0 12px 6px}
+#calbar .btn{padding:2px 10px}
+#calbar h3{margin:0 0 0 8px;font-size:15px;font-weight:600}
+#calhead,#calgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr))}
+#calhead div{padding:2px 8px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--hairline);border-top:1px solid var(--hairline)}
+#calgrid{flex:1;min-height:0;grid-template-rows:repeat(6,minmax(0,1fr))}
+.cday{border-right:1px solid var(--hairline);border-bottom:1px solid var(--hairline);padding:2px 3px;overflow:auto;min-height:0}
+.cday.out{background:var(--pane);color:var(--muted)}
+.cday .dn{display:inline-block;font-size:12px;margin:1px 2px 2px;padding:0 5px;border-radius:9px}
+.cday.today .dn{background:var(--amber);color:#13233F;font-weight:600}
+.ev{display:block;width:100%;text-align:left;border:0;background:none;padding:1px 5px;margin-bottom:1px;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:var(--ink)}
+.ev:hover{background:var(--hover)}
+.ev.allday{background:var(--select)}
+.ev.x{font-style:italic}
+.ev.sel{outline:2px solid var(--ink);outline-offset:-2px}
+.ev i{font-style:normal;color:var(--muted);margin-right:5px}
 #reader{flex:1;min-height:0;display:flex;flex-direction:column}
 #tabs{flex:none;display:flex;gap:2px;padding:6px 10px 0;border-bottom:1px solid var(--hairline);align-items:flex-end}
 #tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:6px 12px 7px;color:var(--ink-soft)}
@@ -207,11 +232,16 @@ body.nmenus #bar,body.nstatus #status{display:none}
     <div id="searchbar"><div id="pill">
       <svg class="g" viewBox="0 0 16 16"><path d="M7 2.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 0 0 0-9z M10.3 10.3l3.2 3.2"/></svg>
       <input id="search" spellcheck="false" autocomplete="off" placeholder="Search    from:   to:   subject:   risk:high    * ? wildcards, &quot;phrases&quot;">
-    </div></div>
+    </div><div id="viewsw" class="hidden"><button data-view="list">List</button><button data-view="cal">Calendar</button></div></div>
     <div id="listwrap">
       <div id="head"><div id="headrow"></div></div>
       <div id="rows" tabindex="0"><div id="spacer"></div></div>
       <div id="empty"></div>
+      <div id="cal">
+        <div id="calbar"><button class="btn" id="calprev" title="Previous month (Page Up)">&lsaquo;</button><button class="btn" id="calnext" title="Next month (Page Down)">&rsaquo;</button><button class="btn" id="caltoday">Today</button><h3 id="caltitle"></h3></div>
+        <div id="calhead"></div>
+        <div id="calgrid"></div>
+      </div>
     </div>
     <div id="hsplit"></div>
     <div id="reader">
@@ -437,7 +467,9 @@ const COLS = [['Received',140],['Modified',140],['From',180],['To',180],['Subjec
 const ROW = 28, CHUNK = 200;
 const st = { mb: null, folder: -1, count: 0, total: 0, col: 0, desc: true, gen: 0, cache: new Map(), asked: new Set(),
   sel: new Set(), all: false, focus: -1, anchor: -1, msg: null, msgRow: -1, tab: 'mail', version: '', url: '',
-  single: '', setup: {}, native: {} };
+  single: '', setup: {}, native: {},
+  // the calendar view: shown for calendar folders (cal), unless List was chosen (calPref)
+  cal: false, calPref: true, calFolder: -1, calMonth: null, calItems: [], calSel: null };
 /** The message a command is about, as the model expects it: this window's message, or the focused row. */
 const ref = () => st.single || st.focus;
 
@@ -631,6 +663,7 @@ function resetList(r) {
   $('#rows').scrollTop = 0;
   $('#empty').textContent = st.count ? '' : st.folder < 0 ? 'Select a folder.' : st.total > 0 ? 'No messages match the search.' : 'This folder is empty.';
   renderRows();
+  syncCalView();
 }
 
 const rowWidth = () => COLS.reduce((w, c) => w + c[1], 0);
@@ -734,6 +767,120 @@ $('#search').oninput = () => {
 /** The selection as the model expects it: "all" or view rows "3,4,9". */
 const selection = () => st.all ? 'all' : [...st.sel].sort((a, b) => a - b).join(',');
 const selCount = () => st.all ? st.count : st.sel.size;
+
+// ---------------------------------------------------------------- calendar view
+const isCalFolder = () => !!(st.mb && st.folder >= 0 && st.mb.folders[st.folder] && st.mb.folders[st.folder].g === 'calendar');
+/** First day of the week from the locale (0 = Sunday); Monday where it cannot tell. */
+const WEEK_START = (() => {
+  try { const l = new Intl.Locale(navigator.language); const w = l.getWeekInfo ? l.getWeekInfo() : l.weekInfo; return w && w.firstDay ? w.firstDay % 7 : 1; } catch (e) { return 1; }
+})();
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hm = s => new Date(s * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+function gridStart(month) {
+  const d = new Date(month.getFullYear(), month.getMonth(), 1);
+  d.setDate(1 - (d.getDay() - WEEK_START + 7) % 7);
+  return d;
+}
+
+/** Show the month grid or the list, after the folder or the search changed. */
+function syncCalView() {
+  const can = isCalFolder();
+  $('#viewsw').classList.toggle('hidden', !can);
+  st.cal = can && st.calPref;
+  $('#listwrap').classList.toggle('calmode', st.cal);
+  document.querySelectorAll('#viewsw button').forEach(b => b.classList.toggle('on', (b.dataset.view === 'cal') === st.cal));
+  if (st.cal) {
+    const jump = st.calFolder !== st.folder;
+    st.calFolder = st.folder;
+    loadCal(jump);
+  }
+  syncMenus();
+}
+
+function fetchCal() {
+  const g0 = gridStart(st.calMonth), g1 = new Date(g0);
+  g1.setDate(g1.getDate() + 42);
+  return pv.call('cal', Math.floor(g0 / 1000), Math.floor(g1 / 1000));
+}
+
+/** The occurrences of the month on screen; `jump`: open at this month, or at the latest item when this month has none. */
+async function loadCal(jump) {
+  if (!st.calMonth || jump) { const n = new Date(); st.calMonth = new Date(n.getFullYear(), n.getMonth(), 1); st.calSel = null; }
+  const gen = st.gen;
+  let r = await fetchCal();
+  if (gen !== st.gen || !st.cal) return;
+  if (jump && r && !r.error && !r.items.length && r.last) {
+    const d = new Date(r.last * 1000);
+    st.calMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    r = await fetchCal();
+    if (gen !== st.gen || !st.cal) return;
+  }
+  if (!r || r.error) { if (r) notice(r.error); return; }
+  st.calItems = r.items;
+  renderCal();
+}
+
+function calMonth(delta) {
+  if (delta === 0) { const n = new Date(); st.calMonth = new Date(n.getFullYear(), n.getMonth(), 1); }
+  else st.calMonth = new Date(st.calMonth.getFullYear(), st.calMonth.getMonth() + delta, 1);
+  loadCal(false);
+}
+
+function renderCal() {
+  const m = st.calMonth, g0 = gridStart(m), today = ymd(new Date());
+  $('#caltitle').textContent = m.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  $('#calhead').innerHTML = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(g0); d.setDate(d.getDate() + i);
+    return `<div>${esc(d.toLocaleDateString(undefined, { weekday: 'short' }))}</div>`;
+  }).join('');
+  const byDay = new Map();
+  const add = (k, it) => { if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(it); };
+  for (const it of st.calItems) {
+    if (it.a) { // dates, local: an all-day item stays on its days in every time zone
+      const d = new Date(it.d0 + 'T00:00');
+      for (let n = 0; n < 400 && ymd(d) < it.d1; n++, d.setDate(d.getDate() + 1)) add(ymd(d), it);
+    } else add(ymd(new Date(it.s * 1000)), it);
+  }
+  let html = '';
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(g0); d.setDate(d.getDate() + i);
+    const k = ymd(d), items = (byDay.get(k) || []).sort((x, y) => (y.a - x.a) || (x.s - y.s));
+    html += `<div class="cday${d.getMonth() !== m.getMonth() ? ' out' : ''}${k === today ? ' today' : ''}"><span class="dn">${d.getDate()}</span>` +
+      items.map(it => {
+        const sel = st.calSel && st.calSel.r === it.r && st.calSel.s === it.s;
+        const when = it.a ? (it.d1 > ymd(new Date(new Date(it.d0 + 'T00:00').getTime() + 864e5)) ? `${it.d0} – ${it.d1} (all day)` : `${it.d0} (all day)`)
+          : `${new Date(it.s * 1000).toLocaleString()} – ${hm(it.e)}`;
+        const tip = [it.t, when, it.l, it.rec ? (it.x ? 'recurring (changed instance)' : 'recurring') : ''].filter(x => x).join('\n');
+        return `<button class="ev${it.a ? ' allday' : ''}${it.x ? ' x' : ''}${sel ? ' sel' : ''}" data-r="${it.r}" data-s="${it.s}" title="${esc(tip)}">` +
+          `${it.a ? '' : `<i>${esc(hm(it.s))}</i>`}${it.rec ? '\u21bb ' : ''}${esc(it.t)}</button>`;
+      }).join('') + '</div>';
+  }
+  $('#calgrid').innerHTML = html;
+}
+
+$('#calgrid').onclick = e => {
+  const b = e.target.closest('.ev');
+  if (!b) return;
+  const r = +b.dataset.r, s = +b.dataset.s;
+  // the item the occurrence belongs to becomes the selected row: every command acts on it
+  st.calSel = { r, s };
+  st.all = false; st.sel.clear(); st.sel.add(r); st.anchor = r; st.focus = r;
+  syncMenus();
+  document.querySelectorAll('#calgrid .ev.sel').forEach(x => x.classList.remove('sel'));
+  document.querySelectorAll(`#calgrid .ev[data-r="${r}"][data-s="${s}"]`).forEach(x => x.classList.add('sel'));
+  loadMessage(r);
+};
+$('#calgrid').ondblclick = e => { if (e.target.closest('.ev')) act('openmsg'); };
+$('#calprev').onclick = () => calMonth(-1);
+$('#calnext').onclick = () => calMonth(1);
+$('#caltoday').onclick = () => calMonth(0);
+$('#viewsw').onclick = e => {
+  const v = e.target.dataset.view;
+  if (!v) return;
+  st.calPref = v === 'cal';
+  syncCalView();
+  if (!st.cal) renderRows();
+};
 
 // ---------------------------------------------------------------- reading pane
 function clearReader() {
@@ -875,6 +1022,7 @@ async function act(name) {
     }
     case 'analyse': return resetList(await pv.call('analyse'));
     case 'theme-system': case 'theme-light': case 'theme-dark': theme.choice = name.slice(6); return applyTheme();
+    case 'calview': if (!isCalFolder()) return; st.calPref = !st.cal; syncCalView(); if (!st.cal) renderRows(); return;
     case 'paste': {
       const prompt = 'Paste the internet headers of a message (or a whole message) below.';
       let text;
@@ -1006,6 +1154,8 @@ const MENUS = [
     ['Select all', 'selectall', need, 'Mod+A'],
   ]],
   ['View', [
+    ['Calendar as a month grid', 'calview', isCalFolder, null, () => st.cal],
+    null,
     ['Theme: follow the system', 'theme-system', null, null, isTheme('system')],
     ['Theme: light', 'theme-light', null, null, isTheme('light')],
     ['Theme: dark', 'theme-dark', null, null, isTheme('dark')],
@@ -1165,6 +1315,11 @@ document.addEventListener('keydown', e => {
   }
   if (typing || !st.mb || st.single) return;
   const page = Math.max(1, Math.floor($('#rows').clientHeight / ROW) - 1), f = st.focus;
+  if (st.cal && $('#listwrap').classList.contains('calmode')) { // the month grid: Page Up / Down change the month
+    if (e.key === 'PageUp' || e.key === 'PageDown') { e.preventDefault(); calMonth(e.key === 'PageUp' ? -1 : 1); }
+    else if (e.key === 'Enter' && st.focus >= 0) { e.preventDefault(); act('openmsg'); }
+    return;
+  }
   const go = r => { e.preventDefault(); focusRow(Math.min(Math.max(r, 0), st.count - 1), e); };
   switch (e.key) {
     case 'ArrowDown': return go(f + 1);
@@ -1187,6 +1342,7 @@ async function selftest(r) {
     if (r.opened.error) throw r.opened.error;
     if (!st.mb || !st.mb.folders.length) throw 'no folders';
     if (!st.count) throw 'the start folder lists no messages';
+    const startRows = st.count;
     const first = await rowData(0);
     if (!first || first.length !== 10) throw 'bad row data';
     if (!document.querySelector('.row')) throw 'no rows rendered';
@@ -1272,8 +1428,26 @@ async function selftest(r) {
     if (sorted.count !== st.count) throw 'sort changed the row count';
     const found = await pv.call('filter', first[4] === '(no subject)' ? '' : 'subject:"' + first[4].replace(/"/g, '') + '"');
     if (!found.count) throw 'search did not find the first message';
+    // a calendar folder: the month grid, and an occurrence opens its item
+    const calFolder = st.mb.folders.findIndex(x => x.g === 'calendar' && x.sel);
+    let calNote = '';
+    if (calFolder >= 0) {
+      $('#search').value = '';
+      await pv.call('filter', '');
+      await selectFolder(calFolder);
+      for (let i = 0; i < 100 && !document.querySelector('#calgrid .ev'); i++) await nap(50);
+      const ev = document.querySelector('#calgrid .ev');
+      if (st.count && !ev) throw 'the calendar view shows no appointments';
+      if (ev) {
+        st.msg = null;
+        ev.click();
+        for (let i = 0; i < 100 && !st.msg; i++) await nap(50);
+        if (!st.msg) throw 'an appointment in the calendar view did not open';
+        calNote = `, calendar view (${document.querySelectorAll('#calgrid .ev').length} appointments in ${$('#caltitle').textContent})`;
+      }
+    }
     clearTimeout(timer);
-    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${st.count} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, ${st.native.menus ? `native menus (${sw.menus} items)` : 'page menus'}, themes switched (system ${sys0 ? 'dark' : 'light'}${followed ? ', web view follows the chrome' : ''})${nat.selftestCloses && natives.length ? `, native ${natives.join(', ')} opened` : ''}, search and sort answered`);
+    pv.call('selftest', 'ok', `${st.mb.folders.length} folders, ${startRows} rows in the start folder, first message "${first[4]}" rendered (${st.msg.html.length} bytes of safe HTML), message window opened and closed, progress text ${live ? 'shown live' : 'sent (not live)'}, ${st.native.menus ? `native menus (${sw.menus} items)` : 'page menus'}, themes switched (system ${sys0 ? 'dark' : 'light'}${followed ? ', web view follows the chrome' : ''})${calNote}${nat.selftestCloses && natives.length ? `, native ${natives.join(', ')} opened` : ''}, search and sort answered`);
   } catch (e) { clearTimeout(timer); fail(e && e.message || e); }
 }
 

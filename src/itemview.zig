@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const pst = @import("pst.zig");
 const nm = @import("namemap.zig");
+const recur = @import("recur.zig");
 
 pub const Row = struct { label: []const u8, value: []const u8 };
 pub const TimeFmt = *const fn (buf: []u8, t: ?i64) []const u8;
@@ -110,7 +111,10 @@ fn appointment(r: *Rows, cls: []const u8) void {
     r.minutes("Duration", r.named(A, 0x8213));
     r.addStr("Location", r.named(A, 0x8208));
     if (r.flag(r.named(A, 0x8223))) {
-        const pattern = r.str(r.named(A, 0x8232));
+        var pattern = r.str(r.named(A, 0x8232));
+        if (pattern.len == 0) if (r.named(A, 0x8216)) |blob| {
+            if (recur.parse(r.a, blob.data)) |p| pattern = recur.describe(r.a, p) catch "" else |_| {}
+        };
         r.add("Recurrence", if (pattern.len > 0) pattern else "recurring (pattern not described)");
     }
     r.addStr("Time zone", r.named(A, 0x8234));

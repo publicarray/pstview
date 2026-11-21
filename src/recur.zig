@@ -372,6 +372,68 @@ pub fn expand(a: Allocator, p: Pattern, from_day: i64, to_day: i64) Error![]Occu
     return out.items;
 }
 
+/// The pattern in words, e.g. "every week on Monday, Thursday, Friday, 10:00-10:30 (series time),
+/// from 2007-03-26, 12 times".
+pub fn describe(a: Allocator, p: Pattern) Error![]const u8 {
+    const days = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const nths = [_][]const u8{ "", "first", "second", "third", "fourth", "last" };
+    const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    var out: std.ArrayList(u8) = .empty;
+    const mask_words = struct {
+        fn f(al: Allocator, o: *std.ArrayList(u8), mask: u32, names: []const []const u8) Error!void {
+            if (mask & 0x7F == 0x3E) return o.appendSlice(al, "weekday");
+            if (mask & 0x7F == 0x41) return o.appendSlice(al, "weekend day");
+            if (mask & 0x7F == 0x7F) return o.appendSlice(al, "day");
+            var n: usize = 0;
+            for (names, 0..) |d, k| if (mask & (@as(u32, 1) << @intCast(k)) != 0) {
+                if (n > 0) try o.appendSlice(al, ", ");
+                try o.appendSlice(al, d);
+                n += 1;
+            };
+        }
+    }.f;
+    const start = civil(@divFloor(@as(i64, p.start_date), min_per_day));
+    const yearly = p.freq == 0x200D or p.period == 12 and p.ptype != 0 and p.ptype != 1;
+    switch (p.ptype) {
+        0x0 => {
+            const n = @divFloor(p.period, @as(u32, @intCast(min_per_day)));
+            if (n <= 1) try out.appendSlice(a, "every day") else try out.print(a, "every {d} days", .{n});
+        },
+        0x1 => {
+            if (p.period <= 1) try out.appendSlice(a, "every week on ") else try out.print(a, "every {d} weeks on ", .{p.period});
+            try mask_words(a, &out, p.specific, &days);
+        },
+        0x2, 0x4, 0x3 => {
+            if (yearly) try out.appendSlice(a, "every year on ") else if (p.period <= 1) try out.appendSlice(a, "every month on ") else try out.print(a, "every {d} months on ", .{p.period});
+            switch (p.ptype) {
+                0x2 => try out.print(a, "day {d}", .{p.specific}),
+                0x4 => try out.appendSlice(a, "the last day"),
+                else => {
+                    try out.print(a, "the {s} ", .{nths[@min(p.nth, 5)]});
+                    try mask_words(a, &out, p.specific, &days);
+                },
+            }
+            if (yearly) try out.print(a, " of {s}", .{months[start.m - 1]});
+        },
+        else => try out.appendSlice(a, "recurring (calendar not supported)"),
+    }
+    if (p.calendar > 2 and p.calendar < 9 or p.calendar > 12) try out.appendSlice(a, " (non-Gregorian calendar)");
+    if (p.end_offset != p.start_offset) try out.print(a, ", {d:0>2}:{d:0>2}-{d:0>2}:{d:0>2}", .{ p.start_offset / 60, p.start_offset % 60, (p.end_offset / 60) % 24, p.end_offset % 60 });
+    try out.print(a, ", from {d}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(start.y)), start.m, start.d });
+    if (p.endless()) {
+        try out.appendSlice(a, ", no end");
+    } else if (p.end_type == 0x2022) {
+        try out.print(a, ", {d} times", .{p.occurrences});
+    } else {
+        const e = civil(@divFloor(@as(i64, p.end_date), min_per_day));
+        try out.print(a, " until {d}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(e.y)), e.m, e.d });
+    }
+    const deleted = p.deleted.len - @min(p.deleted.len, p.modified.len);
+    if (p.modified.len > 0) try out.print(a, "; {d} changed", .{p.modified.len});
+    if (deleted > 0) try out.print(a, "; {d} deleted", .{deleted});
+    return out.items;
+}
+
 // ---------------------------------------------------------------- time zone
 
 const SysTime = struct { year: u16, month: u16, dow: u16, day: u16, hour: u16, minute: u16 };
@@ -572,6 +634,16 @@ test "time zone: Pacific, daylight saving per date (4.1.5)" {
     try testing.expect(tz.isDaylight(dayOf(2007, 3, 11) * min_per_day + 180));
     try testing.expect(tz.isDaylight(dayOf(2008, 11, 2) * min_per_day + 60));
     try testing.expect(!tz.isDaylight(dayOf(2008, 11, 2) * min_per_day + 180));
+}
+
+test "patterns in words" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("every week on Monday, Thursday, Friday, 10:00-10:30, from 2007-03-26, 12 times", try describe(a, try parse(a, &example_weekly)));
+    try testing.expectEqualStrings("every 3 days, 08:00-08:30, from 2011-04-07 until 2011-05-04; 2 deleted", try describe(a, try parse(a, &example_daily)));
+    try testing.expectEqualStrings("every 3 months on the third weekend day, 14:00-17:00, from 2008-02-09, 10 times; 2 changed", try describe(a, try parse(a, &example_month_nth)));
+    try testing.expectEqualStrings("every year on day 19 of April, 08:00-08:30, from 2011-04-19, no end; 1 changed", try describe(a, try parse(a, &example_yearly)));
 }
 
 test "calendar arithmetic" {
