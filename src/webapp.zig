@@ -38,6 +38,8 @@ const platform = @import("platform.zig");
 const glyph = @import("glyph.zig");
 const setup = @import("setup.zig");
 const pstwrite = @import("pstwrite.zig");
+const calview = @import("calview.zig");
+const recur = @import("recur.zig");
 const build_options = @import("build_options");
 
 /// What the model needs from the platform shell.
@@ -147,6 +149,8 @@ const App = struct {
     hidden: ?pst.HiddenScan = null,
     recovery: ?store.Store.Recovery = null,
     index: ?search.FolderIndex = null,
+    /// The appointments of the current folder (by message), for the calendar view; built once.
+    cal: ?[]?calview.Appt = null,
     mailbox_ctx: ?hdrs.Context = null,
     source_name: []const u8 = "",
     source_desc: []const u8 = "",
@@ -596,6 +600,11 @@ fn dispatch(a: Allocator, out: *List, cmd: []const u8, rest: []const u8) Error!v
         return listState(a, out);
     }
     if (eq(u8, cmd, "rows")) return rows(a, out, argInt(rest, 0) orelse 0, argInt(rest, 1) orelse 0);
+    if (eq(u8, cmd, "cal")) {
+        const from = std.fmt.parseInt(i64, argAt(rest, 0), 10) catch return failure(a, out, "bad range", .{});
+        const to = std.fmt.parseInt(i64, argAt(rest, 1), 10) catch return failure(a, out, "bad range", .{});
+        return calendar(a, out, from, to);
+    }
     if (eq(u8, cmd, "msg")) {
         const nid = msgRef(argAt(rest, 0)) orelse return failure(a, out, "No such message.", .{});
         return preview(a, out, nid);
@@ -842,6 +851,7 @@ fn selectFolder(idx: usize) void {
     _ = app.folder_arena.reset(.retain_capacity);
     app.view = .empty;
     app.index = null;
+    app.cal = null;
     app.cur_folder = idx;
     const a = app.folder_arena.allocator();
     const fo = app.folders.items[idx];
@@ -950,6 +960,54 @@ fn listState(a: Allocator, out: *List) Error!void {
     try out.print(a, "{{\"count\":{d},\"total\":{d},\"col\":{d},\"desc\":{},\"folder\":{d}", .{ app.view.items.len, app.msgs.len, app.sort_col, app.sort_desc, if (app.cur_folder) |c| @as(i64, @intCast(c)) else -1 });
     try kv(a, out, false, "status", status);
     try out.append(a, '}');
+}
+
+/// The calendar view: occurrences in [from, to) (Unix seconds) of the folder's items that the
+/// search leaves in view. `r` is the item's view row (what the reading pane and the commands
+/// take); timed items are in UTC (`s`, `e`), all-day ones are dates (`d0`, `d1`: first day and
+/// the day after the last). `first` / `last`: the earliest and latest start of an item.
+fn calendar(a: Allocator, out: *List, from: i64, to: i64) Error!void {
+    const fa = app.folder_arena.allocator();
+    const appts = app.cal orelse blk: {
+        const list = try fa.alloc(?calview.Appt, app.msgs.len);
+        for (app.msgs, list) |s, *slot| {
+            slot.* = null;
+            const m = app.file.?.loadMessage(fa, s.nid) catch continue;
+            slot.* = calview.load(fa, &m);
+        }
+        app.cal = list;
+        break :blk list;
+    };
+    const row_of = try a.alloc(i64, app.msgs.len);
+    @memset(row_of, -1);
+    for (app.view.items, 0..) |mi, r| row_of[mi] = @intCast(r);
+    var occ: std.ArrayList(calview.Occurrence) = .empty;
+    var first: ?i64 = null;
+    var last: ?i64 = null;
+    try out.appendSlice(a, "{\"items\":[");
+    var n: usize = 0;
+    for (appts, 0..) |slot, mi| {
+        const ap = slot orelse continue;
+        if (row_of[mi] < 0) continue;
+        first = @min(first orelse ap.start, ap.start);
+        last = @max(last orelse ap.start, ap.start);
+        occ.clearRetainingCapacity();
+        calview.occurrences(a, ap, from, to, &occ) catch continue;
+        for (occ.items) |o| {
+            if (n > 0) try out.append(a, ',');
+            n += 1;
+            try out.print(a, "{{\"r\":{d},\"s\":{d},\"e\":{d},\"a\":{},\"rec\":{},\"x\":{}", .{ row_of[mi], o.start, o.end, o.all_day, o.recurring, o.exception });
+            if (o.all_day) {
+                const c0 = recur.civil(o.day0);
+                const c1 = recur.civil(o.day1);
+                try out.print(a, ",\"d0\":\"{d:0>4}-{d:0>2}-{d:0>2}\",\"d1\":\"{d:0>4}-{d:0>2}-{d:0>2}\"", .{ @as(u64, @intCast(c0.y)), c0.m, c0.d, @as(u64, @intCast(c1.y)), c1.m, c1.d });
+            }
+            try kv(a, out, false, "t", if (o.subject.len > 0) o.subject else "(no subject)");
+            try kv(a, out, false, "l", o.location);
+            try out.append(a, '}');
+        }
+    }
+    try out.print(a, "],\"first\":{d},\"last\":{d}}}", .{ first orelse 0, last orelse 0 });
 }
 
 /// Rows `start .. start+count` of the view: the nine column texts and the risk level of each.

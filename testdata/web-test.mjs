@@ -77,4 +77,25 @@ const h = req('hash');
 ok(/SHA-256/.test(h.message), 'SHA-256 of the source');
 const ht = req('hdrtext', 'Received: from a.example (a.example [192.0.2.1]) by b.example; Mon, 1 Jan 2024 10:00:00 +0000\nFrom: x@a.example\nSubject: t\n');
 ok(!ht.error && ht.html, 'pasted headers analysed');
+
+// the calendar view, on testdata/calendar.pst (beside the folder given)
+const calPath = path.join(path.dirname(srcDir), 'calendar.pst');
+const cid = files.push(calPath) - 1;
+call((p, n) => ex.pv_add_file(p, n, cid, fs.statSync(calPath).size), '/in/2/calendar.pst');
+call((p, n) => ex.pv_pick(p, n), '/in/2/calendar.pst');
+const cmb = req('open');
+const ci = cmb.folders ? cmb.folders.findIndex(x => x.g === 'calendar') : -1;
+ok(!cmb.error && ci >= 0, `calendar.pst opened, its Calendar folder found${cmb.error ? ' ' + cmb.error : ''}`);
+const cf = req('folder', ci);
+const utc = (y, m, d, h, mi) => Date.UTC(y, m - 1, d, h, mi) / 1000;
+const april = req('cal', utc(2007, 4, 1, 0, 0), utc(2007, 5, 1, 0, 0));
+const moved = april.items.find(x => x.s === utc(2007, 4, 16, 18, 0));
+ok(cf.count === 7 && april.items.length === 9 && moved && moved.x && moved.t === 'Simple Recurrence with exceptions',
+  `April 2007: ${april.items.length} occurrences, the moved one at 11:00 PDT with its own subject`);
+const may = req('cal', utc(2008, 5, 1, 0, 0), utc(2008, 6, 1, 0, 0));
+ok(may.items.some(x => x.a && x.d0 === '2008-05-23' && x.d1 === '2008-05-24'), 'an all-day event keeps its date');
+const later = req('cal', utc(2026, 4, 1, 0, 0), utc(2026, 5, 1, 0, 0));
+ok(later.items.length === 1 && later.items[0].s === utc(2026, 4, 19, 15, 0) && later.items[0].rec, 'an endless yearly series, years later');
+const m2 = req('msg', String(moved.r));
+ok(!m2.error && /Simple Recurrence/.test(m2.subject), 'an occurrence opens its series in the reading pane');
 console.log('all passed');

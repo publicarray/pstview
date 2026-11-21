@@ -182,3 +182,71 @@ test "PST writer: a calendar folder gives testdata/calendar.pst byte for byte" {
     }
     Io.Dir.cwd().deleteFile(io, out) catch {};
 }
+
+test "calendar view: occurrences of testdata/calendar.pst" {
+    const calview = @import("calview.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try store.Store.open(gpa, io, "testdata/calendar.pst");
+    defer f.close();
+    const top = (try f.subFolders(a, f.rootFolder()))[0];
+    var cal: ?u32 = null;
+    for (try f.subFolders(a, top)) |k| if (std.mem.eql(u8, (try f.folderInfo(a, k)).name, "Calendar")) {
+        cal = k;
+    };
+    var appts: std.ArrayList(calview.Appt) = .empty;
+    for (try f.folderMessages(a, cal orelse return error.NoCalendar)) |s| {
+        const m = try f.loadMessage(a, s.nid);
+        try appts.append(a, calview.load(a, &m) orelse return error.NotAnAppointment);
+    }
+    const U = calendar_fixture.utc;
+    const Range = struct {
+        fn get(al: std.mem.Allocator, list: []const calview.Appt, from: i64, to: i64) ![]calview.Occurrence {
+            var out: std.ArrayList(calview.Occurrence) = .empty;
+            for (list) |ap| try calview.occurrences(al, ap, from, to, &out);
+            return out.items;
+        }
+        fn find(occ: []const calview.Occurrence, start: i64) ?calview.Occurrence {
+            for (occ) |o| if (o.start == start) return o;
+            return null;
+        }
+    };
+    // April 2007: the weekly series in daylight saving time (10:00 PDT = 17:00 UTC), and the
+    // instance of April 16 moved to 11:00 with its own subject and location
+    const april = try Range.get(a, appts.items, U(2007, 4, 1, 0, 0), U(2007, 5, 1, 0, 0));
+    try std.testing.expect(Range.find(april, U(2007, 4, 2, 17, 0)) != null);
+    try std.testing.expect(Range.find(april, U(2007, 4, 16, 17, 0)) == null);
+    const moved = Range.find(april, U(2007, 4, 16, 18, 0)) orelse return error.MovedInstanceMissing;
+    try std.testing.expectEqualStrings("Simple Recurrence with exceptions", moved.subject);
+    try std.testing.expectEqualStrings("34/4141", moved.location);
+    try std.testing.expect(moved.exception);
+    // the quarterly series: 14:00 PDT in August (21:00 UTC), 14:00 PST in November (22:00 UTC)
+    const aug = try Range.get(a, appts.items, U(2008, 8, 1, 0, 0), U(2008, 9, 1, 0, 0));
+    const relocated = Range.find(aug, U(2008, 8, 9, 21, 0)) orelse return error.AugustMissing;
+    try std.testing.expectEqualStrings("new location", relocated.location);
+    const nov = try Range.get(a, appts.items, U(2008, 11, 1, 0, 0), U(2008, 12, 1, 0, 0));
+    try std.testing.expect(Range.find(nov, U(2008, 11, 8, 22, 0)) != null);
+    // an all-day event keeps its date; a single appointment is itself
+    const may = try Range.get(a, appts.items, U(2008, 5, 1, 0, 0), U(2008, 6, 1, 0, 0));
+    var holiday: ?calview.Occurrence = null;
+    for (may) |o| if (o.all_day) {
+        holiday = o;
+    };
+    try std.testing.expectEqual(recur.dayOf(2008, 5, 23), holiday.?.day0);
+    try std.testing.expectEqual(recur.dayOf(2008, 5, 24), holiday.?.day1);
+    try std.testing.expect(Range.find(may, U(2008, 5, 20, 16, 0)) != null);
+    // the endless yearly series, years later
+    const y2026 = try Range.get(a, appts.items, U(2026, 4, 1, 0, 0), U(2026, 5, 1, 0, 0));
+    try std.testing.expectEqual(@as(usize, 1), y2026.len);
+    try std.testing.expectEqual(U(2026, 4, 19, 15, 0), y2026[0].start);
+    // the Hebrew-calendar series cannot be expanded: shown once, at its start
+    const apr2011 = try Range.get(a, appts.items, U(2011, 4, 7, 0, 0), U(2011, 4, 8, 0, 0));
+    var hebrew: usize = 0;
+    for (apr2011) |o| if (std.mem.eql(u8, o.subject, "Hebrew calendar")) {
+        hebrew += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), hebrew);
+}
