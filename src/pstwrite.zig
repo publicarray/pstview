@@ -1016,6 +1016,16 @@ pub const Options = struct {
     /// same source gives the same file.
     uid_seed: []const u8 = "",
     progress: ?*const fn (done: usize, total: usize) void = null,
+    /// One more folder below the top, of items given as properties (the test fixtures use it;
+    /// `names` describes the named property ids, 0x8000 and up, that the items use).
+    extra: ?Extra = null,
+};
+
+pub const Extra = struct {
+    name: []const u8,
+    class: []const u8,
+    names: namemap.NameMap,
+    items: []const []const pst.Prop,
 };
 
 /// One exported item, for the report written beside the PST.
@@ -1057,6 +1067,8 @@ const Exporter = struct {
     /// or below itself, which would otherwise repeat it without end.
     visited: std.AutoHashMapUnmanaged(u32, void) = .empty,
     counted: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    /// Name map of messages that have no PST node (the items of `Options.extra`).
+    loose_names: ?namemap.NameMap = null,
 
     fn entryId(self: *Exporter, nid: u32) ![]const u8 {
         const b = try self.a.alloc(u8, 24);
@@ -1114,7 +1126,7 @@ const Exporter = struct {
     /// properties lack one (OSTs keep it in the table only).
     fn message(self: *Exporter, a: Allocator, m: *pst.Message, depth: u8, modified: ?i64) !MsgOut {
         const ndb = self.ndb;
-        const map: ?namemap.NameMap = if (m.node) |n| n.pst.nameMap() else null;
+        const map: ?namemap.NameMap = if (m.node) |n| n.pst.nameMap() else self.loose_names;
         var subs: Subs = .{ .a = a };
         var props: std.ArrayList(Prop) = .empty;
         try props.appendSlice(a, try self.transform(a, m.pc.props, map, .message));
@@ -1323,6 +1335,33 @@ const Exporter = struct {
         return .{ .nid = nid, .name = name, .class = class, .count = count, .unread = unread, .has_sub = kids.items.len > 0 };
     }
 
+    /// The folder of `Options.extra`.
+    fn extraFolder(self: *Exporter, x: Extra, nid: u32, parent: u32) !FolderOut {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const fa = arena.allocator();
+        self.loose_names = x.names;
+        defer self.loose_names = null;
+        var rows: std.ArrayList(Row) = .empty;
+        for (x.items) |props| {
+            var m: pst.Message = .{ .nid = 0, .node = null, .pc = .{ .props = try fa.dupe(pst.Prop, props) }, .recipients = &.{}, .attachments = &.{} };
+            const out = try self.message(fa, &m, 0, null);
+            const mnid = self.ndb.newNid(0x04);
+            try self.ndb.addNode(mnid, out.data, out.sub, nid);
+            var kept: std.ArrayList(Prop) = .empty;
+            for (out.props) |p| {
+                const tag = (@as(u32, p.id) << 16) | p.ptype;
+                if (std.mem.indexOfScalar(u32, &tpl_contents, tag) != null) try kept.append(fa, p);
+            }
+            try rows.append(fa, .{ .id = mnid, .props = kept.items });
+            self.stats.messages += 1;
+        }
+        self.stats.folders += 1;
+        const count: u32 = @intCast(x.items.len);
+        try self.folderNodes(fa, nid, parent, x.name, x.class, count, 0, &.{}, rows.items);
+        return .{ .nid = nid, .name = try self.a.dupe(u8, x.name), .class = try self.a.dupe(u8, x.class), .count = count, .unread = 0, .has_sub = false };
+    }
+
     fn countAll(self: *Exporter, id: u32, depth: u32) void {
         if ((self.counted.getOrPut(self.a, id) catch return).found_existing) return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -1371,6 +1410,7 @@ const Exporter = struct {
             }
             try kids.append(fa, try self.folder(k, ndb.newNid(0x02), nid_ipm, "", null, 1));
         }
+        if (self.opts.extra) |x| try kids.append(fa, try self.extraFolder(x, ndb.newNid(0x02), nid_ipm));
         if (deleted == null) {
             try self.folderNodes(fa, nid_deleted, nid_ipm, "Deleted Items", "", 0, 0, &.{}, &.{});
             deleted = .{ .nid = nid_deleted, .name = "Deleted Items", .class = "", .count = 0, .unread = 0, .has_sub = false };

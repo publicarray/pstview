@@ -7,6 +7,7 @@ zig-out/
 test-output/
 *.pst
 !testdata/demo.pst
+!testdata/calendar.pst
 *.ost
 *.msg
 *.eml
