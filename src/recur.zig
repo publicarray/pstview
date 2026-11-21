@@ -418,7 +418,11 @@ pub fn describe(a: Allocator, p: Pattern) Error![]const u8 {
         else => try out.appendSlice(a, "recurring (calendar not supported)"),
     }
     if (p.calendar > 2 and p.calendar < 9 or p.calendar > 12) try out.appendSlice(a, " (non-Gregorian calendar)");
-    if (p.end_offset != p.start_offset) try out.print(a, ", {d:0>2}:{d:0>2}-{d:0>2}:{d:0>2}", .{ p.start_offset / 60, p.start_offset % 60, (p.end_offset / 60) % 24, p.end_offset % 60 });
+    if (p.start_offset == 0 and p.end_offset >= min_per_day and p.end_offset % min_per_day == 0) {
+        try out.appendSlice(a, ", all day");
+    } else if (p.end_offset != p.start_offset) {
+        try out.print(a, ", {d:0>2}:{d:0>2}-{d:0>2}:{d:0>2} (series time zone)", .{ p.start_offset / 60, p.start_offset % 60, (p.end_offset / 60) % 24, p.end_offset % 60 });
+    }
     try out.print(a, ", from {d}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(start.y)), start.m, start.d });
     if (p.endless()) {
         try out.appendSlice(a, ", no end");
@@ -640,10 +644,15 @@ test "patterns in words" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("every week on Monday, Thursday, Friday, 10:00-10:30, from 2007-03-26, 12 times", try describe(a, try parse(a, &example_weekly)));
-    try testing.expectEqualStrings("every 3 days, 08:00-08:30, from 2011-04-07 until 2011-05-04; 2 deleted", try describe(a, try parse(a, &example_daily)));
-    try testing.expectEqualStrings("every 3 months on the third weekend day, 14:00-17:00, from 2008-02-09, 10 times; 2 changed", try describe(a, try parse(a, &example_month_nth)));
-    try testing.expectEqualStrings("every year on day 19 of April, 08:00-08:30, from 2011-04-19, no end; 1 changed", try describe(a, try parse(a, &example_yearly)));
+    try testing.expectEqualStrings("every week on Monday, Thursday, Friday, 10:00-10:30 (series time zone), from 2007-03-26, 12 times", try describe(a, try parse(a, &example_weekly)));
+    try testing.expectEqualStrings("every 3 days, 08:00-08:30 (series time zone), from 2011-04-07 until 2011-05-04; 2 deleted", try describe(a, try parse(a, &example_daily)));
+    try testing.expectEqualStrings("every 3 months on the third weekend day, 14:00-17:00 (series time zone), from 2008-02-09, 10 times; 2 changed", try describe(a, try parse(a, &example_month_nth)));
+    try testing.expectEqualStrings("every year on day 19 of April, 08:00-08:30 (series time zone), from 2011-04-19, no end; 1 changed", try describe(a, try parse(a, &example_yearly)));
+    // an all-day series (a birthday): no times
+    var birthday = try parse(a, &example_yearly);
+    birthday.start_offset = 0;
+    birthday.end_offset = 1440;
+    try testing.expectEqualStrings("every year on day 19 of April, all day, from 2011-04-19, no end; 1 changed", try describe(a, birthday));
 }
 
 test "calendar arithmetic" {

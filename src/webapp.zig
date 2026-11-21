@@ -970,9 +970,13 @@ fn calendar(a: Allocator, out: *List, from: i64, to: i64) Error!void {
     const fa = app.folder_arena.allocator();
     const appts = app.cal orelse blk: {
         const list = try fa.alloc(?calview.Appt, app.msgs.len);
+        // each item is read in a scratch arena: only the appointment fields are kept
+        var scratch = std.heap.ArenaAllocator.init(app.gpa);
+        defer scratch.deinit();
         for (app.msgs, list) |s, *slot| {
+            _ = scratch.reset(.retain_capacity);
             slot.* = null;
-            const m = app.file.?.loadMessage(fa, s.nid) catch continue;
+            const m = app.file.?.loadMessageHeaders(scratch.allocator(), s.nid) catch continue;
             slot.* = calview.load(fa, &m);
         }
         app.cal = list;

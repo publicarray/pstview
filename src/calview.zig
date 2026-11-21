@@ -141,3 +141,32 @@ pub fn occurrences(a: Allocator, appt: Appt, from: i64, to: i64, out: *std.Array
     if (occ.end < from - day_s or occ.start >= to + day_s) return;
     try out.append(a, occ);
 }
+
+test "a recurring all-day series stays on its dates, the moved instance too" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // every April 19 ([MS-OXOCAL] 4.1.1.5, the 2012 instance moved to April 21), as an all-day series
+    var p = try recur.parse(a, &recur.example_yearly);
+    p.start_offset = 0;
+    p.end_offset = 1440;
+    for (p.exceptions) |*e| {
+        e.start = @divFloor(e.start, recur.min_per_day) * recur.min_per_day;
+        e.end = e.start + recur.min_per_day;
+    }
+    const appt: Appt = .{ .nid = 1, .subject = "Birthday", .location = "", .start = 0, .end = 0, .all_day = true, .recurring = true, .pattern = p, .tz = recur.TimeZone.parse(&recur.example_tz) };
+    const year = struct {
+        fn of(y: i64) i64 {
+            return (recur.dayOf(y, 1, 1) - days_1601_to_1970) * day_s;
+        }
+    }.of;
+    var out: std.ArrayList(Occurrence) = .empty;
+    try occurrences(a, appt, year(2012), year(2014), &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(recur.dayOf(2012, 4, 21), out.items[0].day0);
+    try std.testing.expectEqual(recur.dayOf(2012, 4, 22), out.items[0].day1);
+    try std.testing.expect(out.items[0].exception);
+    try std.testing.expectEqual(recur.dayOf(2013, 4, 19), out.items[1].day0);
+    try std.testing.expectEqual(recur.dayOf(2013, 4, 20), out.items[1].day1);
+    try std.testing.expect(out.items[1].all_day);
+}
