@@ -937,6 +937,7 @@ fn decodeFields(a: Allocator, hs: []const Header, out: *std.ArrayList(Field)) vo
                 if (v.len > 0) out.append(a, .{ .group = "SpamAssassin", .key = key, .value = v, .meaning = if (std.mem.eql(u8, key, "required")) "Score at which mail is spam" else if (std.mem.eql(u8, key, "tests")) "Rules that matched" else "" }) catch {};
             }
         } else {
+            if (isVendorDecoded(n)) continue; // decodeVendors
             for (vendor_prefixes) |vp| {
                 if (std.ascii.eqlIgnoreCase(vp.vendor, "Microsoft 365")) continue;
                 if (std.ascii.startsWithIgnoreCase(n, vp.p)) {
@@ -947,6 +948,357 @@ fn decodeFields(a: Allocator, hs: []const Header, out: *std.ArrayList(Field)) vo
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- other filters' verdicts
+//
+// Further checks in the spirit of decode-spam-headers (Mariusz Banach) as used by
+// smtp-header-viewer (MIT licence): verdicts of other filtering products, Microsoft's
+// mailbox-delivery decision, Subject vs Thread-Topic, exposed internal host names and headers
+// this analyser does not recognise. The Barracuda, Mimecast and SpamExperts score bands and the
+// Trend Micro result layout follow that project. Everything is read from the headers only.
+
+/// A filtering product's own verdict; one finding per product (the strongest) is reported.
+const Verdict = struct { vendor: []const u8, sev: Severity, text: []const u8 };
+
+const VendorOut = struct {
+    a: Allocator,
+    /// Decoded fields for the detailed report (null during folder triage).
+    fields: ?*std.ArrayList(Field),
+    verdicts: std.ArrayList(Verdict) = .empty,
+
+    fn field(self: *VendorOut, group: []const u8, key: []const u8, value: []const u8, meaning: []const u8) void {
+        if (value.len == 0) return;
+        if (self.fields) |f| f.append(self.a, .{ .group = group, .key = key, .value = value, .meaning = meaning }) catch {};
+    }
+
+    fn verdict(self: *VendorOut, vendor: []const u8, sev: Severity, comptime fmt: []const u8, args: anytype) void {
+        const text = std.fmt.allocPrint(self.a, fmt, args) catch fmt;
+        for (self.verdicts.items) |*v| if (std.mem.eql(u8, v.vendor, vendor)) {
+            if (@intFromEnum(sev) > @intFromEnum(v.sev)) v.* = .{ .vendor = vendor, .sev = sev, .text = text };
+            return;
+        };
+        self.verdicts.append(self.a, .{ .vendor = vendor, .sev = sev, .text = text }) catch {};
+    }
+};
+
+/// Headers decoded by `decodeVendors` (the generic per-vendor listing skips them).
+const vendor_decoded = [_][]const u8{
+    "X-Barracuda-Spam-Score",           "X-Barracuda-Spam-Status",    "X-Barracuda-Spam-Flag",
+    "X-Mimecast-Spam-Score",            "X-Proofpoint-Spam-Details",  "X-TM-AS-Result",
+    "X-TMASE-Result",                   "X-IMSS-Scan-Details",        "X-TM-AS-User-Blocked-Sender",
+    "X-TM-AS-User-Approved-Sender",     "X-SpamExperts-Class",        "X-SpamExperts-Evidence",
+    "X-Recommended-Action",             "X-Spam-Flag",                "X-Rspamd-Action",
+    "X-Spam-Action",                    "X-Rspamd-Score",             "X-Microsoft-Antispam-Mailbox-Delivery",
+};
+
+fn isVendorDecoded(name: []const u8) bool {
+    for (vendor_decoded) |d| if (std.ascii.eqlIgnoreCase(d, name)) return true;
+    return false;
+}
+
+fn parseNum(s: []const u8) ?f64 {
+    const t = std.mem.trim(u8, s, " \t\"");
+    if (t.len == 0) return null;
+    return std.fmt.parseFloat(f64, t) catch null;
+}
+
+fn yes(s: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, s, " \t"), "yes");
+}
+
+/// Trend Micro "No--4.539-5.0-31-10": verdict, score (may be negative: "--"), threshold,
+/// category, type. Returns up to 5 parts.
+fn trendParts(v: []const u8, out: *[5][]const u8) usize {
+    const s = std.mem.trim(u8, v, " \t");
+    var n: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < out.len) : (i += 1) {
+        if (s[i] != '-' or i == start) continue; // a '-' at the start of a part is its sign
+        out[n] = s[start..i];
+        n += 1;
+        start = i + 1;
+    }
+    if (n < out.len and start < s.len) {
+        out[n] = s[start..];
+        n += 1;
+    }
+    return n;
+}
+
+fn barracudaBand(score: f64) []const u8 {
+    if (score < 3) return "Delivered to the inbox";
+    if (score < 5) return "Delivered, subject tagged [Suspected SPAM]";
+    if (score < 7) return "Held in the Barracuda quarantine";
+    return "Blocked from delivery";
+}
+
+fn barracudaScore(o: *VendorOut, score: f64, shown: []const u8) void {
+    if (score >= 5) o.verdict("Barracuda", .medium, "Barracuda spam score {s}: {s}", .{ shown, barracudaBand(score) });
+    if (score >= 3) o.verdict("Barracuda", .low, "Barracuda spam score {s}: {s}", .{ shown, barracudaBand(score) });
+}
+
+fn mimecastBand(score: f64) []const u8 {
+    if (score < 3) return "Not spam";
+    if (score < 5) return "Low confidence that it is spam";
+    if (score <= 7) return "Medium confidence that it is spam";
+    return "High confidence that it is spam";
+}
+
+const proofpoint_keys = [_]struct { k: []const u8, m: []const u8 }{
+    .{ .k = "rule", .m = "Rule that decided the verdict" },     .{ .k = "policy", .m = "Policy applied" },
+    .{ .k = "score", .m = "Overall score" },                     .{ .k = "spamscore", .m = "Spam score (0-100)" },
+    .{ .k = "phishscore", .m = "Phishing score (0-100)" },       .{ .k = "malwarescore", .m = "Malware score (0-100)" },
+    .{ .k = "suspectscore", .m = "Suspect score" },              .{ .k = "bulkscore", .m = "Bulk mail score" },
+    .{ .k = "impostorscore", .m = "Impostor (BEC) score" },      .{ .k = "adultscore", .m = "Adult content score" },
+    .{ .k = "classifier", .m = "Classifier" },                   .{ .k = "reason", .m = "Reason" },
+};
+
+/// Microsoft's X-Microsoft-Antispam-Mailbox-Delivery fields. Not documented by Microsoft; the
+/// meanings are observations (decode-spam-headers).
+fn mailboxDeliveryMeaning(k: []const u8, v: []const u8) []const u8 {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(k, "dest")) return if (eq(v, "I")) "Delivered to the Inbox" else if (eq(v, "J")) "Delivered to the Junk Email folder" else if (eq(v, "C")) "Delivered to a custom folder" else "Destination folder";
+    if (eq(k, "ucf")) return if (eq(v, "1")) "A user's custom mail rule was applied" else "No user mail rule applied";
+    if (eq(k, "jmr")) return if (eq(v, "1")) "Marked as junk by mail rules" else "Not marked as junk by mail rules";
+    if (eq(k, "OFR")) return if (std.ascii.findIgnoreCase(v, "CustomRules") != null) "An existing folder-move rule was applied" else if (std.ascii.findIgnoreCase(v, "SpamFilterAuthJ") != null) "Marked as spam by a junk filter other than Outlook's" else if (std.ascii.findIgnoreCase(v, "TrustedSenderList") != null) "Sender is on the Safe Senders list" else "Outlook filter rules applied";
+    if (eq(k, "RF")) return if (std.ascii.findIgnoreCase(v, "JunkEmail") != null) "Moved to the Junk Email folder" else "Mailbox rules";
+    if (eq(k, "auth")) return if (eq(v, "1")) "Sender authenticated" else "Sender not authenticated";
+    if (eq(k, "wl")) return if (eq(v, "1")) "Message allow-listed" else "Message not allow-listed";
+    if (eq(k, "dwl")) return if (eq(v, "1")) "Sender's domain allow-listed" else "Sender's domain not allow-listed";
+    return "";
+}
+
+fn decodeVendors(o: *VendorOut, hs: []const Header) void {
+    const a = o.a;
+    const eq = std.ascii.eqlIgnoreCase;
+    for (hs) |h| {
+        const n = h.name;
+        const v = std.mem.trim(u8, h.value, " \t");
+        if (eq(n, "X-Barracuda-Spam-Score")) {
+            const s = parseNum(v) orelse continue;
+            o.field("Barracuda", "Spam score", v, barracudaBand(s));
+            barracudaScore(o, s, v);
+        } else if (eq(n, "X-Barracuda-Spam-Status")) {
+            // "No, SCORE=1.23 using global scores of TAG_LEVEL=3.5 QUARANTINE_LEVEL=1000.0 KILL_LEVEL=5.0 tests=..."
+            const word = std.mem.trim(u8, v[0 .. std.mem.indexOfAny(u8, v, ", ") orelse v.len], " ");
+            o.field("Barracuda", "Spam status", word, if (yes(word)) "Classified as spam" else "Not classified as spam");
+            const score = kv(v, "SCORE", '=', " ,");
+            o.field("Barracuda", "Score", score, "");
+            o.field("Barracuda", "Tag level", kv(v, "TAG_LEVEL", '=', " ,"), "Score at which the subject is tagged");
+            o.field("Barracuda", "Quarantine level", kv(v, "QUARANTINE_LEVEL", '=', " ,"), "Score at which mail is quarantined");
+            o.field("Barracuda", "Kill level", kv(v, "KILL_LEVEL", '=', " ,"), "Score at which mail is blocked");
+            o.field("Barracuda", "Tests", kv(v, "tests", '=', " "), "Rules that matched");
+            if (yes(word)) o.verdict("Barracuda", .medium, "Barracuda classified this as spam{s}{s}", .{ if (score.len > 0) " (score " else "", if (score.len > 0) std.fmt.allocPrint(a, "{s})", .{score}) catch ")" else "" });
+        } else if (eq(n, "X-Barracuda-Spam-Flag")) {
+            o.field("Barracuda", "Spam flag", v, if (yes(v)) "Flagged as spam" else "");
+            if (yes(v)) o.verdict("Barracuda", .medium, "Barracuda flagged this as spam", .{});
+        } else if (eq(n, "X-Mimecast-Spam-Score")) {
+            const s = parseNum(v) orelse continue;
+            o.field("Mimecast", "Spam score", v, mimecastBand(s));
+            if (s > 7) o.verdict("Mimecast", .medium, "Mimecast spam score {s}: high confidence that it is spam", .{v}) else if (s >= 5) o.verdict("Mimecast", .low, "Mimecast spam score {s}: medium confidence that it is spam", .{v});
+        } else if (eq(n, "X-Proofpoint-Spam-Details")) {
+            var it = std.mem.tokenizeAny(u8, v, " \t");
+            var rule: []const u8 = "";
+            while (it.next()) |tok| {
+                const e = std.mem.indexOfScalar(u8, tok, '=') orelse continue;
+                const k = tok[0..e];
+                const val = tok[e + 1 ..];
+                if (eq(k, "rule")) rule = val;
+                for (proofpoint_keys) |pk| if (eq(pk.k, k)) o.field("Proofpoint", pk.k, val, pk.m);
+            }
+            const r = rule;
+            if (r.len == 0 or eq(r, "notspam")) {} else if (std.ascii.findIgnoreCase(r, "phish") != null or std.ascii.findIgnoreCase(r, "malware") != null) {
+                o.verdict("Proofpoint", .high, "Proofpoint verdict: {s}", .{r});
+            } else if (std.ascii.findIgnoreCase(r, "spam") != null or std.ascii.findIgnoreCase(r, "definitive") != null or std.ascii.findIgnoreCase(r, "quarantine") != null) {
+                o.verdict("Proofpoint", .medium, "Proofpoint verdict: {s}", .{r});
+            }
+        } else if (eq(n, "X-TM-AS-Result") or eq(n, "X-TMASE-Result") or eq(n, "X-IMSS-Scan-Details")) {
+            var p: [5][]const u8 = undefined;
+            const c = trendParts(v, &p);
+            if (c == 0) continue;
+            const is_spam = yes(p[0]);
+            const phish = c > 4 and std.mem.eql(u8, std.mem.trim(u8, p[4], " "), "2");
+            o.field("Trend Micro", n, p[0], if (is_spam) "Classified as spam" else if (eq(p[0], "No")) "Not classified as spam" else "");
+            if (c > 1) o.field("Trend Micro", "Score", p[1], "");
+            if (c > 2) o.field("Trend Micro", "Threshold", p[2], "Score at which mail is spam");
+            if (c > 3) o.field("Trend Micro", "Category", p[3], "");
+            if (c > 4) o.field("Trend Micro", "Type", p[4], if (phish) "Phishing" else if (std.mem.eql(u8, std.mem.trim(u8, p[4], " "), "1")) "Spam" else "");
+            if (is_spam) o.verdict("Trend Micro", if (phish) .high else .medium, "Trend Micro classified this as {s}{s}{s}", .{ if (phish) "phishing" else "spam", if (c > 1) " (score " else "", if (c > 1) std.fmt.allocPrint(a, "{s})", .{p[1]}) catch ")" else "" });
+        } else if (eq(n, "X-TM-AS-User-Blocked-Sender")) {
+            o.field("Trend Micro", "User-blocked sender", v, if (yes(v)) "Sender is on a blocked-senders list" else "");
+            if (yes(v)) o.verdict("Trend Micro", .medium, "Trend Micro: the sender is on a blocked-senders list", .{});
+        } else if (eq(n, "X-TM-AS-User-Approved-Sender")) {
+            o.field("Trend Micro", "User-approved sender", v, if (yes(v)) "Sender is on an approved-senders list" else "");
+        } else if (eq(n, "X-SpamExperts-Class")) {
+            const m: []const u8 = if (eq(v, "spam")) "Classified as spam" else if (eq(v, "unsure")) "Unsure: not confident enough to block" else if (eq(v, "ham")) "Not spam" else "";
+            o.field("SpamExperts", "Class", v, m);
+            if (eq(v, "spam")) o.verdict("SpamExperts", .medium, "SpamExperts classified this as spam", .{}) else if (eq(v, "unsure")) o.verdict("SpamExperts", .low, "SpamExperts was unsure whether this is spam", .{});
+        } else if (eq(n, "X-SpamExperts-Evidence")) {
+            // "... (0.95)": score in the last parentheses
+            const close = std.mem.lastIndexOfScalar(u8, v, ')') orelse continue;
+            const open = std.mem.lastIndexOfScalar(u8, v[0..close], '(') orelse continue;
+            const s = parseNum(v[open + 1 .. close]) orelse continue;
+            o.field("SpamExperts", "Evidence score", v[open + 1 .. close], if (s < 0.5) "Considered harmless" else if (s < 0.9) "Raised some suspicion (not quarantined)" else "Quarantined");
+            if (s >= 0.9) o.verdict("SpamExperts", .medium, "SpamExperts evidence score {s}: quarantined", .{v[open + 1 .. close]});
+        } else if (eq(n, "X-Recommended-Action")) {
+            o.field("SpamExperts", "Recommended action", v, if (eq(v, "accept")) "Accept" else if (eq(v, "drop") or eq(v, "reject")) "Drop the message" else "");
+            if (eq(v, "drop") or eq(v, "reject")) o.verdict("SpamExperts", .medium, "Filter recommended dropping this message (X-Recommended-Action: {s})", .{v});
+        } else if (eq(n, "X-Spam-Flag")) {
+            o.field("SpamAssassin", "Spam flag", v, if (yes(v)) "Flagged as spam" else "Not flagged");
+            if (yes(v)) o.verdict("SpamAssassin", .medium, "Spam filter flagged this as spam (X-Spam-Flag: YES)", .{});
+        } else if (eq(n, "X-Rspamd-Action") or eq(n, "X-Spam-Action")) {
+            const reject = std.ascii.startsWithIgnoreCase(v, "reject");
+            const tagged = std.ascii.startsWithIgnoreCase(v, "add header") or std.ascii.startsWithIgnoreCase(v, "rewrite subject");
+            const soft = std.ascii.startsWithIgnoreCase(v, "soft reject") or std.ascii.startsWithIgnoreCase(v, "greylist");
+            o.field("Rspamd", "Action", v, if (reject) "Reject" else if (tagged) "Tagged as spam" else if (soft) "Temporarily deferred" else if (std.ascii.startsWithIgnoreCase(v, "no action")) "Not spam" else "");
+            if (reject or tagged) o.verdict("Rspamd", .medium, "Rspamd action \"{s}\": classified as spam", .{v}) else if (soft) o.verdict("Rspamd", .low, "Rspamd action \"{s}\"", .{v});
+        } else if (eq(n, "X-Rspamd-Score")) {
+            o.field("Rspamd", "Score", v, "");
+        } else if (eq(n, "X-Microsoft-Antispam-Mailbox-Delivery")) {
+            const g = "Microsoft 365 mailbox delivery";
+            var junk = false;
+            var user_rule = false;
+            var folder_rule = false;
+            for (splitTop(a, v, ';')) |item| {
+                const c = std.mem.indexOfScalar(u8, item, ':') orelse continue;
+                const k = std.mem.trim(u8, item[0..c], " ");
+                const val = std.mem.trim(u8, item[c + 1 ..], " ");
+                if (eq(k, "dest") and eq(val, "J")) junk = true;
+                if (eq(k, "ucf") and eq(val, "1")) user_rule = true;
+                if (eq(k, "OFR") and std.ascii.findIgnoreCase(val, "CustomRules") != null) folder_rule = true;
+                const m = mailboxDeliveryMeaning(k, val);
+                if (m.len > 0) o.field(g, k, val, m);
+            }
+            if (junk and user_rule) o.verdict(g, .info, "A user's mail rule moved this message to the Junk Email folder", .{}) else if (junk) o.verdict(g, .info, "Microsoft 365 delivered this to the Junk Email folder", .{}) else if (folder_rule) o.verdict(g, .info, "A user's folder rule moved this message on delivery", .{});
+        }
+    }
+}
+
+// ---------------------------------------------------------------- further checks
+
+const reply_prefixes = [_][]const u8{ "re:", "fw:", "fwd:", "aw:", "wg:", "sv:", "vs:", "antw:", "rv:", "tr:", "res:", "enc:" };
+
+fn isReplyPrefix(tok: []const u8) bool {
+    for (reply_prefixes) |p| if (std.ascii.eqlIgnoreCase(tok, p)) return true;
+    return false;
+}
+
+/// Drop leading "RE:", "FW:" ... (also when written without a following space).
+fn stripReplyPrefixes(s0: []const u8) []const u8 {
+    var s = std.mem.trim(u8, s0, " \t");
+    outer: while (true) {
+        for (reply_prefixes) |p| if (std.ascii.startsWithIgnoreCase(s, p)) {
+            s = std.mem.trim(u8, s[p.len..], " \t");
+            continue :outer;
+        };
+        return s;
+    }
+}
+
+/// Text added to `subject` around `topic`, without reply prefixes ("" when nothing else was added).
+fn subjectTag(a: Allocator, subject: []const u8, pos: usize, topic_len: usize) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{ subject[0..pos], subject[pos + topic_len ..] }) |part| {
+        var it = std.mem.tokenizeAny(u8, part, " \t");
+        while (it.next()) |tok| {
+            if (isReplyPrefix(tok)) continue;
+            if (out.items.len > 0) out.append(a, ' ') catch {};
+            out.appendSlice(a, tok) catch {};
+        }
+    }
+    return out.items;
+}
+
+/// Thread-Topic keeps the subject as the sender's mail client wrote it (without RE:/FW:). A
+/// different Subject means it was changed on the way, typically by a gateway tagging external mail.
+fn checkThreadTopic(a: Allocator, subject: []const u8, thread_topic: []const u8) ?[]const u8 {
+    if (subject.len == 0 or thread_topic.len == 0) return null;
+    const s = stripReplyPrefixes(subject);
+    const t = stripReplyPrefixes(thread_topic);
+    if (t.len == 0 or std.ascii.eqlIgnoreCase(s, t)) return null;
+    if (std.ascii.findIgnoreCase(s, t)) |p| {
+        const added = subjectTag(a, s, p, t.len);
+        if (added.len == 0) return null;
+        return std.fmt.allocPrint(a, "Subject was changed in transit: \"{s}\" was added (Thread-Topic: \"{s}\")", .{ added, t }) catch null;
+    }
+    return std.fmt.allocPrint(a, "Subject differs from Thread-Topic \"{s}\": the subject was changed after it was written", .{t}) catch null;
+}
+
+const internal_suffixes = [_][]const u8{ ".local", ".lan", ".localdomain", ".internal", ".intranet", ".corp", ".home", ".home.arpa", ".private" };
+
+/// A host name that only means something inside an organisation (a computer or internal server
+/// name exposed in a Received header): no dot at all, or an internal-only suffix.
+fn isInternalHostName(host0: []const u8) bool {
+    const host = std.mem.trim(u8, host0, " []().");
+    if (host.len < 2 or looksLikeIp(host)) return false;
+    for ([_][]const u8{ "localhost", "localhost.localdomain", "unknown", "127.0.0.1" }) |x| if (std.ascii.eqlIgnoreCase(host, x)) return false;
+    for (host) |c| if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '.' or c == '_')) return false;
+    if (std.mem.indexOfScalar(u8, host, '.') == null) return true;
+    for (internal_suffixes) |sfx| if (std.ascii.endsWithIgnoreCase(host, sfx)) return true;
+    return false;
+}
+
+/// Headers that are standard or decoded elsewhere; everything else is listed as "not recognised".
+const known_headers = [_][]const u8{
+    "Received",                 "Return-Path",                    "From",                        "To",                    "Cc",                  "Bcc",
+    "Subject",                  "Date",                           "Message-ID",                  "In-Reply-To",           "References",          "Reply-To",
+    "Sender",                   "MIME-Version",                   "Delivered-To",                "X-Original-To",         "Envelope-To",         "Received-SPF",
+    "Authentication-Results",   "Authentication-Results-Original", "DKIM-Signature",             "DomainKey-Signature",   "X-Google-DKIM-Signature", "DKIM-Filter",
+    "Thread-Topic",             "Thread-Index",                   "Importance",                  "Priority",              "X-Priority",          "X-MSMail-Priority",
+    "Sensitivity",              "Precedence",                     "Auto-Submitted",              "X-Auto-Response-Suppress", "X-Mailer",         "User-Agent",
+    "X-Received",               "X-Originating-IP",               "X-Originating-Client",        "X-OriginatorOrg",       "X-OriginalArrivalTime", "Accept-Language",
+    "Disposition-Notification-To", "Return-Receipt-To",           "Feedback-ID",                 "X-Feedback-ID",         "X-CSA-Complaints",    "X-Complaints-To",
+    "X-Report-Abuse",           "X-Report-Abuse-To",              "X-Abuse",                     "Organization",          "Comments",            "Keywords",
+    "Errors-To",                "X-Virus-Scanned",                "X-Virus-Status",              "Require-Recipient-Valid-Since", "msip_labels", "X-Entity-ID",
+    "X-Forwarded-Message-Id",   "X-Sender",                       "X-Return-Path",               "X-Envelope-From",       "X-Envelope-To",       "Archived-At",
+    "Autocrypt",                "OpenPGP",                        "X-MimeOLE",                   "X-UIDL",                "Status",              "X-Status",
+    "X-Mozilla-Status",         "X-Mozilla-Status2",              "X-Mozilla-Keys",              "X-Account-Key",         "X-Gmail-Labels",      "X-GM-THRID",
+    "X-Scanned-By",             "X-MSFBL",                        "X-Inky",                      "X-InkyPhishWall",
+};
+
+const known_prefixes = [_][]const u8{
+    "Content-",      "List-",      "Resent-",       "ARC-",          "X-MS-",        "X-Microsoft-",    "X-Forefront-",   "X-Exchange-",
+    "X-Google-",     "X-Gm-",      "X-Mailgun-",    "X-SG-",         "X-SES-",       "X-MC-",           "X-Mandrill-",    "X-LinkedIn-",
+    "X-CMAE-",       "X-VADE-",    "X-VR-",         "X-TM-",         "X-TMASE-",     "X-IMSS-",         "X-IronPort-",    "IronPort-",
+    "X-IPAS-",       "X-Proofpoint-", "X-Barracuda-", "X-Mimecast-", "X-Sophos-",    "X-SpamExperts-",  "X-Rspamd-",      "X-Spam-",
+    "X-Inky-",       "X-MailGuard-", "X-SEG-",      "dlp-",          "X-Zoho-",      "X-Apple-",        "X-YMail-",       "X-Yahoo-",
+    "X-Brightmail-", "X-Spamd-",   "X-Virus-",      "X-Amavis-",     "X-CNFS-",
+};
+
+fn isKnownHeader(name: []const u8) bool {
+    for (known_headers) |k| if (std.ascii.eqlIgnoreCase(k, name)) return true;
+    for (known_prefixes) |p| if (std.ascii.startsWithIgnoreCase(name, p)) return true;
+    return isVendorDecoded(name);
+}
+
+/// Words that a filter writes into its own headers when it suspects a message.
+const filter_words = [_][]const u8{ "phish", "phishing", "phished", "malware", "malicious", "infected", "spoof", "spoofed", "spoofing", "impersonation", "fraud", "fraudulent", "scam", "suspicious", "quarantine", "quarantined", "blacklisted", "blocklisted" };
+
+/// First filter word in `v` as a whole word ("phishscore=0" and "phish=0" do not count).
+fn filterWord(v: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < v.len) {
+        while (i < v.len and !std.ascii.isAlphabetic(v[i])) i += 1;
+        const s = i;
+        while (i < v.len and std.ascii.isAlphanumeric(v[i])) i += 1;
+        const w = v[s..i];
+        if (w.len == 0) break;
+        if (i < v.len and (v[i] == '=' or v[i] == ':' or v[i] == '_')) continue;
+        if (s > 0 and v[s - 1] == '_') continue;
+        for (filter_words) |fw| if (std.ascii.eqlIgnoreCase(w, fw)) return fw;
+    }
+    return null;
+}
+
+/// Headers whose values are not a filter's own words (addresses, subjects, signatures, results).
+fn skipForWords(name: []const u8) bool {
+    const skip = [_][]const u8{ "Received", "X-Received", "Received-SPF", "Subject", "Thread-Topic", "From", "To", "Cc", "Bcc", "Reply-To", "Sender", "Return-Path", "References", "Message-ID", "In-Reply-To", "Delivered-To", "X-Original-To", "Thread-Index", "Feedback-ID", "msip_labels" };
+    for (skip) |k| if (std.ascii.eqlIgnoreCase(k, name)) return true;
+    const pre = [_][]const u8{ "Authentication-Results", "ARC-", "DKIM-", "X-Google-DKIM", "List-", "Content-", "X-Forefront-", "X-Microsoft-Antispam", "X-MS-" };
+    for (pre) |p| if (std.ascii.startsWithIgnoreCase(name, p)) return true;
+    return isVendorDecoded(name);
 }
 
 // ---------------------------------------------------------------- indicators
@@ -1093,6 +1445,7 @@ pub fn analyseDetailed(a: Allocator, in: Input, ctx: Context) Analysis {
 fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
     var an: Analysis = .{};
     var findings: std.ArrayList(Finding) = .empty;
+    var vendor_fields: std.ArrayList(Field) = .empty;
     const add = struct {
         fn f(al: Allocator, fl: *std.ArrayList(Finding), sev: Severity, comptime fmt: []const u8, args: anytype) void {
             fl.append(al, .{ .sev = sev, .text = std.fmt.allocPrint(al, fmt, args) catch fmt }) catch {};
@@ -1224,6 +1577,22 @@ fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
             }
             break;
         }
+        // internal computer / server names exposed by the path (not the origin already named above)
+        {
+            var shown: usize = 0;
+            for (an.hops, 0..) |h, i| {
+                if (shown >= 3) break;
+                if (!std.ascii.eqlIgnoreCase(h.header, "Received") or !isInternalHostName(h.from)) continue;
+                if (std.ascii.eqlIgnoreCase(h.from, an.origin_device)) continue;
+                var dup = false;
+                for (an.hops[0..i]) |p| if (std.ascii.eqlIgnoreCase(p.from, h.from) and std.ascii.eqlIgnoreCase(p.header, "Received")) {
+                    dup = true;
+                };
+                if (dup) continue;
+                add(a, &findings, .info, "Internal host name exposed in a Received header: \"{s}\" (hop {d}{s})", .{ std.mem.trim(u8, h.from, " []()."), i + 1, if (i == 0) ", possibly the sender's computer" else "" });
+                shown += 1;
+            }
+        }
 
         // --- authentication
         if (std.ascii.startsWithIgnoreCase(an.dmarc, "fail")) add(a, &findings, .high, "DMARC failed for {s} - sender not authorised to use this domain", .{an.from_domain});
@@ -1250,6 +1619,23 @@ fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
         if (an.scl.len > 0) if (std.fmt.parseInt(i32, an.scl, 10)) |v| {
             if (v >= 5) add(a, &findings, .medium, "Spam confidence level {d}", .{v});
         } else |_| {};
+
+        // --- other filtering products' own verdicts (one finding each)
+        {
+            var vo: VendorOut = .{ .a = a, .fields = if (detail) &vendor_fields else null };
+            decodeVendors(&vo, hs);
+            if (std.ascii.startsWithIgnoreCase(first(hs, "X-Spam-Status"), "yes"))
+                vo.verdict("SpamAssassin", .medium, "SpamAssassin classified this as spam (X-Spam-Status: Yes)", .{});
+            for (vo.verdicts.items) |v| add(a, &findings, v.sev, "{s}", .{v.text});
+        }
+
+        // --- subject changed in transit / sent on behalf of someone else
+        if (checkThreadTopic(a, an.subject, decodeWords(a, first(hs, "Thread-Topic")))) |t| add(a, &findings, .info, "{s}", .{t});
+        if (an.sender.len > 0) {
+            const sd = domainOf(parseMailbox(a, an.sender).addr);
+            if (sd.len > 0 and an.from_domain.len > 0 and !std.ascii.eqlIgnoreCase(baseDomain(sd), baseDomain(an.from_domain)))
+                add(a, &findings, .info, "Sent on behalf of {s} by a different domain (Sender: {s})", .{ an.from_addr, an.sender });
+        }
 
         // --- envelope / reply mismatches
         const rp_d = domainOf(an.return_path);
@@ -1320,6 +1706,22 @@ fn analyseOpts(a: Allocator, in: Input, ctx: Context, detail: bool) Analysis {
         }
         var fields: std.ArrayList(Field) = .empty;
         decodeFields(a, hs, &fields);
+        fields.appendSlice(a, vendor_fields.items) catch {};
+        // headers not recognised (custom or unusual ones worth a look) and filter words in them
+        {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            var worded: usize = 0;
+            for (hs) |h| {
+                if (!isKnownHeader(h.name)) {
+                    const gop = seen.getOrPut(a, std.ascii.allocLowerString(a, h.name) catch h.name) catch continue;
+                    if (!gop.found_existing) fields.append(a, .{ .group = "Headers not recognised", .key = h.name, .value = h.value, .meaning = "Not a standard header; review in context" }) catch {};
+                }
+                if (worded < 5 and !skipForWords(h.name)) if (filterWord(h.value)) |w| {
+                    add(a, &findings, .info, "Header {s} contains the word \"{s}\"", .{ h.name, w });
+                    worded += 1;
+                };
+            }
+        }
         // one block per source, in order of first appearance (Microsoft headers are interleaved)
         {
             var grouped: std.ArrayList(Field) = .empty;
@@ -1520,4 +1922,118 @@ test "detailed analysis: alignment, decoded Forefront fields, indicators" {
     };
     try testing.expectEqual(@as(usize, 2), ips);
     try testing.expectEqual(@as(usize, 1), urls);
+}
+
+test "Trend Micro result: negative score and phishing type" {
+    var p: [5][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 5), trendParts("No--4.539-5.0-31-10", &p));
+    try testing.expectEqualStrings("No", p[0]);
+    try testing.expectEqualStrings("-4.539", p[1]);
+    try testing.expectEqualStrings("5.0", p[2]);
+    try testing.expectEqualStrings("10", p[4]);
+    try testing.expectEqual(@as(usize, 3), trendParts("Yes-12.5-5.0", &p));
+    try testing.expectEqualStrings("12.5", p[1]);
+    try testing.expectEqual(@as(usize, 1), trendParts("-", &p));
+    try testing.expectEqual(@as(usize, 0), trendParts("", &p));
+    _ = trendParts("------", &p); // must not go out of bounds
+}
+
+test "other filters' verdicts: one finding per product, fields decoded" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw =
+        "X-Barracuda-Spam-Score: 5.52\r\n" ++
+        "X-Barracuda-Spam-Status: Yes, SCORE=5.52 using global scores of TAG_LEVEL=3.5 QUARANTINE_LEVEL=1000.0 KILL_LEVEL=5.0 tests=BSF_SC0_MISMATCH_TO\r\n" ++
+        "X-Mimecast-Spam-Score: 2\r\n" ++
+        "X-Proofpoint-Spam-Details: rule=phish policy=default score=90 spamscore=10 phishscore=99 malwarescore=0\r\n" ++
+        "X-TM-AS-Result: No--4.539-5.0-31-10\r\n" ++
+        "X-SpamExperts-Class: unsure\r\n" ++
+        "X-Microsoft-Antispam-Mailbox-Delivery: ucf:1;jmr:0;auth:0;dest:J;OFR:CustomRules;ENG:(910001)(944506478);\r\n" ++
+        "From: a@example.com\r\nTo: b@example.org\r\nSubject: Hi\r\n";
+    const an = analyseDetailed(a, inputFromHeaders(a, raw), .{});
+    var barracuda: usize = 0;
+    var proofpoint_high = false;
+    var trend = false;
+    var mimecast = false;
+    var junk_rule = false;
+    var spamexperts_low = false;
+    for (an.findings) |f| {
+        if (std.mem.startsWith(u8, f.text, "Barracuda")) barracuda += 1;
+        if (std.mem.startsWith(u8, f.text, "Proofpoint verdict: phish") and f.sev == .high) proofpoint_high = true;
+        if (std.mem.startsWith(u8, f.text, "Trend Micro")) trend = true;
+        if (std.mem.startsWith(u8, f.text, "Mimecast")) mimecast = true;
+        if (std.mem.eql(u8, f.text, "A user's mail rule moved this message to the Junk Email folder")) junk_rule = true;
+        if (std.mem.startsWith(u8, f.text, "SpamExperts was unsure") and f.sev == .low) spamexperts_low = true;
+    }
+    try testing.expectEqual(@as(usize, 1), barracuda);
+    try testing.expect(proofpoint_high);
+    try testing.expect(!trend); // "No" verdict
+    try testing.expect(!mimecast); // score 2
+    try testing.expect(junk_rule);
+    try testing.expect(spamexperts_low);
+    try testing.expectEqual(Severity.high, an.risk);
+    var phishscore = false;
+    var dest = false;
+    var raw_barracuda = false;
+    for (an.fields) |f| {
+        if (std.mem.eql(u8, f.key, "phishscore")) phishscore = std.mem.eql(u8, f.value, "99");
+        if (std.mem.eql(u8, f.key, "dest")) dest = std.mem.eql(u8, f.meaning, "Delivered to the Junk Email folder");
+        if (std.mem.eql(u8, f.key, "X-Barracuda-Spam-Score")) raw_barracuda = true;
+    }
+    try testing.expect(phishscore);
+    try testing.expect(dest);
+    try testing.expect(!raw_barracuda); // decoded, not also listed raw
+}
+
+test "Subject vs Thread-Topic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expect(checkThreadTopic(a, "RE: Budget", "Budget") == null);
+    try testing.expect(checkThreadTopic(a, "Fwd:RE: budget ", "Budget") == null);
+    try testing.expect(checkThreadTopic(a, "Budget", "") == null);
+    try testing.expectEqualStrings("Subject was changed in transit: \"[EXTERNAL]\" was added (Thread-Topic: \"Budget\")", checkThreadTopic(a, "[EXTERNAL] RE: Budget", "Budget").?);
+    try testing.expect(std.mem.startsWith(u8, checkThreadTopic(a, "Invoice overdue", "Lunch").?, "Subject differs from Thread-Topic"));
+}
+
+test "internal host names, filter words, unrecognised headers" {
+    try testing.expect(isInternalHostName("LAPTOP-7QX2"));
+    try testing.expect(isInternalHostName("exch01.corp.local"));
+    try testing.expect(!isInternalHostName("mail.example.com"));
+    try testing.expect(!isInternalHostName("localhost"));
+    try testing.expect(!isInternalHostName("[10.0.0.5]"));
+    try testing.expect(!isInternalHostName("2603:10c6:10:5::20"));
+    try testing.expectEqualStrings("phishing", filterWord("Verdict: likely phishing, held").?);
+    try testing.expect(filterWord("phishscore=0 malwarescore=0") == null);
+    try testing.expect(filterWord("phish=0 spoof:1") == null);
+    try testing.expect(filterWord("") == null);
+    try testing.expect(isKnownHeader("x-ms-exchange-organization-scl"));
+    try testing.expect(isKnownHeader("Content-Type"));
+    try testing.expect(!isKnownHeader("X-PHP-Originating-Script"));
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw =
+        "Received: from mx.example.org (mx.example.org [203.0.113.5]) by mx.fabrikam.com; Thu, 5 Nov 2026 08:00:10 +0000\r\n" ++
+        "Received: from DESKTOP-ABC (unknown [192.168.1.20]) by mx.example.org; Thu, 5 Nov 2026 08:00:00 +0000\r\n" ++
+        "X-PHP-Originating-Script: 1000:mailer.php\r\nX-Gateway-Verdict: suspicious link\r\n" ++
+        "From: a@example.org\r\nSender: bulk@esp.example\r\nTo: b@fabrikam.com\r\nSubject: Hi\r\n";
+    const an = analyseDetailed(a, inputFromHeaders(a, raw), .{});
+    var host = false;
+    var word = false;
+    var behalf = false;
+    for (an.findings) |f| {
+        if (std.mem.indexOf(u8, f.text, "\"DESKTOP-ABC\" (hop 1, possibly the sender's computer)") != null) host = true;
+        if (std.mem.eql(u8, f.text, "Header X-Gateway-Verdict contains the word \"suspicious\"")) word = true;
+        if (std.mem.startsWith(u8, f.text, "Sent on behalf of a@example.org")) behalf = true;
+    }
+    try testing.expect(host and word and behalf);
+    try testing.expectEqual(Severity.none, an.risk); // all informational
+    var unusual: usize = 0;
+    for (an.fields) |f| if (std.mem.eql(u8, f.group, "Headers not recognised")) {
+        unusual += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), unusual);
 }
