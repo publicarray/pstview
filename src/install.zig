@@ -25,6 +25,10 @@ pub const Layout = struct {
     dir: []const u8,
     /// Start menu shortcut (.lnk); empty = none.
     shortcut: []const u8,
+    /// Where uninstall moves the exes it cannot delete because they are running (a folder under
+    /// %TEMP%, on the same drive as `dir` so the move is a rename); emptied by later installs and
+    /// uninstalls. Empty = none.
+    trash: []const u8 = "",
     /// Prefix for every HKCU key ("" = the real locations).
     reg_root: []const u8 = "",
     /// Tell Explorer that file associations changed.
@@ -34,9 +38,13 @@ pub const Layout = struct {
 pub fn defaultLayout(a: Allocator) !Layout {
     const programs = try knownFolder(a, &w.FOLDERID_UserProgramFiles);
     const start = try knownFolder(a, &w.FOLDERID_Programs);
+    var buf: [600]u16 = undefined;
+    const n = w.GetTempPathW(buf.len, &buf);
+    const temp = if (n == 0 or n >= buf.len) "" else try std.unicode.wtf16LeToWtf8Alloc(a, buf[0..n]);
     return .{
         .dir = try std.fs.path.join(a, &.{ programs, "pstview" }),
         .shortcut = try std.fs.path.join(a, &.{ start, "pstview.lnk" }),
+        .trash = if (temp.len == 0) "" else try std.fs.path.join(a, &.{ temp, "pstview", "uninstalled" }),
     };
 }
 
@@ -81,6 +89,7 @@ pub const InstallError = error{ CopyFailed, InstallDir } || RegistryError || All
 pub fn install(a: Allocator, io: std.Io, l: Layout, version: []const u8) InstallError!void {
     const self = selfPath(a) catch return error.CopyFailed;
     const exe = try installedExe(a, l);
+    emptyTrash(a, l);
     try makeDir(a, l.dir);
     var size: u64 = 0;
     if (!std.ascii.eqlIgnoreCase(self, exe)) try copy(a, self, exe);
@@ -146,7 +155,8 @@ pub fn install(a: Allocator, io: std.Io, l: Layout, version: []const u8) Install
 pub const Removal = enum {
     /// Files removed.
     removed,
-    /// The running exe is the installed copy: its folder is removed after pstview exits.
+    /// The running exe is the installed copy: it was moved out of the install folder (to
+    /// `Layout.trash`) and pstview should now exit.
     after_exit,
 };
 
@@ -174,18 +184,47 @@ pub fn uninstall(a: Allocator, l: Layout) !Removal {
 
     if (l.shortcut.len > 0) _ = w.DeleteFileW(try wz(a, l.shortcut));
 
-    const exe = try installedExe(a, l);
-    const pstx = try std.fs.path.join(a, &.{ l.dir, "pstx.exe" });
-    if (runningInstalled(a, l)) {
-        // a running exe cannot delete itself: let cmd.exe do it once this process has exited
-        const args = try std.fmt.allocPrint(a, "/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{s}\" \"{s}\" & rd \"{s}\"", .{ exe, pstx, l.dir });
-        _ = w.ShellExecuteW(null, w.L("open"), w.L("cmd.exe"), try wz(a, args), null, w.SW_HIDE);
-        return .after_exit;
-    }
-    _ = w.DeleteFileW(try wz(a, exe));
-    _ = w.DeleteFileW(try wz(a, pstx));
+    const running = runningInstalled(a, l);
+    emptyTrash(a, l);
+    try removeExe(a, l, "pstview.exe");
+    try removeExe(a, l, "pstx.exe");
     _ = w.RemoveDirectoryW(try wz(a, l.dir)); // fails harmlessly if anything else is in it
-    return .removed;
+    return if (running) .after_exit else .removed;
+}
+
+/// Delete `name` from the install folder. A running exe cannot be deleted, but it can be renamed:
+/// it is moved to `Layout.trash` instead (what a later install or uninstall deletes, as does the
+/// cleanup of %TEMP%). No other process is started for this.
+fn removeExe(a: Allocator, l: Layout, name: []const u8) Allocator.Error!void {
+    const path = try wz(a, try std.fs.path.join(a, &.{ l.dir, name }));
+    if (w.DeleteFileW(path) != 0 or l.trash.len == 0) return;
+    if (w.GetFileAttributesW(path) == w.INVALID_FILE_ATTRIBUTES) return; // was not there
+    try makeDirs(a, l.trash);
+    const to = try std.fs.path.join(a, &.{ l.trash, name });
+    if (w.MoveFileExW(path, try wz(a, to), w.MOVEFILE_REPLACE_EXISTING) != 0) return;
+    // an earlier uninstalled copy of the same name is still running: a name of its own
+    const unique = try std.fmt.allocPrint(a, "{s}.{d}", .{ to, w.GetCurrentProcessId() });
+    _ = w.MoveFileExW(path, try wz(a, unique), w.MOVEFILE_REPLACE_EXISTING);
+}
+
+/// Delete what earlier uninstalls moved to `Layout.trash` (copies that still run stay).
+fn emptyTrash(a: Allocator, l: Layout) void {
+    if (l.trash.len == 0) return;
+    const pattern = wz(a, std.fs.path.join(a, &.{ l.trash, "*" }) catch return) catch return;
+    var fd: w.WIN32_FIND_DATAW = undefined;
+    const h = w.FindFirstFileW(pattern, &fd);
+    if (h == w.INVALID_HANDLE_VALUE) return;
+    defer _ = w.FindClose(h);
+    while (true) {
+        const n = std.mem.indexOfScalar(u16, &fd.cFileName, 0) orelse fd.cFileName.len;
+        if (fd.dwFileAttributes & w.FILE_ATTRIBUTE_DIRECTORY == 0) {
+            const file = std.unicode.wtf16LeToWtf8Alloc(a, fd.cFileName[0..n]) catch break;
+            const p = std.fs.path.join(a, &.{ l.trash, file }) catch break;
+            _ = w.DeleteFileW(wz(a, p) catch break);
+        }
+        if (w.FindNextFileW(h, &fd) == 0) break;
+    }
+    _ = w.RemoveDirectoryW(wz(a, l.trash) catch return);
 }
 
 // ================================================================ helpers
@@ -229,6 +268,16 @@ fn fileSize(io: std.Io, path: []const u8) u64 {
 
 fn makeDir(a: Allocator, path: []const u8) InstallError!void {
     if (w.CreateDirectoryW(try wz(a, path), null) == 0 and w.GetLastError() != w.ERROR_ALREADY_EXISTS) return error.InstallDir;
+}
+
+/// `path` and the folders above it that are missing.
+fn makeDirs(a: Allocator, path: []const u8) Allocator.Error!void {
+    const p = try wz(a, path);
+    if (w.CreateDirectoryW(p, null) != 0 or w.GetLastError() == w.ERROR_ALREADY_EXISTS) return;
+    if (std.fs.path.dirname(path)) |parent| if (parent.len < path.len) {
+        try makeDirs(a, parent);
+        _ = w.CreateDirectoryW(p, null);
+    };
 }
 
 fn copy(a: Allocator, src: []const u8, dst: []const u8) InstallError!void {

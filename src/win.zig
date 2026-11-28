@@ -497,6 +497,25 @@ pub extern "kernel32" fn CopyFileW(src: [*:0]const u16, dst: [*:0]const u16, fai
 pub extern "kernel32" fn CreateDirectoryW(path: [*:0]const u16, sa: ?*anyopaque) callconv(WINAPI) BOOL;
 pub extern "kernel32" fn DeleteFileW(path: [*:0]const u16) callconv(WINAPI) BOOL;
 pub extern "kernel32" fn RemoveDirectoryW(path: [*:0]const u16) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: [*:0]const u16, flags: u32) callconv(WINAPI) BOOL;
+pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+pub const WIN32_FIND_DATAW = extern struct {
+    dwFileAttributes: u32,
+    ftCreationTime: [2]u32,
+    ftLastAccessTime: [2]u32,
+    ftLastWriteTime: [2]u32,
+    nFileSizeHigh: u32,
+    nFileSizeLow: u32,
+    dwReserved0: u32,
+    dwReserved1: u32,
+    cFileName: [260]u16,
+    cAlternateFileName: [14]u16,
+};
+pub extern "kernel32" fn FindFirstFileW(pattern: [*:0]const u16, data: *WIN32_FIND_DATAW) callconv(WINAPI) ?*anyopaque;
+pub extern "kernel32" fn FindNextFileW(h: ?*anyopaque, data: *WIN32_FIND_DATAW) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn FindClose(h: ?*anyopaque) callconv(WINAPI) BOOL;
+pub extern "kernel32" fn GetCurrentProcessId() callconv(WINAPI) u32;
+pub const INVALID_HANDLE_VALUE: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize));
 pub extern "kernel32" fn GetFileAttributesW(path: [*:0]const u16) callconv(WINAPI) u32;
 pub extern "kernel32" fn GetLastError() callconv(WINAPI) u32;
 pub const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
